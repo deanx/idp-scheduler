@@ -42,3 +42,25 @@ Profile: standard
 - Board: none (boardless — state tracked in docs/state/ only)
 
 > Switch to a Trello mirror later with `/board-adopt` if you want one; the pipeline runs fully boardless.
+
+## External services
+| Service | Purpose | Credential | Status |
+|---|---|---|---|
+| MuleSoft Anypoint IDP | Source of extraction output under test (Epic A adapter) | OAuth client secret | missing — not yet configured |
+| Evaluation platform (Langfuse or Opik — undecided, see spike) | Golden-set storage, run tracking, regression gate (Epic D) | API key | missing — not yet configured; platform choice also open, resolve during `/design` |
+
+> Solo mode: no owner assignment per credential. Escalate a missing credential to Mestre when it starts blocking a story.
+
+## Squad agents
+Solo mode — no per-human role assignment. Each role below is driven by whoever runs the corresponding command.
+
+| Agent | Role |
+|---|---|
+| Feliz | Product/business analysis — `/brief`, `/discover` |
+| Soneca | Solutions architecture, ADRs, NFRs — `/design` |
+| Dunga | Planning, board/state tracking — `/plan` |
+| Dengoso | Implementation — `/implement` |
+| Atchim | Independent code review — correctness/readability/architecture/security/performance |
+| Branca | Resilience & prompt-security red-team — `/harden` |
+| Zangado | QA / Definition-of-Done audit — `/qa` |
+| Mestre | Project setup, credential tracking, blocker escalation |
