@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "generated": "2026-09-17T14:35:34+00:00",
+  "note": "Derived from on-disk artifacts. Local verification status, not the board column (which stays canonical). Never hand-edit — regenerated on Stop.",
+  "summary": {
+    "total": 0,
+    "done_eligible": 0,
+    "in_qa": 0,
+    "in_progress": 0,
+    "planned": 0
+  },
+  "registers": {
+    "assumptions_high_open": 0,
+    "regressions_pending": 0,
+    "debt_items": 0
+  },
+  "stories": [],
+  "next": "No use cases yet — run /brief then /discover to create the first UC."
+}
