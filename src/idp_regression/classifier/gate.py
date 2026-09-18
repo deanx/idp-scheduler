@@ -63,8 +63,15 @@ def _validate_golden(golden: Golden) -> None:
             raise MalformedGoldenError(f"golden table {tname!r} must be a mapping")
         if not isinstance(block.get("match_key"), str) or not block["match_key"]:
             raise MalformedGoldenError(f"golden table {tname!r} needs a non-empty match_key")
-        if not isinstance(block.get("rows", []), list):
+        rows = block.get("rows", [])
+        if not isinstance(rows, list):
             raise MalformedGoldenError(f"golden table {tname!r} rows must be a list")
+        for row in rows:
+            if not isinstance(row, dict):
+                raise MalformedGoldenError(
+                    f"golden table {tname!r} has a non-mapping row "
+                    f"(expected dict[str, str], got {type(row).__name__})"
+                )
         if not isinstance(block.get("critical", False), bool):
             raise MalformedGoldenError(f"golden table {tname!r} critical must be bool")
 
@@ -100,6 +107,18 @@ def _validate_actual(actual: NormalizedOutput) -> None:
         for row in rows:
             if not isinstance(row, dict):
                 raise MalformedActualError(f"actual table {tname!r} has a non-mapping row")
+            for cname, cell in row.items():
+                if not isinstance(cell, dict):
+                    raise MalformedActualError(
+                        f"actual table {tname!r} row has a non-mapping cell "
+                        f"at column {cname!r} (expected dict-with-'value', "
+                        f"got {type(cell).__name__})"
+                    )
+                if "value" not in cell:
+                    raise MalformedActualError(
+                        f"actual table {tname!r} row cell at column {cname!r} "
+                        f"is missing 'value'"
+                    )
     aprompts = actual.get("prompts", {})
     if not isinstance(aprompts, dict):
         raise MalformedActualError("actual.prompts must be a mapping")

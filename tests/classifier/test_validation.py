@@ -115,6 +115,48 @@ def test_actual_tables_non_list_raises_malformed_actual() -> None:
         )
 
 
+def test_golden_table_non_mapping_row_raises_malformed_golden() -> None:
+    # N22: a golden row that is a list-element (not a dict[str, str]) must raise
+    # a typed MalformedGoldenError, not leak a raw AttributeError out of
+    # _classify_table when it calls grow.get(key_col).
+    with pytest.raises(MalformedGoldenError):
+        classify(
+            cast(
+                Golden,
+                {
+                    "fields": {"t": {"value": "1", "type": "text"}},
+                    "tables": {
+                        "items": {
+                            "match_key": "description",
+                            "rows": [["Widget A", "10"]],  # list-element row, not a dict
+                        }
+                    },
+                },
+            ),
+            _good_actual(),
+        )
+
+
+def test_actual_table_non_mapping_cell_raises_malformed_actual() -> None:
+    # N22: an actual table cell that is a plain string (not a dict-with-'value')
+    # must raise a typed MalformedActualError, not leak a raw AttributeError
+    # when _classify_table calls acell.get("value").
+    with pytest.raises(MalformedActualError):
+        classify(
+            GOOD_GOLDEN,
+            cast(
+                NormalizedOutput,
+                {
+                    "status": "SUCCEEDED",
+                    "fields": {},
+                    "tables": {
+                        "items": [{"description": {"value": "Widget A"}, "qty": "10"}],
+                    },
+                },
+            ),
+        )
+
+
 def test_classifier_error_is_base_of_malformed_variants() -> None:
     # N22: a typed ClassifierError family.
     assert issubclass(MalformedGoldenError, ClassifierError)
