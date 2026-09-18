@@ -8,8 +8,9 @@ TP-10 (EX-A1-4 date wrong_format), TP-11 (EX-A1-5 new_field discount).
 from __future__ import annotations
 
 from idp_regression.classifier import classify
+from idp_regression.classifier.types import FieldValue, Golden, NormalizedOutput
 
-GOLDEN = {
+GOLDEN: Golden = {
     "document_id": "invoice-007.pdf",
     "fields": {
         "invoice_number": {"value": "INV-1", "type": "id", "critical": True},
@@ -19,7 +20,7 @@ GOLDEN = {
 }
 
 
-def _actual(fields: dict[str, object]) -> dict[str, object]:
+def _actual(fields: dict[str, FieldValue]) -> NormalizedOutput:
     return {"status": "SUCCEEDED", "fields": fields}
 
 
@@ -113,7 +114,7 @@ def test_number_currency_formatting_is_match() -> None:
 def test_id_punctuation_difference_is_wrong_format() -> None:
     # ADR-0003: "INV 001" vs "INV-001" (id) -> wrong_format (same content,
     # different punctuation).
-    golden = {"fields": {"po": {"value": "INV 001", "type": "id", "critical": False}}}
+    golden: Golden = {"fields": {"po": {"value": "INV 001", "type": "id", "critical": False}}}
     actual = _actual({"po": {"value": "INV-001"}})
     verdicts = classify(golden, actual)
     assert verdicts["po"]["verdict"] == "wrong_format"

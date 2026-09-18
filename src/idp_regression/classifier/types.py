@@ -9,7 +9,7 @@ self-contained and side-effect-free.
 
 from __future__ import annotations
 
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 # The six verdicts that are the stable contract (glossary, ADR-0003, CT-02).
 VerdictLiteral = Literal[
@@ -33,46 +33,46 @@ class GoldenField(TypedDict):
 
     value: str | None
     type: FieldType
-    critical: bool
+    critical: NotRequired[bool]
 
 
 class GoldenTable(TypedDict):
     """A golden (expected) line-item block."""
 
     match_key: str
-    critical: bool
     rows: list[dict[str, str]]
+    critical: NotRequired[bool]
 
 
 class GoldenPrompt(TypedDict):
     """A golden (expected) prompt answer."""
 
     answer: str | None
-    critical: bool
+    critical: NotRequired[bool]
 
 
 class Golden(TypedDict):
     """The curated reference shape (DATA-MODEL-01 §1)."""
 
-    document_id: str
+    document_id: NotRequired[str]
     fields: dict[str, GoldenField]
-    tables: dict[str, GoldenTable]
-    prompts: dict[str, GoldenPrompt]
+    tables: NotRequired[dict[str, GoldenTable]]
+    prompts: NotRequired[dict[str, GoldenPrompt]]
 
 
 class FieldValue(TypedDict):
     """An actual extracted field value (DATA-MODEL-01 §2)."""
 
     value: str | None
-    confidence: float | None
+    confidence: NotRequired[float | None]
 
 
 class PromptValue(TypedDict):
     """An actual extracted prompt answer (DATA-MODEL-01 §2)."""
 
     answer: str | None
-    confidence: float | None
-    source: str | None
+    confidence: NotRequired[float | None]
+    source: NotRequired[str | None]
 
 
 class NormalizedOutput(TypedDict):
@@ -80,8 +80,8 @@ class NormalizedOutput(TypedDict):
 
     status: str
     fields: dict[str, FieldValue]
-    tables: dict[str, list[dict[str, FieldValue]]]
-    prompts: dict[str, PromptValue]
+    tables: NotRequired[dict[str, list[dict[str, FieldValue]]]]
+    prompts: NotRequired[dict[str, PromptValue]]
 
 
 class Verdict(TypedDict):
