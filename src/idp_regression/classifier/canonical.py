@@ -22,8 +22,9 @@ Per ADR-0003 / AC4:
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from datetime import datetime
-from typing import Protocol
+from typing import NamedTuple
 
 from idp_regression.classifier.types import VerdictLiteral
 
@@ -89,50 +90,27 @@ def _format_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-class _Canonicalizer(Protocol):
-    def value_form(self, value: str) -> object: ...
-    def format_form(self, value: str) -> object: ...
+class _Canonicalizer(NamedTuple):
+    """A (value_form, format_form) pair of pure callables for one field type.
+
+    ADR-0003 §Design patterns: "a module-level registry dict + small
+    functions, not a class hierarchy." This NamedTuple of two callables
+    replaces the former _Number/_Date/_Id/_TextCanonicalizer classes and the
+    Protocol — same two-method surface (``value_form`` / ``format_form``),
+    no state, no inheritance.
+    """
+
+    value_form: Callable[[str], object]
+    format_form: Callable[[str], object]
 
 
-class _NumberCanonicalizer:
-    def value_form(self, value: str) -> object:
-        return _value_number(value)
-
-    def format_form(self, value: str) -> object:
-        return _format_number(value)
-
-
-class _DateCanonicalizer:
-    def value_form(self, value: str) -> object:
-        return _value_date(value)
-
-    def format_form(self, value: str) -> object:
-        return _format_date(value)
-
-
-class _IdCanonicalizer:
-    def value_form(self, value: str) -> object:
-        return _value_id(value)
-
-    def format_form(self, value: str) -> object:
-        return _format_id(value)
-
-
-class _TextCanonicalizer:
-    def value_form(self, value: str) -> object:
-        return _value_text(value)
-
-    def format_form(self, value: str) -> object:
-        return _format_text(value)
-
-
-#: Registry of per-type canonicalizers (ADR-0003 Strategy pattern). Adding a
-#: new type is "add a class and register it".
+#: Registry of per-type canonicalizers (ADR-0003 Strategy pattern, idiomatic).
+#: Adding a new type is "add a _Canonicalizer(value_fn, format_fn) entry".
 CANONICALIZERS: dict[str, _Canonicalizer] = {
-    "number": _NumberCanonicalizer(),
-    "date": _DateCanonicalizer(),
-    "id": _IdCanonicalizer(),
-    "text": _TextCanonicalizer(),
+    "number": _Canonicalizer(_value_number, _format_number),
+    "date": _Canonicalizer(_value_date, _format_date),
+    "id": _Canonicalizer(_value_id, _format_id),
+    "text": _Canonicalizer(_value_text, _format_text),
 }
 
 
