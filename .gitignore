@@ -8,3 +8,11 @@ wheels/
 
 # Virtual environments
 .venv
+
+.DS_Store
+
+# Secrets / env — never commit real credentials (BR6, INV-02)
+.env
+.env.local
+.env.*.local
+# .env.example stays committable (template only, no real values)
