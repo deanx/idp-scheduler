@@ -153,7 +153,7 @@ def test_spike_line_item_wrong_value_fails() -> None:
         ),
     )
     rows = _table(v, "line_items")["rows"]
-    up = [r for r in rows if r.get("field") == "unit_price" or r["column"] == "unit_price"]
+    up = [r for r in rows if r["column"] == "unit_price"]
     assert up[0]["verdict"] == "wrong_value"
     assert overall_gate(v) == "FAIL"
 

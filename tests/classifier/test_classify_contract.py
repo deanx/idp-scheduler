@@ -44,6 +44,21 @@ def test_row_verdict_uses_the_same_six_literal_union() -> None:
     assert set(get_args(hints["verdict"])) == SIX_VERDICTS
 
 
+def test_row_verdict_has_the_contract_keys() -> None:
+    # Pin the row sub-verdict contract (DATA-MODEL-01 §3). NB: the key is
+    # ``column`` here, while DATA-MODEL-01 §3 still says ``field`` — that drift
+    # is logged as doc-debt for Soneca; do NOT edit DATA-MODEL-01 from this test.
+    hints = get_type_hints(RowVerdict)
+    assert set(hints) == {
+        "match_key",
+        "column",
+        "verdict",
+        "expected",
+        "actual",
+        "confidence",
+    }
+
+
 def test_table_verdict_is_a_detail_container_with_rows() -> None:
     hints = get_type_hints(TableVerdict)
     assert set(hints) == {"verdict", "critical", "type", "rows"}
