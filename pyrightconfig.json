@@ -1,0 +1,7 @@
+{
+  "extraPaths": ["src"],
+  "include": ["src", "tests"],
+  "reportMissingImports": "error",
+  "reportMissingTypeStubs": "none",
+  "typeCheckingMode": "standard"
+}
