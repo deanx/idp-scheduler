@@ -168,3 +168,75 @@ def test_malformed_golden_is_loud_not_silent_match() -> None:
     # raise, never return a verdict map of silent ``match`` entries.
     with pytest.raises(ClassifierError):
         classify(cast(Golden, {"fields": {"total": {"value": "1.00"}}}), _good_actual())
+
+
+# --- TP-21 / N22: prompt-level malformation coverage ----------------------
+# Field-level and table-level malformation are pinned above; these cover the
+# prompt surface of the same N22 contract (typed ClassifierError, not a raw
+# leak). A minimal valid golden/actual baseline with one prompt is mutated
+# only on the prompt part so each test isolates the prompt malformation.
+
+
+def _good_golden_with_prompt() -> Golden:
+    return {
+        "fields": {"total": {"value": "1250.00", "type": "number", "critical": True}},
+        "prompts": {"q1": {"answer": "Yes", "critical": True}},
+    }
+
+
+def _good_actual_with_prompt() -> NormalizedOutput:
+    return {
+        "status": "SUCCEEDED",
+        "fields": {"total": {"value": "1250.00"}},
+        "prompts": {"q1": {"answer": "Yes"}},
+    }
+
+
+def test_golden_prompts_non_mapping_raises_malformed_golden() -> None:
+    # N22: golden.prompts must be a mapping; a list is a Curator error.
+    golden = _good_golden_with_prompt()
+    golden["prompts"] = ["q1"]  # type: ignore[typeddict-item]
+    with pytest.raises(MalformedGoldenError):
+        classify(golden, _good_actual_with_prompt())
+
+
+def test_golden_prompt_spec_non_mapping_raises_malformed_golden() -> None:
+    # N22: a golden prompt spec must be a mapping, not a bare string.
+    golden = _good_golden_with_prompt()
+    golden["prompts"] = {"q1": "Yes"}  # type: ignore[dict-item]
+    with pytest.raises(MalformedGoldenError):
+        classify(golden, _good_actual_with_prompt())
+
+
+def test_golden_prompt_missing_answer_raises_malformed_golden() -> None:
+    # N22: a golden prompt without an `answer` key is malformed.
+    golden = _good_golden_with_prompt()
+    golden["prompts"] = {"q1": {"critical": True}}  # type: ignore[typeddict-item]
+    with pytest.raises(MalformedGoldenError):
+        classify(golden, _good_actual_with_prompt())
+
+
+def test_golden_prompt_critical_not_bool_raises_malformed_golden() -> None:
+    # N22: a golden prompt whose `critical` is not a bool is malformed.
+    golden = _good_golden_with_prompt()
+    golden["prompts"] = {"q1": {"answer": "Yes", "critical": "yes"}}  # type: ignore[typeddict-item]
+    with pytest.raises(MalformedGoldenError):
+        classify(golden, _good_actual_with_prompt())
+
+
+def test_actual_prompts_non_mapping_raises_malformed_actual() -> None:
+    # N22: actual.prompts must be a mapping (top-level dict check, gate.py:124).
+    actual = _good_actual_with_prompt()
+    actual["prompts"] = ["q1"]  # type: ignore[typeddict-item]
+    with pytest.raises(MalformedActualError):
+        classify(_good_golden_with_prompt(), actual)
+
+
+def test_actual_prompt_cell_non_mapping_raises_malformed_actual() -> None:
+    # N22: an actual prompt cell that is a plain string (not a dict-with-'answer')
+    # must raise a typed MalformedActualError, not leak a raw AttributeError
+    # when _classify_prompt calls acell.get("answer").
+    actual = _good_actual_with_prompt()
+    actual["prompts"] = {"q1": "plain string answer"}  # type: ignore[dict-item]
+    with pytest.raises(MalformedActualError):
+        classify(_good_golden_with_prompt(), actual)

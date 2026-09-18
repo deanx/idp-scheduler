@@ -122,6 +122,12 @@ def _validate_actual(actual: NormalizedOutput) -> None:
     aprompts = actual.get("prompts", {})
     if not isinstance(aprompts, dict):
         raise MalformedActualError("actual.prompts must be a mapping")
+    for pname, pcell in aprompts.items():
+        if not isinstance(pcell, dict):
+            raise MalformedActualError(
+                f"actual prompt {pname!r} must be a mapping "
+                f"(expected dict, got {type(pcell).__name__})"
+            )
 
 
 def _classify_field(
