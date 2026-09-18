@@ -10,15 +10,18 @@ from __future__ import annotations
 
 from typing import Literal, cast
 
-from idp_regression.classifier.canonical import compare_value
+from idp_regression.classifier.canonical import compare_value, match_key_form
 from idp_regression.classifier.types import (
     FIELD_TYPES,
     FieldValue,
     Golden,
+    GoldenTable,
     MalformedActualError,
     MalformedGoldenError,
     NormalizedOutput,
     PromptValue,
+    RowVerdict,
+    TableVerdict,
     Verdict,
     VerdictMap,
 )
@@ -154,6 +157,91 @@ def _classify_prompt(
     return _classify_field(name, ganswer, _PROMPT_TYPE, critical, field_value)
 
 
+# DATA-MODEL-01 §1 carries no per-column type for table rows; columns are
+# compared as text. A future golden schema may add per-column types.
+_TABLE_COLUMN_TYPE = "text"
+
+
+def _classify_table(
+    gtable: GoldenTable,
+    arows: list[dict[str, FieldValue]],
+) -> TableVerdict:
+    key_col = gtable["match_key"]
+    critical = gtable.get("critical", False)
+
+    # Index actual rows by normalized match_key (BR8: position-independent).
+    a_index: dict[str, dict[str, FieldValue]] = {}
+    for row in arows:
+        mk_cell = row.get(key_col)
+        mk_value = mk_cell.get("value") if mk_cell else None
+        if _is_empty(mk_value):
+            continue
+        a_index[match_key_form(cast(str, mk_value))] = row
+
+    rows: list[RowVerdict] = []
+    for grow in gtable["rows"]:
+        gmk = grow.get(key_col)
+        gmk_str = gmk if isinstance(gmk, str) else None
+        arow = a_index.pop(match_key_form(gmk_str), None) if gmk_str else None
+        if arow is None:
+            rows.append(
+                RowVerdict(
+                    match_key=gmk_str,
+                    column=None,
+                    verdict="missing",
+                    expected=None,
+                    actual=None,
+                    confidence=None,
+                )
+            )
+            continue
+        for col, gval in grow.items():
+            if col == key_col:
+                continue
+            acell = arow.get(col)
+            if acell is None or _is_empty(acell.get("value")):
+                rows.append(
+                    RowVerdict(
+                        match_key=gmk_str,
+                        column=col,
+                        verdict="missing",
+                        expected=gval,
+                        actual=None,
+                        confidence=acell.get("confidence") if acell else None,
+                    )
+                )
+                continue
+            avalue = acell.get("value")
+            verdict = compare_value(_TABLE_COLUMN_TYPE, gval or "", cast(str, avalue))
+            rows.append(
+                RowVerdict(
+                    match_key=gmk_str,
+                    column=col,
+                    verdict=verdict,
+                    expected=gval,
+                    actual=cast(str, avalue),
+                    confidence=acell.get("confidence"),
+                )
+            )
+
+    # Leftover actual rows (no golden counterpart) -> new_line (BR3, informational).
+    for row in a_index.values():
+        mk_cell = row.get(key_col)
+        mk_value = mk_cell.get("value") if mk_cell else None
+        rows.append(
+            RowVerdict(
+                match_key=mk_value,
+                column=None,
+                verdict="new_line",
+                expected=None,
+                actual=None,
+                confidence=mk_cell.get("confidence") if mk_cell else None,
+            )
+        )
+
+    return TableVerdict(verdict="detail", critical=critical, type=None, rows=rows)
+
+
 def classify(golden: Golden, actual: NormalizedOutput) -> VerdictMap:
     """Classify each field/prompt/table of ``actual`` against ``golden``.
 
@@ -208,6 +296,12 @@ def classify(golden: Golden, actual: NormalizedOutput) -> VerdictMap:
                 critical=False,
                 type=None,
             )
+
+    # Line items: pair rows by match_key, per-column sub-verdicts (ADR-0003, BR8).
+    gtables = golden.get("tables", {})
+    atables: dict[str, list[dict[str, FieldValue]]] = actual.get("tables", {})
+    for tname, gtable in gtables.items():
+        verdicts[tname] = _classify_table(gtable, atables.get(tname, []))
 
     return verdicts
 

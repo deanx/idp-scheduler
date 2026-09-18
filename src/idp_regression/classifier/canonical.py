@@ -136,6 +136,14 @@ CANONICALIZERS: dict[str, _Canonicalizer] = {
 }
 
 
+def match_key_form(value: str) -> str:
+    """Normalize a line-item ``match_key`` value for row pairing (BR8).
+
+    Case- and punctuation-insensitive so reordered/retyped rows still pair.
+    """
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
 def compare_value(field_type: str, expected: str, actual: str) -> VerdictLiteral:
     """Compare an actual value against the expected under the type's tiers.
 
