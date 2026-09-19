@@ -7,6 +7,19 @@ before they reach an exception.
 
 from __future__ import annotations
 
+#: A poll-response status string is IDP-controlled — cap it and strip
+#: control characters at construction so a long or control-char-laden
+#: status can never inject into a downstream log line (/test Scenario B,
+#: item 6; DEBT-23 becomes partly moot since the value is sanitized here,
+#: not just at the log call site — truncation still loses information for
+#: a legitimately long/odd status, so the debt isn't fully closed).
+_MAX_STATUS_LENGTH = 64
+
+
+def _sanitize_status(value: str) -> str:
+    cleaned = "".join(ch for ch in value if ch.isprintable() or ch == " ")
+    return cleaned[:_MAX_STATUS_LENGTH]
+
 
 class IDPAdapterError(Exception):
     """Base for IDP transport/auth/execution errors (not shape errors)."""
@@ -33,7 +46,7 @@ class IDPPollTimeoutError(IDPAdapterError):
 
     def __init__(self, message: str, *, last_status: str | None) -> None:
         super().__init__(message)
-        self.last_status = last_status
+        self.last_status = _sanitize_status(last_status) if last_status is not None else None
 
 
 class IDPExecutionFailedError(IDPAdapterError):
@@ -42,7 +55,7 @@ class IDPExecutionFailedError(IDPAdapterError):
 
     def __init__(self, message: str, *, status: str) -> None:
         super().__init__(message)
-        self.status = status
+        self.status = _sanitize_status(status)
 
 
 class IDPAmbiguousStatusError(IDPAdapterError):
