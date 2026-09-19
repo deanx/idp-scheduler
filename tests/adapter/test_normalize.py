@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import copy
 import json
 import math
 import pathlib
@@ -18,12 +17,6 @@ FIXTURE = json.loads(
 )
 
 
-def _raw(**overrides: object) -> dict:
-    base = copy.deepcopy(FIXTURE)
-    base.update(overrides)
-    return base
-
-
 # ---- happy path / CT-01 shape ---------------------------------------------
 
 
@@ -31,7 +24,10 @@ def test_normalize_walks_pages_fields_tables_prompts() -> None:
     out = normalize(FIXTURE, success_statuses={"SUCCEEDED"})
     assert out["status"] == "SUCCEEDED"
     assert out["fields"]["invoice_number"] == {"value": "INV-1001", "confidence": 0.98}
-    assert out["tables"]["line_items"][0]["description"] == {"value": "Widget A", "confidence": 0.95}
+    assert out["tables"]["line_items"][0]["description"] == {
+        "value": "Widget A",
+        "confidence": 0.95,
+    }
     assert out["prompts"]["What is the vendor name?"]["answer"] == "Acme Corp"
     assert out["prompts"]["What is the vendor name?"]["source"] == "page-1-ocr"
 
@@ -75,8 +71,16 @@ def test_duplicate_prompt_string_raises_typed_error() -> None:
         "pages": [
             {
                 "prompts": [
-                    {"prompt": "vendor?", "source": "p1", "answer": {"value": "A", "confidence": 0.9}},
-                    {"prompt": "vendor?", "source": "p2", "answer": {"value": "B", "confidence": 0.9}},
+                    {
+                        "prompt": "vendor?",
+                        "source": "p1",
+                        "answer": {"value": "A", "confidence": 0.9},
+                    },
+                    {
+                        "prompt": "vendor?",
+                        "source": "p2",
+                        "answer": {"value": "B", "confidence": 0.9},
+                    },
                 ]
             }
         ],
@@ -91,7 +95,10 @@ def test_duplicate_prompt_string_raises_typed_error() -> None:
 
 @pytest.mark.parametrize("bad_name", ["total\ngate", "a:b", "", "has space"])
 def test_unsafe_field_name_raises_typed_error(bad_name: str) -> None:
-    raw = {"status": "SUCCEEDED", "pages": [{"fields": {bad_name: {"value": "x", "confidence": None}}}]}
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [{"fields": {bad_name: {"value": "x", "confidence": None}}}],
+    }
     with pytest.raises(MalformedIDPOutputError) as excinfo:
         normalize(raw, success_statuses={"SUCCEEDED"})
     assert excinfo.value.reason == "unsafe_field_name"
@@ -119,7 +126,9 @@ def test_safe_field_name_charset_accepted() -> None:
 def test_unsafe_prompt_key_with_control_char_raises() -> None:
     raw = {
         "status": "SUCCEEDED",
-        "pages": [{"prompts": [{"prompt": "vendor?\n", "answer": {"value": "A", "confidence": None}}]}],
+        "pages": [
+            {"prompts": [{"prompt": "vendor?\n", "answer": {"value": "A", "confidence": None}}]}
+        ],
     }
     with pytest.raises(MalformedIDPOutputError) as excinfo:
         normalize(raw, success_statuses={"SUCCEEDED"})
@@ -129,7 +138,9 @@ def test_unsafe_prompt_key_with_control_char_raises() -> None:
 def test_unsafe_prompt_key_too_long_raises() -> None:
     raw = {
         "status": "SUCCEEDED",
-        "pages": [{"prompts": [{"prompt": "x" * 201, "answer": {"value": "A", "confidence": None}}]}],
+        "pages": [
+            {"prompts": [{"prompt": "x" * 201, "answer": {"value": "A", "confidence": None}}]}
+        ],
     }
     with pytest.raises(MalformedIDPOutputError) as excinfo:
         normalize(raw, success_statuses={"SUCCEEDED"})
@@ -140,7 +151,14 @@ def test_prompt_key_allows_punctuation_and_charset_outside_field_names() -> None
     raw = {
         "status": "SUCCEEDED",
         "pages": [
-            {"prompts": [{"prompt": "What is the vendor: name?", "answer": {"value": "A", "confidence": None}}]}
+            {
+                "prompts": [
+                    {
+                        "prompt": "What is the vendor: name?",
+                        "answer": {"value": "A", "confidence": None},
+                    }
+                ]
+            }
         ],
     }
     out = normalize(raw, success_statuses={"SUCCEEDED"})
@@ -152,7 +170,10 @@ def test_prompt_key_allows_punctuation_and_charset_outside_field_names() -> None
 
 def test_field_value_too_large_raises_typed_error() -> None:
     huge = "x" * (MAX_VALUE_BYTES + 1)
-    raw = {"status": "SUCCEEDED", "pages": [{"fields": {"total": {"value": huge, "confidence": None}}}]}
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [{"fields": {"total": {"value": huge, "confidence": None}}}],
+    }
     with pytest.raises(MalformedIDPOutputError) as excinfo:
         normalize(raw, success_statuses={"SUCCEEDED"})
     assert excinfo.value.reason == "value_too_large"
@@ -191,7 +212,10 @@ def test_invalid_confidence_becomes_none_not_clamped(bad_conf: float) -> None:
 
 
 def test_valid_confidence_is_preserved() -> None:
-    raw = {"status": "SUCCEEDED", "pages": [{"fields": {"total": {"value": "100.00", "confidence": 0.0}}}]}
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [{"fields": {"total": {"value": "100.00", "confidence": 0.0}}}],
+    }
     out = normalize(raw, success_statuses={"SUCCEEDED"})
     assert out["fields"]["total"]["confidence"] == 0.0
 
@@ -206,13 +230,19 @@ def test_absent_field_is_absent_not_synthesized() -> None:
 
 
 def test_null_value_is_preserved_as_none() -> None:
-    raw = {"status": "SUCCEEDED", "pages": [{"fields": {"total": {"value": None, "confidence": None}}}]}
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [{"fields": {"total": {"value": None, "confidence": None}}}],
+    }
     out = normalize(raw, success_statuses={"SUCCEEDED"})
     assert out["fields"]["total"]["value"] is None
 
 
 def test_empty_string_value_is_preserved_distinct_from_null() -> None:
-    raw = {"status": "SUCCEEDED", "pages": [{"fields": {"total": {"value": "", "confidence": None}}}]}
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [{"fields": {"total": {"value": "", "confidence": None}}}],
+    }
     out = normalize(raw, success_statuses={"SUCCEEDED"})
     assert out["fields"]["total"]["value"] == ""
 
@@ -223,7 +253,7 @@ def test_empty_string_value_is_preserved_distinct_from_null() -> None:
 @pytest.mark.parametrize("bad_raw", [None, "a string", 42, [], {"pages": "not a list"}])
 def test_malformed_top_level_body_raises_typed_error_not_kerror(bad_raw: object) -> None:
     with pytest.raises(MalformedIDPOutputError):
-        normalize(bad_raw, success_statuses={"SUCCEEDED"})  # type: ignore[arg-type]
+        normalize(bad_raw, success_statuses={"SUCCEEDED"})
 
 
 def test_missing_status_raises_typed_error() -> None:

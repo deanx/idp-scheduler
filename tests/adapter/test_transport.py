@@ -3,9 +3,13 @@
 
 from __future__ import annotations
 
+import email.message
 import io
 import json
 import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -21,7 +25,7 @@ class _FakeResponse:
     def read(self) -> bytes:
         return self._body
 
-    def __enter__(self) -> "_FakeResponse":
+    def __enter__(self) -> _FakeResponse:
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -29,24 +33,24 @@ class _FakeResponse:
 
 
 def test_post_json_returns_status_and_decoded_body(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_urlopen(req, timeout):  # noqa: ANN001
+    def fake_urlopen(req: urllib.request.Request, timeout: float) -> _FakeResponse:
         assert req.get_header("Content-type") == "application/json"
         return _FakeResponse(200, json.dumps({"ok": True}).encode())
 
-    monkeypatch.setattr(transport.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     status, body = transport.post_json("https://x/y", {"a": 1}, timeout_seconds=5.0)
     assert status == 200
     assert body == {"ok": True}
 
 
 def test_get_json_sends_bearer_header(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen = {}
+    seen: dict[str, str | None] = {}
 
-    def fake_urlopen(req, timeout):  # noqa: ANN001
+    def fake_urlopen(req: urllib.request.Request, timeout: float) -> _FakeResponse:
         seen["auth"] = req.get_header("Authorization")
         return _FakeResponse(200, json.dumps({"status": "RUNNING"}).encode())
 
-    monkeypatch.setattr(transport.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     status, body = transport.get_json(
         "https://x/y", timeout_seconds=5.0, headers={"Authorization": "Bearer tok"}
     )
@@ -55,17 +59,19 @@ def test_get_json_sends_bearer_header(monkeypatch: pytest.MonkeyPatch) -> None:
     assert seen["auth"] == "Bearer tok"
 
 
-def test_post_multipart_file_uploads_bytes(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # noqa: ANN001
+def test_post_multipart_file_uploads_bytes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     doc = tmp_path / "invoice.pdf"
     doc.write_bytes(b"%PDF-fake-bytes")
-    captured = {}
+    captured: dict[str, Any] = {}
 
-    def fake_urlopen(req, timeout):  # noqa: ANN001
+    def fake_urlopen(req: urllib.request.Request, timeout: float) -> _FakeResponse:
         captured["data"] = req.data
         captured["content_type"] = req.get_header("Content-type")
         return _FakeResponse(202, json.dumps({"id": "exec-1"}).encode())
 
-    monkeypatch.setattr(transport.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     status, body = transport.post_multipart_file(
         "https://x/executions", "file", str(doc), timeout_seconds=5.0
     )
@@ -76,12 +82,16 @@ def test_post_multipart_file_uploads_bytes(monkeypatch: pytest.MonkeyPatch, tmp_
 
 
 def test_http_error_is_returned_with_its_status_and_body(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_urlopen(req, timeout):  # noqa: ANN001
+    def fake_urlopen(req: urllib.request.Request, timeout: float) -> _FakeResponse:
         raise urllib.error.HTTPError(
-            req.full_url, 401, "unauthorized", {}, io.BytesIO(b'{"error":"bad creds"}')
+            req.full_url,
+            401,
+            "unauthorized",
+            email.message.Message(),
+            io.BytesIO(b'{"error":"bad creds"}'),
         )
 
-    monkeypatch.setattr(transport.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     status, body = transport.get_json("https://x/y", timeout_seconds=5.0)
     assert status == 401
     assert body == {"error": "bad creds"}
@@ -90,19 +100,19 @@ def test_http_error_is_returned_with_its_status_and_body(monkeypatch: pytest.Mon
 def test_timeout_raises_typed_transport_error_not_a_raw_urllib_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_urlopen(req, timeout):  # noqa: ANN001
+    def fake_urlopen(req: urllib.request.Request, timeout: float) -> _FakeResponse:
         raise TimeoutError("timed out")
 
-    monkeypatch.setattr(transport.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(IDPTransportError):
         transport.get_json("https://x/y", timeout_seconds=5.0)
 
 
 def test_url_error_raises_typed_transport_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_urlopen(req, timeout):  # noqa: ANN001
+    def fake_urlopen(req: urllib.request.Request, timeout: float) -> _FakeResponse:
         raise urllib.error.URLError("connection refused")
 
-    monkeypatch.setattr(transport.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(IDPTransportError):
         transport.get_json("https://x/y", timeout_seconds=5.0)
 
@@ -110,21 +120,23 @@ def test_url_error_raises_typed_transport_error(monkeypatch: pytest.MonkeyPatch)
 def test_bearer_token_never_appears_in_a_redacted_transport_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_urlopen(req, timeout):  # noqa: ANN001
+    def fake_urlopen(req: urllib.request.Request, timeout: float) -> _FakeResponse:
         raise urllib.error.URLError(
             "connection reset while sending Authorization: Bearer super-secret-token-123"
         )
 
-    monkeypatch.setattr(transport.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(IDPTransportError) as excinfo:
         transport.get_json(
-            "https://x/y", timeout_seconds=5.0, headers={"Authorization": "Bearer super-secret-token-123"}
+            "https://x/y",
+            timeout_seconds=5.0,
+            headers={"Authorization": "Bearer super-secret-token-123"},
         )
     assert "super-secret-token-123" not in str(excinfo.value)
 
 
 def test_redact_strips_bearer_header_value() -> None:
-    text = 'request failed: Authorization: Bearer abc.def.ghi'
+    text = "request failed: Authorization: Bearer abc.def.ghi"
     redacted = transport.redact(text)
     assert "abc.def.ghi" not in redacted
 
@@ -143,10 +155,10 @@ def test_sanitize_for_log_escapes_embedded_quotes_and_newlines() -> None:
 
 
 def test_empty_body_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_urlopen(req, timeout):  # noqa: ANN001
+    def fake_urlopen(req: urllib.request.Request, timeout: float) -> _FakeResponse:
         return _FakeResponse(204, b"")
 
-    monkeypatch.setattr(transport.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     status, body = transport.post_json("https://x/y", {}, timeout_seconds=5.0)
     assert status == 204
     assert body is None

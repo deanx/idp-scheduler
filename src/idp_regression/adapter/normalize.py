@@ -157,7 +157,9 @@ def _merge_prompts(
         answer_cell = _coerce_cell(raw_entry.get("answer"), "prompt answer")
         source = raw_entry.get("source")
         if source is not None and not isinstance(source, str):
-            raise MalformedIDPOutputError("invalid_page", "prompt 'source' must be a string or null")
+            raise MalformedIDPOutputError(
+                "invalid_page", "prompt 'source' must be a string or null"
+            )
 
         into[prompt_key] = PromptValue(
             answer=answer_cell["value"], confidence=answer_cell["confidence"], source=source
