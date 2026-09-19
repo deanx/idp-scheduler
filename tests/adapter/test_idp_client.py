@@ -25,6 +25,20 @@ from idp_regression.adapter.errors import (
 from idp_regression.adapter.idp_client import MuleSoftIDPAdapter
 
 
+def _advancing_clock(step: float = 0.1) -> Callable[[], float]:
+    """A fake clock that advances by ``step`` on every call (Atchim
+    suggestion) — used as the default so a test that doesn't care about
+    exact timing still can't hang on a frozen clock; only tests that pin
+    specific deadline math use ``_clock_from`` instead."""
+    state = {"now": 0.0}
+
+    def clock() -> float:
+        state["now"] += step
+        return state["now"]
+
+    return clock
+
+
 def _clock_from(seq: list[float]) -> Callable[[], float]:
     """Returns each value in ``seq`` in order, then repeats the last value
     forever (so a test only needs to pin the values it cares about, not the
@@ -89,7 +103,7 @@ def _adapter(
         submit_timeout_seconds=30.0,
         poll_timeout_seconds=poll_timeout_seconds,
         poll_interval_seconds=poll_interval_seconds,
-        clock=clock or (lambda: 0.0),
+        clock=clock or _advancing_clock(),
         sleep=sleep or sleeps.append,
     )
 
