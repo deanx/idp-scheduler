@@ -691,6 +691,45 @@ def test_token_refresh_margin_just_above_the_3600_second_cap_is_rejected() -> No
         MuleSoftIDPAdapter(**_adapter_kwargs(token_refresh_margin_seconds=3600.1))  # type: ignore[arg-type]
 
 
+_HUGE_INT = 10**400
+
+
+@pytest.mark.parametrize(
+    "kwarg",
+    [
+        "submit_timeout_seconds",
+        "poll_timeout_seconds",
+        "poll_interval_seconds",
+        "token_refresh_margin_seconds",
+    ],
+)
+def test_huge_int_timing_param_raises_typed_config_error_not_raw_overflow(kwarg: str) -> None:
+    # Coverage-audit defect: _validate_timing's bare float(value) raises a
+    # raw OverflowError for an int too large to represent as a float
+    # (float(10**400)) — must be a typed IDPConfigurationError instead,
+    # with the value never in the message.
+    with pytest.raises(IDPConfigurationError) as excinfo:
+        MuleSoftIDPAdapter(**_adapter_kwargs(**{kwarg: _HUGE_INT}))  # type: ignore[arg-type]
+    assert str(_HUGE_INT) not in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "kwarg",
+    [
+        "submit_timeout_seconds",
+        "poll_timeout_seconds",
+        "poll_interval_seconds",
+        "token_refresh_margin_seconds",
+    ],
+)
+@pytest.mark.parametrize("bad_bool", [True, False])
+def test_bool_timing_param_raises_typed_config_error(kwarg: str, bad_bool: bool) -> None:
+    # bool is an int subclass in Python — isinstance(True, (int, float)) is
+    # True, so this must be checked explicitly.
+    with pytest.raises(IDPConfigurationError):
+        MuleSoftIDPAdapter(**_adapter_kwargs(**{kwarg: bad_bool}))  # type: ignore[arg-type]
+
+
 def test_nan_poll_timeout_poll_terminates_instead_of_looping_forever(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

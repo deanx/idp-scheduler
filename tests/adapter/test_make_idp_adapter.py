@@ -95,6 +95,25 @@ def test_zero_token_refresh_margin_env_var_is_accepted(monkeypatch: pytest.Monke
     make_idp_adapter()
 
 
+@pytest.mark.parametrize("env_name", _TIMING_ENV_NAMES)
+def test_timing_env_var_at_the_3600_second_cap_is_accepted(
+    monkeypatch: pytest.MonkeyPatch, env_name: str
+) -> None:
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv(env_name, "3600")
+    make_idp_adapter()
+
+
+@pytest.mark.parametrize("env_name", _TIMING_ENV_NAMES)
+def test_timing_env_var_just_above_the_3600_second_cap_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, env_name: str
+) -> None:
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv(env_name, "3600.1")
+    with pytest.raises(IDPConfigurationError):
+        make_idp_adapter()
+
+
 def test_missing_required_credential_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     # Clear real creds explicitly — a live .env sourced into the shell
     # (e.g. RUN_INTEGRATION_TESTS=1 runs) must not make this test flaky.

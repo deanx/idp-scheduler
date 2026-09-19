@@ -61,7 +61,13 @@ def _validate_timing(name: str, value: object, *, allow_zero: bool, max_value: f
     construction, not discovered mid-poll."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise IDPConfigurationError(f"{name} must be a number")
-    fvalue = float(value)
+    try:
+        fvalue = float(value)
+    except (OverflowError, TypeError, ValueError):
+        # An int too large to represent as a float (e.g. 10**400) raises a
+        # raw OverflowError from float() — never let it escape, and never
+        # echo the value itself (coverage-audit defect).
+        raise IDPConfigurationError(f"{name} must be a representable number") from None
     if not math.isfinite(fvalue):
         raise IDPConfigurationError(f"{name} must be finite (not NaN/inf)")
     if allow_zero:
