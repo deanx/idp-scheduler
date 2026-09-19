@@ -11,22 +11,22 @@ importing the classifier's so neither package depends on the other
 
 from __future__ import annotations
 
-from typing import Protocol, TypedDict
+from typing import NotRequired, Protocol, TypedDict
 
 
 class FieldValue(TypedDict):
     """An actual extracted field (or table cell) value (DATA-MODEL-01 §2)."""
 
     value: str | None
-    confidence: float | None
+    confidence: NotRequired[float | None]
 
 
 class PromptValue(TypedDict):
     """An actual extracted prompt answer (DATA-MODEL-01 §2)."""
 
     answer: str | None
-    confidence: float | None
-    source: str | None
+    confidence: NotRequired[float | None]
+    source: NotRequired[str | None]
 
 
 class NormalizedOutput(TypedDict):
@@ -34,8 +34,8 @@ class NormalizedOutput(TypedDict):
 
     status: str
     fields: dict[str, FieldValue]
-    tables: dict[str, list[dict[str, FieldValue]]]
-    prompts: dict[str, PromptValue]
+    tables: NotRequired[dict[str, list[dict[str, FieldValue]]]]
+    prompts: NotRequired[dict[str, PromptValue]]
 
 
 class IDPAdapter(Protocol):
