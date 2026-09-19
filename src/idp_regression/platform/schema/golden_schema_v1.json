@@ -1,0 +1,98 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "idp-regression golden v1",
+  "type": "object",
+  "required": ["fields"],
+  "additionalProperties": false,
+  "properties": {
+    "document_id": { "type": "string" },
+    "fields": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["value", "type"],
+        "properties": {
+          "value": { "type": "string" },
+          "type": { "type": "string", "enum": ["number", "date", "id", "text"] },
+          "critical": { "type": "boolean" }
+        },
+        "allOf": [
+          {
+            "if": {
+              "type": "object",
+              "required": ["type"],
+              "properties": { "type": { "const": "number" } }
+            },
+            "then": {
+              "type": "object",
+              "properties": { "value": { "type": "string", "pattern": "^-?[0-9]+(\\.[0-9]+)?$" } }
+            }
+          },
+          {
+            "if": {
+              "type": "object",
+              "required": ["type"],
+              "properties": { "type": { "const": "date" } }
+            },
+            "then": {
+              "type": "object",
+              "properties": { "value": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" } }
+            }
+          },
+          {
+            "if": {
+              "type": "object",
+              "required": ["type"],
+              "properties": { "type": { "const": "id" } }
+            },
+            "then": {
+              "type": "object",
+              "properties": { "value": { "type": "string", "minLength": 1 } }
+            }
+          },
+          {
+            "if": {
+              "type": "object",
+              "required": ["type"],
+              "properties": { "type": { "const": "text" } }
+            },
+            "then": {
+              "type": "object",
+              "properties": { "value": { "type": "string" } }
+            }
+          }
+        ]
+      }
+    },
+    "tables": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["match_key", "rows"],
+        "properties": {
+          "match_key": { "type": "string" },
+          "critical": { "type": "boolean" },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "prompts": {
+      "type": "object",
+      "propertyNames": { "type": "string", "pattern": "^[^\\u0000-\\u001F\\u007F]{1,200}$" },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["answer"],
+        "properties": {
+          "answer": { "type": "string" },
+          "critical": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}
