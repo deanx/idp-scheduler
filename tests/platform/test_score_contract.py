@@ -157,6 +157,36 @@ def test_a_missing_verdict_raises_instead_of_silently_writing_missing() -> None:
         )
 
 
+# --- REG-05 / F-5: a missing-verdict prompt error must not leak the raw
+# prompt key (Curator-authored golden content, INV-02) -------------------
+
+
+def test_a_missing_prompt_verdict_error_never_contains_the_raw_prompt_key() -> None:
+    """QA-01 S-01.3 F-5: scoring.py's ``_require_verdict`` ValueError must
+    report ``prompt_score_name(key)`` (the hash), never the verbatim
+    prompt string -- if S-01.4 logs the exception, golden content must
+    not reach the logs (INV-02)."""
+    sentinel_prompt_key = "SENTINEL-PROMPT-KEY-do-not-leak-7f3c1a"
+    golden: Golden = {
+        "document_id": "invoice-007.pdf",
+        "fields": {},
+        "prompts": {sentinel_prompt_key: {"answer": "Acme Corp", "critical": False}},
+    }
+    verdicts: VerdictMap = {}  # no verdict entry for the prompt key
+
+    with pytest.raises(ValueError) as excinfo:
+        build_score_inputs(
+            golden=golden,
+            verdicts=verdicts,
+            gate="FAIL",
+            run_id="run-1",
+            document_id="invoice-007.pdf",
+        )
+
+    assert sentinel_prompt_key not in str(excinfo.value)
+    assert prompt_score_name(sentinel_prompt_key) in str(excinfo.value)
+
+
 # --- DEBT-18 option B: no expected/actual/confidence value leaves the app --
 
 _EXPECTED_SENTINEL = "SENTINEL-EXPECTED-4f8c1e"

@@ -100,7 +100,7 @@ def build_score_inputs(
 
     for prompt_key in golden.get("prompts", {}):
         name = prompt_score_name(prompt_key)
-        verdict = _require_verdict(verdicts, prompt_key)
+        verdict = _require_verdict(verdicts, prompt_key, report_key=name)
         scores.append(
             {
                 "id": score_id(run_id=run_id, document_id=document_id, score_name=name),
@@ -121,9 +121,18 @@ def build_score_inputs(
     return scores
 
 
-def _require_verdict(verdicts: VerdictMap, key: str) -> Verdict | TableVerdict:
+def _require_verdict(
+    verdicts: VerdictMap, key: str, *, report_key: str | None = None
+) -> Verdict | TableVerdict:
+    """``report_key`` is what the error message names instead of ``key`` —
+    field names (``[A-Za-z0-9_-]``) are safe to report verbatim, but a
+    prompt key is Curator-authored golden content (INV-02, REG-05) and
+    must never appear in an exception message. Callers over prompts pass
+    ``report_key=prompt_score_name(key)`` (the hash); field callers omit
+    it and get the field name, which is fine."""
     if key not in verdicts:
-        raise ValueError(f"no verdict entry for golden key {key!r} — classify() must cover it")
+        name = report_key if report_key is not None else key
+        raise ValueError(f"no verdict entry for golden key {name!r} — classify() must cover it")
     return verdicts[key]
 
 
