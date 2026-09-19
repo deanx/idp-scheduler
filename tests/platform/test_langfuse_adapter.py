@@ -531,6 +531,62 @@ def test_mark_run_status_error_log_survives_a_newline_in_run_id(
         assert 'dataset="ok"' not in rendered, f"unescaped quote forged a field: {rendered!r}"
 
 
+# --- REG-04 / F-3: get_dataset must not trust the pagination body shape --
+
+
+@pytest.mark.parametrize(
+    "malformed_page",
+    [
+        pytest.param({"data": None, "meta": {"totalPages": 1}}, id="data-null"),
+        pytest.param({"data": "not-a-list", "meta": {"totalPages": 1}}, id="data-string"),
+        pytest.param(
+            {"data": [], "meta": {"totalPages": "2"}}, id="totalPages-string"
+        ),
+        pytest.param(
+            {"data": [], "meta": {"totalPages": -1}}, id="totalPages-negative"
+        ),
+        pytest.param({"data": []}, id="meta-missing"),
+    ],
+)
+def test_get_dataset_malformed_pagination_shape_raises_typed_error(
+    malformed_page: dict[str, Any],
+) -> None:
+    client = FakeHttpClient(
+        {
+            ("GET", "/api/public/v2/datasets/spike-01"): (200, _v2_dataset_response(None)),
+            ("GET", "/api/public/dataset-items?datasetName=spike-01"): (200, malformed_page),
+        }
+    )
+    adapter = LangfuseAdapter(client=client)
+
+    with pytest.raises(DatasetFetchFailedError):
+        adapter.get_dataset("spike-01")
+
+
+def test_get_dataset_pagination_stops_at_the_page_cap_instead_of_looping_forever() -> None:
+    """A huge, bogus ``totalPages`` with empty pages must not loop
+    unbounded (the probe in QA-01 stopped it at 50 requests) -- a hard
+    page cap raises ``DatasetFetchFailedError`` instead."""
+    from idp_regression.platform.langfuse_adapter import _MAX_DATASET_PAGES
+
+    client = FakeHttpClient(
+        {
+            ("GET", "/api/public/v2/datasets/spike-01"): (200, _v2_dataset_response(None)),
+            ("GET", "/api/public/dataset-items?datasetName=spike-01"): (
+                200,
+                {"data": [], "meta": {"totalPages": _MAX_DATASET_PAGES * 10}},
+            ),
+        }
+    )
+    adapter = LangfuseAdapter(client=client)
+
+    with pytest.raises(DatasetFetchFailedError):
+        adapter.get_dataset("spike-01")
+
+    request_calls = [c for c in client.calls if c[1].startswith("/api/public/dataset-items")]
+    assert len(request_calls) <= _MAX_DATASET_PAGES + 1
+
+
 def test_platform_adapter_protocol_has_no_get_golden_version() -> None:
     """Gap 9 (INV-04 single-fetch): golden_version is the caller's
     hash_dataset(dataset) over the SAME fetch it iterates (TOCTOU guard)

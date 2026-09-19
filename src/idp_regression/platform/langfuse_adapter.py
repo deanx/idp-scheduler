@@ -43,6 +43,11 @@ logger = logging.getLogger(__name__)
 
 _RUN_STATUS_SCORE_NAME = "run_status"
 
+#: Hard cap on dataset-items pages fetched per get_dataset() call (REG-04,
+#: F-3) -- generous for any real golden set, but stops an untrusted/bogus
+#: ``meta.totalPages`` from looping unbounded.
+_MAX_DATASET_PAGES = 500
+
 
 def _body_snippet_for_error(body: Any) -> str:
     """A logging-safe error summary — deliberately NEVER the raw response
@@ -112,6 +117,10 @@ class LangfuseAdapter:
         page = 1
         total_pages = 1
         while page <= total_pages:
+            if page > _MAX_DATASET_PAGES:
+                raise DatasetFetchFailedError(
+                    f"dataset-items pagination exceeded the page cap ({_MAX_DATASET_PAGES})"
+                )
             path = f"/api/public/dataset-items?datasetName={encoded_name}&page={page}"
             try:
                 status, body = self._client.request("GET", path)
@@ -130,7 +139,25 @@ class LangfuseAdapter:
             if not isinstance(body, dict):
                 raise DatasetFetchFailedError("dataset-items returned an unexpected body shape")
 
-            for raw_item in body.get("data", []):
+            data = body.get("data")
+            if not isinstance(data, list):
+                raise DatasetFetchFailedError(
+                    "dataset-items response 'data' is not a list (untrusted shape)"
+                )
+            meta = body.get("meta")
+            if not isinstance(meta, dict):
+                raise DatasetFetchFailedError("dataset-items response is missing 'meta'")
+            raw_total_pages = meta.get("totalPages")
+            if (
+                not isinstance(raw_total_pages, int)
+                or isinstance(raw_total_pages, bool)
+                or raw_total_pages < 1
+            ):
+                raise DatasetFetchFailedError(
+                    "dataset-items response 'meta.totalPages' is not a positive integer"
+                )
+
+            for raw_item in data:
                 try:
                     item_id = raw_item["id"]
                     document_id = raw_item["input"]["document_id"]
@@ -144,8 +171,7 @@ class LangfuseAdapter:
                 )
                 self._item_cache[item_id] = dataset_id
 
-            meta = body.get("meta", {})
-            total_pages = meta.get("totalPages", 1) if isinstance(meta, dict) else 1
+            total_pages = raw_total_pages
             page += 1
         return items
 
