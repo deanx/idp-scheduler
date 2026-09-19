@@ -14,6 +14,7 @@ R5 false negatives Atchim listed, each with its own test:
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -100,17 +101,22 @@ def test_r5a_watcher_catches_an_error_logged_during_run_experiment_itself() -> N
 
 
 def test_r5b_watcher_catches_a_background_thread_export_error_mid_run() -> None:
-    """Simulates a background BatchSpanProcessor thread logging an ERROR
-    while run_experiment is still executing (not at the trailing flush)."""
+    """A REAL background thread (like the OTel BatchSpanProcessor's own
+    export worker) logs an ERROR while run_experiment is still
+    executing on the main thread. Python's ``logging`` handlers are
+    process-wide and thread-safe, so the watcher installed on the main
+    thread must catch a record emitted from a genuinely different
+    thread, not just a same-thread call made to look like one."""
 
     class _BackgroundThreadFailure(_OkTracingClient):
         def run_experiment(self, **kwargs: object) -> _FakeResult:
-            # A background export thread can log independently of the
-            # foreground call — the watcher is process-wide, so it still
-            # catches this even though nothing here calls flush().
-            logging.getLogger(f"{OTLP_EXPORTER_LOGGER_NAME}.worker").error(
-                "background export failed"
+            logger_ = logging.getLogger(f"{OTLP_EXPORTER_LOGGER_NAME}.worker")
+            thread = threading.Thread(
+                target=logger_.error, args=("background export failed",)
             )
+            thread.start()
+            thread.join(timeout=5.0)
+            assert not thread.is_alive(), "background export thread never finished"
             return super().run_experiment(**kwargs)
 
     items = _items(1)
