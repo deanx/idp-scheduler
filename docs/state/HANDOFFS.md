@@ -12,6 +12,12 @@ Format:
 
 ## Handoffs (newest first)
 
+### HANDOFF Zangado → (top-level)  (2026-09-19, /qa S-01.3)
+- Done: DoD audit of S-01.3 → docs/qa/QA-01-baseline-regression-S-01.3.md, ⚠️ Pass with follow-ups. Unit 188 passed, live 200 passed; mypy + ruff clean; pip-audit clean; CT-03/CT-05/INV-01 green; DEBT-18 option B holds in code.
+- Contract: code, tests and scans are all acceptable. Containment is deferred to the S-01.4 /harden per the SPEC (the epic's Done, not the story's). Observability ✅ VERIFIED at S-01.3 scope; the N10 telemetry lines are owed by S-01.4.
+- Open: F-1 (Major, a Done precondition): Soneca's golden_schema_v1 review is unrecorded. F-2 (Major): no component retries a score write; ADR-0005 #9 vs T-01.4.3/TP-41 seam; escaped-atchim yes. F-3 (Minor): get_dataset pagination shape → raw TypeError, no page cap. F-4: doc drift (INV-01 status, ADR-0005 DocumentRecord.actual, DEBT-13 status). F-5: _require_verdict echoes the prompt key. F-6: compose web image still `:4`. Hygiene: stray .swp and untracked spikes/. gitleaks absent (DEBT-12).
+- Next: Soneca records the schema review, then Dunga flips S-01.3 to Done. Soneca and Dunga resolve F-2 before the S-01.4 build. Dunga `/debt add` F-3 (and F-2 if deferred). Rule on regression-worthiness for F-2, F-3, F-5.
+
 ### HANDOFF (top-level /implement) → Zangado  (2026-09-19, /implement S-01.3 — Atchim APPROVE)
 - Done: S-01.3 Langfuse platform adapter implemented TDD on branch feat/S-01.3-langfuse-adapter (commits 90bc241..02cff1b). Atchim APPROVED after 3 REQUEST CHANGES rounds. Stamp: docs/qa/TEST-S-01.3-baseline-regression.md (✅ PASSED; Source /implement; structural independence sonnet≠opus; static clean; 164 unit/contract + 175 full-suite-with-live-integration).
 - Contract: `PlatformAdapter` = `get_dataset` / `record_run` / `mark_run_status` (ADR-0005 #9 record-after: no platform write before every gate is computed; no platform retry). Items are fetched from the paginated `/api/public/dataset-items` (R1 regression pin). Every score targets a deterministic traceId with dataType CATEGORICAL. Experiments visibility comes via the SDK `run_experiment` (langfuse==4.15.4, confined to `make_platform()`). Flush failures raise, never pass silently. The classifier (S-01.1) is untouched, so its stamp stays fresh.
