@@ -112,7 +112,7 @@ def test_provision_error_log_survives_a_newline_in_dataset_name(
     import logging
 
     caplog.set_level(logging.ERROR)
-    malicious_name = 'ds\ninjected fake log line status=200'
+    malicious_name = 'ds\ninjected fake log line status=200 dataset="ok"'
     client = RecordingHttpClient(status=400, response={"message": "rejected"})
 
     with pytest.raises(PlatformError):
@@ -121,3 +121,4 @@ def test_provision_error_log_survives_a_newline_in_dataset_name(
     for record in caplog.records:
         rendered = record.getMessage()
         assert "\n" not in rendered, f"raw newline reached a rendered log line: {rendered!r}"
+        assert 'dataset="ok"' not in rendered, f"unescaped quote forged a field: {rendered!r}"

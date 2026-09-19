@@ -443,6 +443,10 @@ def test_get_dataset_error_log_survives_a_newline_in_the_dataset_name(
     for record in caplog.records:
         rendered = record.getMessage()
         assert "\n" not in rendered, f"raw newline reached a rendered log line: {rendered!r}"
+        # Atchim (N5 follow-up): repr() does not escape '"', so a forged
+        # field can still be smuggled past a logfmt/key=value parser --
+        # the unescaped quoted substring must never appear verbatim.
+        assert 'dataset="ok"' not in rendered, f"unescaped quote forged a field: {rendered!r}"
 
 
 def test_write_scores_error_log_survives_a_newline_in_document_id_and_score_name(
@@ -453,7 +457,7 @@ def test_write_scores_error_log_survives_a_newline_in_document_id_and_score_name
     score_name is derived from a field/prompt name). Same fix
     (sanitize_for_log), same class of bug."""
     caplog.set_level(logging.ERROR)
-    malicious_document_id = "doc\ninjected fake log line status=200"
+    malicious_document_id = 'doc\ninjected fake log line status=200 dataset="ok"'
     malicious_score_name = "field:evil\ninjected"
     client = FakeHttpClient(
         {
@@ -499,6 +503,7 @@ def test_write_scores_error_log_survives_a_newline_in_document_id_and_score_name
     for record in caplog.records:
         rendered = record.getMessage()
         assert "\n" not in rendered, f"raw newline reached a rendered log line: {rendered!r}"
+        assert 'dataset="ok"' not in rendered, f"unescaped quote forged a field: {rendered!r}"
 
 
 def test_mark_run_status_error_log_survives_a_newline_in_run_id(
@@ -507,7 +512,7 @@ def test_mark_run_status_error_log_survives_a_newline_in_run_id(
     """N5 sibling: run_status_write_failed logs run_id -- caller-controlled
     (S-01.4 generates it). Same fix (sanitize_for_log)."""
     caplog.set_level(logging.ERROR)
-    malicious_run_id = "run\ninjected fake log line status=200"
+    malicious_run_id = 'run\ninjected fake log line status=200 dataset="ok"'
     client = FakeHttpClient({("POST", "/api/public/scores"): (500, {"message": "boom"})})
     adapter = LangfuseAdapter(client=client)
 
@@ -523,6 +528,7 @@ def test_mark_run_status_error_log_survives_a_newline_in_run_id(
     for record in caplog.records:
         rendered = record.getMessage()
         assert "\n" not in rendered, f"raw newline reached a rendered log line: {rendered!r}"
+        assert 'dataset="ok"' not in rendered, f"unescaped quote forged a field: {rendered!r}"
 
 
 def test_platform_adapter_protocol_has_no_get_golden_version() -> None:

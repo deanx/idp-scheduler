@@ -399,7 +399,15 @@ def test_tp37_same_run_name_different_run_ids_finding(
         matches = _experiments_named(client, same_run_name)
         return matches[0] if len(matches) == 1 else None
 
-    assert _bounded_poll(lambda: _merged_experiment() is not None)
+    # Atchim (deflake): poll on the FULL condition (experiment exists AND
+    # itemCount has caught up to 2), not just existence followed by a
+    # single one-shot assertion — itemCount is eventually consistent and
+    # can still read 1 for a moment after the experiment first appears.
+    def _merged_with_both_items() -> bool:
+        experiment = _merged_experiment()
+        return experiment is not None and experiment.get("itemCount") == 2
+
+    assert _bounded_poll(_merged_with_both_items)
     merged = _merged_experiment()
     assert merged is not None
     # OBSERVED FINDING: the two invocations merged into ONE experiment

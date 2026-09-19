@@ -42,14 +42,16 @@ def sanitize_for_log(value: object) -> str:
     """Render a caller-controlled value (dataset name, document_id, score
     name, run_id, ...) safe to interpolate into a single log line.
 
-    ``repr()`` both escapes control characters (``\\n``, ``\\r``, tabs,
-    ...) and quotes the value, so an embedded newline or double-quote
-    can never forge what looks like a second, independent log line or a
-    fake field to a naive log tailer/alerting pipeline (NFR N5, /test
-    Scenario B). Shared by every module in ``platform/`` that logs a
-    caller-controlled string.
+    ``json.dumps`` both escapes control characters (``\\n``, ``\\r``,
+    tabs, ...) AND escapes embedded ``"``/``\\`` (unlike ``repr()``,
+    which only escapes the delimiter it happens to pick and leaves the
+    other quote character bare) — Atchim: ``repr('x" status="200')`` ==
+    ``'x" status="200'``, so a bare ``"`` could still forge a field past
+    a logfmt/key=value parser. Double-quoting + full escaping closes
+    that gap (NFR N5, /test Scenario B). Shared by every module in
+    ``platform/`` that logs a caller-controlled string.
     """
-    return repr(value)
+    return json.dumps(str(value))
 
 
 class HttpClient(Protocol):

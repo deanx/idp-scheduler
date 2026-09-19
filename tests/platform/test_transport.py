@@ -104,7 +104,7 @@ def test_transport_failed_error_log_survives_a_newline_in_the_path(
     a higher layer builds it unencoded. Same fix (sanitize_for_log)."""
     caplog.set_level(logging.ERROR)
     client = UrllibHttpClient("http://localhost:1", "pub", "sec")
-    malicious_path = "/api/public/v2/datasets/ds\ninjected fake log line status=200"
+    malicious_path = '/api/public/v2/datasets/ds\ninjected fake log line status=200 dataset="ok"'
 
     def _raise_timeout(*args: object, **kwargs: object) -> None:
         raise TimeoutError("timed out")
@@ -119,3 +119,4 @@ def test_transport_failed_error_log_survives_a_newline_in_the_path(
     for record in caplog.records:
         rendered = record.getMessage()
         assert "\n" not in rendered, f"raw newline reached a rendered log line: {rendered!r}"
+        assert 'dataset="ok"' not in rendered, f"unescaped quote forged a field: {rendered!r}"
