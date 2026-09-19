@@ -30,6 +30,9 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+    "integration: requires live external services (skipped by default; opt in with RUN_INTEGRATION_TESTS=1)",
+]
 
 [tool.mypy]
 python_version = "3.13"
