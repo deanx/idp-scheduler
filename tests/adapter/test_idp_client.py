@@ -146,6 +146,52 @@ def test_extract_logs_a_per_document_timing_metric(
     assert any("idp_extraction_timing" in r.message for r in caplog.records)
 
 
+def test_extracted_values_never_appear_in_logs_or_stdout_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # /test Scenario B item 10: the extract() happy path must never leak an
+    # extracted field/table/prompt value into a log line or std{out,err} —
+    # plant sentinel values (PII/financial-shaped) in the raw poll response
+    # and assert none of them appear anywhere in captured output.
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    sentinel_field = "SSN-SENTINEL-486-27-9310"
+    sentinel_table_cell = "ACCT-SENTINEL-9981273"
+    sentinel_prompt_answer = "SENTINEL-VENDOR-Umbrella-Corp"
+    raw_success_body = {
+        "status": "SUCCEEDED",
+        "pages": [
+            {
+                "fields": {"ssn": {"value": sentinel_field, "confidence": 0.9}},
+                "tables": {
+                    "line_items": [
+                        {"account": {"value": sentinel_table_cell, "confidence": 0.9}}
+                    ]
+                },
+                "prompts": [
+                    {
+                        "prompt": "vendor name?",
+                        "answer": {"value": sentinel_prompt_answer, "confidence": 0.9},
+                    }
+                ],
+            }
+        ],
+    }
+    adapter = _adapter(monkeypatch, poll_results=[(200, raw_success_body)])
+    with caplog.at_level(logging.DEBUG):
+        out = adapter.extract(str(doc), "action-1", "v1")
+    assert out["fields"]["ssn"]["value"] == sentinel_field  # sanity: it really extracted
+
+    captured = capsys.readouterr()
+    for sentinel in (sentinel_field, sentinel_table_cell, sentinel_prompt_answer):
+        assert sentinel not in caplog.text
+        assert sentinel not in captured.out
+        assert sentinel not in captured.err
+
+
 def test_timing_metric_elapsed_value_equals_the_fake_clock_delta(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
