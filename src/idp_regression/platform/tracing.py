@@ -1,44 +1,62 @@
-"""OTLP trace + dataset-run linkage (T-01.3.10a, ADR-0005 #6 F3).
+"""Record-after experiment linkage (ADR-0005 Decision #9; closes Atchim
+S-01.3 R6, specifies the R5 fix).
 
 Empirically probed 2026-09-19 against the live self-hosted Langfuse
-4.38.0 (events_only): a *manual* OTel span + ``POST
-/api/public/dataset-run-items`` link does NOT make the run appear under
-the dataset's Experiments tab (``GET /api/public/experiments``), even
-with the same ``traceId`` attached to a score and the public
-``LangfuseOtelSpanAttributes.EXPERIMENT_*`` attributes set by hand. Only
-the SDK's own ``Langfuse.run_experiment(...)`` — which drives the
-per-item task execution itself and sets private linkage internals we
-should not reimplement — produced a run visible in
-``GET /api/public/experiments`` (confirmed within 5s). This module wraps
-that proven path rather than reinventing it from OTel primitives.
+4.38.0 (events_only): only ``Langfuse.run_experiment(data=…, task=…)``
+makes a run appear under the dataset's Experiments tab
+(``GET /api/public/experiments``); a manual OTel span + ``POST
+/api/public/dataset-run-items`` link does not, even after 80s (see the
+history of this module / DEBT-15/16 for the rejected approaches).
 
-``Langfuse.flush()`` was also probed against an unreachable host: it
-never raises — export failures are only logged (WARNING/ERROR) by the
-``opentelemetry.exporter.otlp.proto.http.trace_exporter`` logger and
-silently swallowed. TP-43 forbids best-effort flush, so ``flush()``
-here watches that logger during the flush call and raises
-``FlushFailedError`` if it emitted an ERROR record — the only failure
-signal the OTel SDK's ``BatchSpanProcessor.force_flush()`` surfaces
-(its own return value is True even on export failure, also probed).
+``run_experiment`` wraps items in ``asyncio.gather(return_exceptions=True)``
+(logs+swallows task exceptions), calls ``flush()`` internally, and logs
++swallows a failed ``dataset_run_items.create`` on the ``langfuse`` logger
+— none of these failures raise. So this module never runs the
+orchestrator's per-document loop through ``run_experiment`` (that would
+break INV-06/INV-08, ADR-0005 #9 rejected option (b)). Instead
+``record_experiment`` REPLAYS already-computed, already-gated results
+through a pure, total ``task`` purely to get the Experiments-tab-visible
+linkage (``trace_id``/``dataset_run_id``) — and detects every failure
+mode via (1) a dual log watcher spanning the whole call and (2) a
+structural check on the returned ``item_results``.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Protocol
 
-from idp_regression.platform.errors import FlushFailedError
+from idp_regression.platform.errors import ExperimentRecordFailedError, FlushFailedError
 
-#: The OTel OTLP HTTP exporter's logger — the only observable signal of
-#: an export failure once inside Langfuse.flush() (probed 2026-09-19; the
-#: SDK's own flush()/force_flush() never raise or return False on export
-#: failure).
+#: The OTel OTLP HTTP exporter's logger — an export failure (including one
+#: from run_experiment's own internal flush(), or a background
+#: BatchSpanProcessor thread mid-run) is only observable here (probed
+#: 2026-09-19: Langfuse.flush()/force_flush() never raise or return False
+#: on export failure).
 OTLP_EXPORTER_LOGGER_NAME = "opentelemetry.exporter.otlp.proto.http.trace_exporter"
 
+#: The langfuse SDK's own logger (and its submodules, via propagation) —
+#: a failed `dataset_run_items.create` call (R5c) is logged here, not on
+#: the OTLP exporter logger.
+LANGFUSE_SDK_LOGGER_NAME = "langfuse"
 
-class Flushable(Protocol):
-    def flush(self) -> None: ...
+
+@dataclass(frozen=True)
+class ExperimentItem:
+    """Adapter-private, duck-typed item ``run_experiment`` reads by
+    attribute access (``id``, ``dataset_id``, ``input``, ``expected_output``,
+    ``metadata``) — ADR-0005 #9. Never a real SDK ``DatasetItemClient``
+    (that would force a second fetch, violating INV-04's single-fetch
+    rule) and never crosses the ``PlatformAdapter`` Protocol (NFR N24).
+    """
+
+    id: str
+    dataset_id: Any
+    input: dict[str, Any]
+    expected_output: dict[str, Any]
+    metadata: None = None
 
 
 class ExperimentRunner(Protocol):
@@ -47,19 +65,18 @@ class ExperimentRunner(Protocol):
         *,
         name: str,
         run_name: str,
-        data: list[Any],
+        data: list[ExperimentItem],
         task: Callable[..., Any],
         max_concurrency: int = 1,
+        metadata: dict[str, str] | None = None,
     ) -> Any: ...
 
-
-class TracingClient(Flushable, ExperimentRunner, Protocol):
-    """The seam this module depends on — mocked in unit tests. The real
-    ``langfuse.Langfuse`` client naturally satisfies this structurally."""
+    def flush(self) -> None: ...
 
 
-class _ExportFailureWatcher(logging.Handler):
-    """Records whether the OTLP exporter logged an ERROR during flush()."""
+class _FailureWatcher(logging.Handler):
+    """Records only THAT an ERROR was logged — never the message itself,
+    since a message may carry an API error body (NFR N5, INV-02)."""
 
     def __init__(self) -> None:
         super().__init__(level=logging.ERROR)
@@ -69,42 +86,86 @@ class _ExportFailureWatcher(logging.Handler):
         self.failed = True
 
 
-def flush_or_raise(tracing_client: Flushable) -> None:
-    """Flush the tracing client; raise ``FlushFailedError`` if the OTLP
-    exporter logged an export failure during the flush (TP-43 — never
-    best-effort)."""
-    watcher = _ExportFailureWatcher()
-    exporter_logger = logging.getLogger(OTLP_EXPORTER_LOGGER_NAME)
-    exporter_logger.addHandler(watcher)
-    try:
-        tracing_client.flush()
-    finally:
-        exporter_logger.removeHandler(watcher)
-    if watcher.failed:
-        raise FlushFailedError(
-            "OTLP span export failed during flush() "
-            "(see the opentelemetry exporter's own ERROR log for detail)"
-        )
-
-
-def run_dataset_experiment(
+def record_experiment(
     tracing_client: ExperimentRunner,
     *,
     run_name: str,
-    dataset_items: list[Any],
+    items: list[ExperimentItem],
     task: Callable[..., Any],
-) -> Any:
-    """Run ``task`` once per dataset item under a single named experiment,
-    visible in the dataset's Experiments tab (live-proven path — see the
-    module docstring for why the manual span+dataset-run-item approach
-    was rejected). ``max_concurrency=1`` keeps iteration sequential so
-    the orchestrator's abort-on-failure semantics (INV-06) are not
-    undermined by concurrent task execution.
+    metadata: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Run ``task`` once per item under a single named experiment and
+    return the ``item_id -> trace_id`` mapping for score writes.
+
+    Failure detection (R5), both watched for the WHOLE call
+    (``run_experiment`` plus a trailing explicit ``flush()`` — handlers
+    are process-wide, so this also catches run_experiment's own internal
+    flush and any background-thread export that fires mid-call):
+      - an OTLP exporter ERROR -> ``FlushFailedError``;
+      - a ``langfuse`` (or submodule) ERROR -> ``ExperimentRecordFailedError``.
+
+    Positive structural check (Decision #9): ``len(item_results) ==
+    len(items)``, every ``trace_id`` set, every ``dataset_run_id``
+    non-null and identical across items. Any miss ->
+    ``ExperimentRecordFailedError``. Never retried by this function —
+    the caller (``record_run``) does not retry either (ADR-0005 #9).
     """
-    return tracing_client.run_experiment(
-        name=run_name,
-        run_name=run_name,
-        data=dataset_items,
-        task=task,
-        max_concurrency=1,
-    )
+    otlp_watcher = _FailureWatcher()
+    langfuse_watcher = _FailureWatcher()
+    otlp_logger = logging.getLogger(OTLP_EXPORTER_LOGGER_NAME)
+    langfuse_logger = logging.getLogger(LANGFUSE_SDK_LOGGER_NAME)
+    otlp_logger.addHandler(otlp_watcher)
+    langfuse_logger.addHandler(langfuse_watcher)
+    try:
+        result = tracing_client.run_experiment(
+            name=run_name,
+            run_name=run_name,
+            data=items,
+            task=task,
+            max_concurrency=1,
+            metadata=metadata,
+        )
+        tracing_client.flush()
+    finally:
+        otlp_logger.removeHandler(otlp_watcher)
+        langfuse_logger.removeHandler(langfuse_watcher)
+
+    if otlp_watcher.failed:
+        raise FlushFailedError(
+            "OTLP span export failed during record_experiment "
+            "(see the opentelemetry exporter's own ERROR log for detail)"
+        )
+    if langfuse_watcher.failed:
+        raise ExperimentRecordFailedError(
+            "the langfuse SDK logged an ERROR during record_experiment "
+            "(see the langfuse logger's own ERROR log for detail)"
+        )
+
+    item_results = list(result.item_results)
+    if len(item_results) != len(items):
+        raise ExperimentRecordFailedError(
+            f"record_experiment structural check failed: expected {len(items)} "
+            f"item results, got {len(item_results)}"
+        )
+
+    trace_ids: dict[str, str] = {}
+    dataset_run_ids: set[str] = set()
+    for item_result in item_results:
+        if not item_result.trace_id:
+            raise ExperimentRecordFailedError(
+                "record_experiment structural check failed: an item result has no trace_id"
+            )
+        if not item_result.dataset_run_id:
+            raise ExperimentRecordFailedError(
+                "record_experiment structural check failed: an item result has no dataset_run_id"
+            )
+        dataset_run_ids.add(item_result.dataset_run_id)
+        trace_ids[item_result.item.id] = item_result.trace_id
+
+    if len(dataset_run_ids) != 1:
+        raise ExperimentRecordFailedError(
+            "record_experiment structural check failed: item results don't share a "
+            f"single dataset_run_id (got {len(dataset_run_ids)} distinct values)"
+        )
+
+    return trace_ids

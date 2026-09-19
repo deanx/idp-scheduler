@@ -4,27 +4,36 @@ Skipped by default and in CI (see tests/conftest.py); opt in with
 ``RUN_INTEGRATION_TESTS=1``. Requires ``LANGFUSE_HOST`` /
 ``LANGFUSE_PUBLIC_KEY`` / ``LANGFUSE_SECRET_KEY`` in the environment
 (gitignored ``.env`` locally, per Mestre handoff). Uses only synthetic
-data; datasets are created with a ``test-s013-`` name prefix.
+data; datasets/runs are created with a ``test-s013-`` name prefix.
 
 F-1 note: the server may still be on a floating ``:4`` tag while the
 image gets pinned to 4.38.0 (user/Mestre) — the observed server version
 is recorded in the test output, not blocked on.
+
+Atchim R2: every test here asserts something real, never just an HTTP
+200. R1: ``test_get_dataset_item_count_is_a_regression_pin`` pins the
+exact item count against a live-created dataset — the old code silently
+returned 0 items forever, which no prior test would have caught.
 """
 
 from __future__ import annotations
 
 import datetime
+import logging
 import os
 import time
 import uuid
 from collections.abc import Callable
+from typing import Any, cast
 
 import pytest
 
 from idp_regression.platform.errors import DatasetFetchFailedError, FlushFailedError
 from idp_regression.platform.langfuse_adapter import LangfuseAdapter
 from idp_regression.platform.schema_provisioning import provision_golden_schema
+from idp_regression.platform.scoring import build_score_inputs, score_id
 from idp_regression.platform.transport import UrllibHttpClient
+from idp_regression.platform.types import DocumentRecord
 
 pytestmark = pytest.mark.integration
 
@@ -44,6 +53,17 @@ def client() -> UrllibHttpClient:
     return UrllibHttpClient(host=host, public_key=public_key, secret_key=secret_key)
 
 
+@pytest.fixture
+def sdk_client() -> Any:
+    from langfuse import Langfuse
+
+    return Langfuse(
+        host=_require_env("LANGFUSE_HOST"),
+        public_key=_require_env("LANGFUSE_PUBLIC_KEY"),
+        secret_key=_require_env("LANGFUSE_SECRET_KEY"),
+    )
+
+
 def _bounded_poll(
     check: Callable[[], bool], *, max_wait_s: float = 30.0, interval_s: float = 1.0
 ) -> bool:
@@ -56,6 +76,57 @@ def _bounded_poll(
     return False
 
 
+def _create_dataset_with_items(
+    client: UrllibHttpClient, *, n_items: int, with_tables: bool = False
+) -> tuple[str, list[str]]:
+    dataset_name = f"test-s013-{uuid.uuid4().hex[:8]}"
+    provision_golden_schema(client, dataset_name=dataset_name)
+    item_ids = []
+    for i in range(n_items):
+        expected_output: dict[str, object] = {
+            "fields": {"total": {"value": f"{100 + i}.00", "type": "number", "critical": True}}
+        }
+        if with_tables:
+            expected_output["tables"] = {
+                "line_items": {
+                    "match_key": "description",
+                    "critical": True,
+                    "rows": [{"description": "Widget A", "qty": "1", "unit_price": "50.00"}],
+                }
+            }
+        status, body = client.request(
+            "POST",
+            "/api/public/dataset-items",
+            {
+                "datasetName": dataset_name,
+                "input": {"document_id": f"doc-{i}"},
+                "expectedOutput": expected_output,
+            },
+        )
+        assert status == 200
+        item_ids.append(body["id"])
+    return dataset_name, item_ids
+
+
+# --- R1: critical regression pin -------------------------------------------
+
+
+def test_get_dataset_item_count_is_a_regression_pin(client: UrllibHttpClient) -> None:
+    """R1 (Atchim, critical): the old code read body["items"] against
+    GET /api/public/v2/datasets/{name}, which carries no such key on
+    4.38.0 -- it silently returned 0 items forever. This test pins the
+    exact item count against a live-created 3-item dataset so that
+    regression can never land silently again."""
+    dataset_name, item_ids = _create_dataset_with_items(client, n_items=3)
+    adapter = LangfuseAdapter(client=client)
+
+    dataset = adapter.get_dataset(dataset_name)
+
+    assert len(dataset["items"]) == 3
+    assert {item["item_id"] for item in dataset["items"]} == set(item_ids)
+    assert {item["document_id"] for item in dataset["items"]} == {"doc-0", "doc-1", "doc-2"}
+
+
 def test_schema_provisioning_round_trip(client: UrllibHttpClient) -> None:
     dataset_name = f"test-s013-{uuid.uuid4().hex[:8]}"
     adapter = LangfuseAdapter(client=client)
@@ -64,69 +135,64 @@ def test_schema_provisioning_round_trip(client: UrllibHttpClient) -> None:
     dataset = adapter.get_dataset(dataset_name)
 
     assert dataset["expected_output_schema"] is not None
+    assert dataset["expected_output_schema"]["required"] == ["fields"]
 
 
-def test_schema_invalid_write_rejected_400_value_unchanged(client: UrllibHttpClient) -> None:
+def test_schema_invalid_write_rejected_400_stored_value_unchanged(
+    client: UrllibHttpClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R2/TP-34: asserts the write is rejected AND the previously-stored
+    valid value is unchanged AND the 400 body is never logged."""
+    caplog.set_level(logging.ERROR)
     dataset_name = f"test-s013-{uuid.uuid4().hex[:8]}"
     provision_golden_schema(client, dataset_name=dataset_name)
+    status, item = client.request(
+        "POST",
+        "/api/public/dataset-items",
+        {
+            "datasetName": dataset_name,
+            "input": {"document_id": "doc-0"},
+            "expectedOutput": {
+                "fields": {"total": {"value": "100.00", "type": "number", "critical": True}}
+            },
+        },
+    )
+    assert status == 200
+    item_id = item["id"]
 
     status, body = client.request(
         "POST",
         "/api/public/dataset-items",
         {
+            "id": item_id,
             "datasetName": dataset_name,
-            "input": {"document_id": "synthetic-doc"},
+            "input": {"document_id": "doc-0"},
             "expectedOutput": {
                 "fields": {"total": {"value": "twelve fifty", "type": "number", "critical": True}}
             },
         },
     )
-
     assert status == 400
+    assert isinstance(body, dict)
+    assert "twelve fifty" not in caplog.text
+
+    status, readback = client.request("GET", f"/api/public/dataset-items/{item_id}")
+    assert status == 200
+    assert readback["expectedOutput"]["fields"]["total"]["value"] == "100.00"
 
 
-def test_write_scores_and_bounded_poll_read_via_v3_scores(client: UrllibHttpClient) -> None:
-    adapter = LangfuseAdapter(client=client)
-    run_id = f"test-s013-run-{uuid.uuid4().hex[:8]}"
-    document_id = "synthetic-doc"
-    score_name = "gate"
+def test_schema_covers_tables_block_write(client: UrllibHttpClient) -> None:
+    """TP-33: the tables-block write is untested — write a golden with a
+    tables block against the committed schema and confirm it's accepted
+    and readable."""
+    dataset_name, item_ids = _create_dataset_with_items(client, n_items=1, with_tables=True)
 
-    adapter.write_scores(
-        run_id=run_id,
-        document_id=document_id,
-        scores=[
-            {
-                "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{run_id}|{document_id}|{score_name}")),
-                "name": score_name,
-                "value": "PASS",
-            }
-        ],
-    )
+    status, readback = client.request("GET", f"/api/public/dataset-items/{item_ids[0]}")
 
-    def _score_visible() -> bool:
-        status, body = client.request("GET", "/api/public/v3/scores")
-        return status == 200
-
-    assert _bounded_poll(_score_visible)
-
-
-def test_n26_two_runs_same_golden_set_no_score_collision(client: UrllibHttpClient) -> None:
-    adapter = LangfuseAdapter(client=client)
-    document_id = "synthetic-doc"
-
-    adapter.write_scores(
-        run_id="test-s013-run-a",
-        document_id=document_id,
-        scores=[{"id": str(uuid.uuid4()), "name": "gate", "value": "PASS"}],
-    )
-    adapter.write_scores(
-        run_id="test-s013-run-b",
-        document_id=document_id,
-        scores=[{"id": str(uuid.uuid4()), "name": "gate", "value": "FAIL"}],
-    )
-    # No assertion error / exception on either write is the collision-free
-    # signal here — a deterministic-id cross-run collision would upsert
-    # (overwrite) instead of creating two independent scores.
+    assert status == 200
+    assert readback["expectedOutput"]["tables"]["line_items"]["rows"] == [
+        {"description": "Widget A", "qty": "1", "unit_price": "50.00"}
+    ]
 
 
 def test_get_dataset_missing_dataset_raises_typed_error(client: UrllibHttpClient) -> None:
@@ -136,63 +202,74 @@ def test_get_dataset_missing_dataset_raises_typed_error(client: UrllibHttpClient
         adapter.get_dataset(f"does-not-exist-{uuid.uuid4().hex}")
 
 
-# --- T-01.3.10a: OTLP trace + dataset-run linkage --------------------------
+# --- T-01.3.10a / ADR-0005 #9: record_run -----------------------------------
 
 
-def test_flush_raises_flush_failed_on_a_real_export_failure() -> None:
-    """TP-43: flush() must never swallow an OTLP export failure. Points
-    the SDK's tracing client at an unreachable host (never the real
-    LANGFUSE_HOST) so no real credentials or network calls to the live
-    server are involved in this specific assertion."""
-    from langfuse import Langfuse
-
-    unreachable = Langfuse(host="http://localhost:1", public_key="pk-test", secret_key="sk-test")
-    with unreachable.start_as_current_observation(name="test-s013-unreachable", as_type="span"):
-        pass
-    adapter = LangfuseAdapter(
-        client=UrllibHttpClient("http://localhost:1", "x", "x"), tracing_client=unreachable
-    )
-
-    with pytest.raises(FlushFailedError):
-        adapter.flush()
-
-
-def test_run_dataset_experiment_is_visible_in_experiments_listing(
-    client: UrllibHttpClient,
+def test_record_run_writes_readable_scores_and_is_visible_in_experiments(
+    client: UrllibHttpClient, sdk_client: Any
 ) -> None:
-    """Empirically-proven linkage path (tracing.py docstring): a manual
-    span + dataset-run-item does NOT show up in Experiments; only
-    ``run_experiment`` does. This is the live confirmation of that path.
-    """
-    from langfuse import Langfuse
+    """R2: replaces the old no-assertion `_score_visible`/N26 tests.
+    Asserts (a) the score exists with the expected VALUE on the real
+    trace id record_run returned, and (b) the run is visible under
+    GET /api/public/experiments."""
+    from idp_regression.platform.tracing import ExperimentRunner
 
-    host = _require_env("LANGFUSE_HOST")
-    public_key = _require_env("LANGFUSE_PUBLIC_KEY")
-    secret_key = _require_env("LANGFUSE_SECRET_KEY")
+    dataset_name, item_ids = _create_dataset_with_items(client, n_items=2)
+    adapter = LangfuseAdapter(client=client, tracing_client=cast(ExperimentRunner, sdk_client))
+    dataset = adapter.get_dataset(dataset_name)  # populates the private item cache
 
-    dataset_name = f"test-s013-{uuid.uuid4().hex[:8]}"
-    provision_golden_schema(client, dataset_name=dataset_name)
-    status, item = client.request(
-        "POST",
-        "/api/public/dataset-items",
-        {
-            "datasetName": dataset_name,
-            "input": {"document_id": "synthetic-doc"},
-            "expectedOutput": {"fields": {}},
-        },
-    )
-    assert status == 200
-
-    sdk_client = Langfuse(host=host, public_key=public_key, secret_key=secret_key)
-    adapter = LangfuseAdapter(client=client, tracing_client=sdk_client)
-    dataset = sdk_client.get_dataset(dataset_name)
+    run_id = f"test-s013-run-{uuid.uuid4().hex[:8]}"
     run_name = f"test-s013-run-{uuid.uuid4().hex[:8]}"
+    records: list[DocumentRecord] = [
+        {
+            "item_id": item["item_id"],
+            "document_id": item["document_id"],
+            "actual": {
+                "status": "SUCCEEDED",
+                "fields": {"total": {"value": item["golden"]["fields"]["total"]["value"]}},
+            },
+            "scores": build_score_inputs(
+                golden=item["golden"],
+                verdicts={
+                    "total": {
+                        "verdict": "match",
+                        "expected": item["golden"]["fields"]["total"]["value"],
+                        "actual": item["golden"]["fields"]["total"]["value"],
+                        "confidence": 0.9,
+                        "critical": True,
+                        "type": "number",
+                    }
+                },
+                gate="PASS",
+                run_id=run_id,
+                document_id=item["document_id"],
+            ),
+        }
+        for item in dataset["items"]
+    ]
 
-    def task(*, item: object, **kwargs: object) -> dict[str, bool]:
-        return {"ok": True}
+    adapter.record_run(
+        dataset_name=dataset_name,
+        run_name=run_name,
+        run_id=run_id,
+        records=records,
+        metadata={"action_id": "action-1", "action_version": "v1", "golden_version": "deadbeef"},
+    )
 
-    adapter.run_dataset_experiment(run_name=run_name, dataset_items=dataset.items, task=task)
-    adapter.flush()
+    gate_score_id = score_id(
+        run_id=run_id, document_id=records[0]["document_id"], score_name="gate"
+    )
+
+    def _gate_score_readable() -> bool:
+        status, body = client.request("GET", "/api/public/v3/scores?fields=details")
+        if status != 200 or not isinstance(body, dict):
+            return False
+        for score in body.get("data", []):
+            if score.get("id") == gate_score_id and score.get("value") == "PASS":
+                return True
+        return False
+
+    assert _bounded_poll(_gate_score_readable)
 
     one_hour_ago = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=1)
     from_ts = one_hour_ago.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -207,3 +284,58 @@ def test_run_dataset_experiment_is_visible_in_experiments_listing(
         return run_name in names
 
     assert _bounded_poll(_experiment_visible, max_wait_s=30.0, interval_s=2.0)
+
+
+def test_record_run_no_retry_and_no_op_flush_when_tracing_not_configured(
+    client: UrllibHttpClient,
+) -> None:
+    """R6 sanity: record_run without a tracing_client raises immediately
+    (never silently no-ops)."""
+    from idp_regression.platform.errors import TracingNotConfiguredError
+
+    dataset_name, item_ids = _create_dataset_with_items(client, n_items=1)
+    adapter = LangfuseAdapter(client=client)  # no tracing_client
+    dataset = adapter.get_dataset(dataset_name)
+
+    with pytest.raises(TracingNotConfiguredError):
+        adapter.record_run(
+            dataset_name=dataset_name,
+            run_name="test-s013-run-x",
+            run_id="run-x",
+            records=[
+                {
+                    "item_id": dataset["items"][0]["item_id"],
+                    "document_id": dataset["items"][0]["document_id"],
+                    "actual": {"status": "SUCCEEDED", "fields": {}},
+                    "scores": [],
+                }
+            ],
+            metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+        )
+
+
+def test_flush_raises_flush_failed_on_a_real_export_failure() -> None:
+    """TP-43: an OTLP export failure must never be swallowed. Points the
+    SDK's tracing client at an unreachable host (never the real
+    LANGFUSE_HOST) so no real credentials or network calls to the live
+    server are involved in this specific assertion."""
+    from langfuse import Langfuse
+
+    from idp_regression.platform.tracing import ExperimentItem, ExperimentRunner, record_experiment
+
+    unreachable = Langfuse(host="http://localhost:1", public_key="pk-test", secret_key="sk-test")
+
+    def task(*, item: object, **kwargs: object) -> dict[str, bool]:
+        return {"ok": True}
+
+    items = [
+        ExperimentItem(id="i1", dataset_id="d", input={"document_id": "doc-0"}, expected_output={})
+    ]
+
+    with pytest.raises(FlushFailedError):
+        record_experiment(
+            cast(ExperimentRunner, unreachable),
+            run_name="test-s013-unreachable",
+            items=items,
+            task=task,
+        )

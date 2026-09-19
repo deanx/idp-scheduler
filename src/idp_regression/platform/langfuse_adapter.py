@@ -1,4 +1,4 @@
-"""LangfuseAdapter — the concrete PlatformAdapter (ADR-0001, ADR-0005).
+"""LangfuseAdapter — the concrete PlatformAdapter (ADR-0001, ADR-0005 #9).
 
 All Langfuse-specific knowledge (endpoints, auth, wire shapes) is confined
 to this module (and ``transport.py``/``schema_provisioning.py``/
@@ -8,10 +8,9 @@ to this module (and ``transport.py``/``schema_provisioning.py``/
 Design note (flagged for Atchim): the ``run_status`` metadata marker
 (ADR-0004 #14) is implemented here as a well-known score
 (``name="run_status"``) rather than a dataset-run/trace attribute
-(DEBT-15) — this remains true even after T-01.3.10a landed, because the
-only Experiments-tab-visible linkage mechanism found (``run_experiment``,
-see ``tracing.py``) is a bulk, per-dataset-item task runner with no
-natural single "run-level" trace to attach a marker to.
+(DEBT-15) — ``record_run``'s linkage is per-dataset-item, so there is no
+single "run-level" trace to attach a marker to, and an aborted run may
+have written no records at all.
 """
 
 from __future__ import annotations
@@ -23,14 +22,22 @@ from typing import Any, Literal, cast
 
 from idp_regression.platform.errors import (
     DatasetFetchFailedError,
+    ExperimentRecordFailedError,
     RunStatusWriteFailedError,
     ScoreWriteFailedError,
     TracingNotConfiguredError,
     TransportError,
 )
-from idp_regression.platform.tracing import TracingClient, flush_or_raise, run_dataset_experiment
+from idp_regression.platform.tracing import ExperimentItem, ExperimentRunner, record_experiment
 from idp_regression.platform.transport import HttpClient, UrllibHttpClient
-from idp_regression.platform.types import Dataset, DatasetItem, PlatformAdapter, ScoreInput
+from idp_regression.platform.types import (
+    Dataset,
+    DatasetItem,
+    DocumentRecord,
+    PlatformAdapter,
+    RunMetadata,
+    ScoreInput,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +57,7 @@ def _body_snippet_for_error(body: Any) -> str:
 class LangfuseAdapter:
     """PlatformAdapter implementation over the Langfuse public REST API."""
 
-    def __init__(self, client: HttpClient, tracing_client: TracingClient | None = None) -> None:
+    def __init__(self, client: HttpClient, tracing_client: ExperimentRunner | None = None) -> None:
         self._client = client
         self._tracing_client = tracing_client
         #: item_id -> (dataset_id, golden) from the most recent get_dataset
@@ -131,10 +138,11 @@ class LangfuseAdapter:
             page += 1
         return items
 
-    def write_scores(self, run_id: str, document_id: str, scores: list[ScoreInput]) -> None:
-        from idp_regression.platform.scoring import trace_id
-
-        score_trace_id = trace_id(run_id=run_id, document_id=document_id)
+    def _write_scores(self, *, trace_id: str, document_id: str, scores: list[ScoreInput]) -> None:
+        """Adapter-private (ADR-0005 #9 — no longer on the Protocol). Called
+        by ``record_run`` once a real, ingested ``trace_id`` is known for
+        the document (never the deterministic pre-#9 ``trace_id()``, which
+        ``mark_run_status`` still uses for its own sentinel trace)."""
         for score in scores:
             status, body = self._client.request(
                 "POST",
@@ -144,7 +152,7 @@ class LangfuseAdapter:
                     "name": score["name"],
                     "value": score["value"],
                     "comment": score.get("comment"),
-                    "traceId": score_trace_id,
+                    "traceId": trace_id,
                     "dataType": "CATEGORICAL",
                 },
             )
@@ -160,32 +168,80 @@ class LangfuseAdapter:
                     f"write_scores failed for {score['name']!r} with HTTP {status}"
                 )
 
-    def flush(self) -> None:
-        """Flush the OTLP trace exporter (T-01.3.10a). No-op if no
-        ``tracing_client`` was configured (e.g. unit tests that only
-        exercise the REST score/dataset paths). Never best-effort once a
-        tracing client IS configured — raises ``FlushFailedError`` on a
-        real export failure (TP-43); see ``tracing.flush_or_raise``.
-        """
-        if self._tracing_client is None:
-            return None
-        flush_or_raise(self._tracing_client)
-
-    def run_dataset_experiment(
-        self, *, run_name: str, dataset_items: list[Any], task: Any
-    ) -> Any:
-        """T-01.3.10a: run ``task`` once per dataset item under a single
-        named experiment, visible in the dataset's Experiments tab
-        (``tracing.run_dataset_experiment`` — the only linkage mechanism
-        empirically confirmed to work, see that module's docstring).
+    def record_run(
+        self,
+        *,
+        dataset_name: str,
+        run_name: str,
+        run_id: str,
+        records: list[DocumentRecord],
+        metadata: RunMetadata,
+    ) -> None:
+        """ADR-0005 Decision #9: record a complete run once, after every
+        gate is already known. No retry — see the ADR for why (a failed
+        OTLP batch has already exhausted the exporter's own retries; a
+        failed run_experiment is not safely re-runnable per run_name).
         """
         if self._tracing_client is None:
             raise TracingNotConfiguredError(
-                "run_dataset_experiment requires a tracing_client (OTLP/v4 SDK) — none configured"
+                "record_run requires a tracing_client (OTLP/v4 SDK) — none configured"
             )
-        return run_dataset_experiment(
-            self._tracing_client, run_name=run_name, dataset_items=dataset_items, task=task
+
+        record_item_ids = [record["item_id"] for record in records]
+        if len(record_item_ids) != len(set(record_item_ids)):
+            raise ExperimentRecordFailedError("record_run: duplicate item_id in records")
+        if set(record_item_ids) != set(self._item_cache.keys()):
+            raise ExperimentRecordFailedError(
+                "record_run: records' item_ids do not exactly match the fetched dataset items "
+                "(call get_dataset(dataset_name) first, in this same run)"
+            )
+
+        records_by_item_id = {record["item_id"]: record for record in records}
+        task_failed = False
+
+        def task(*, item: ExperimentItem, **kwargs: Any) -> dict[str, Any]:
+            # A total function that cannot raise (ADR-0005 #9 defense in
+            # depth): str(exception) must never reach a span attribute.
+            nonlocal task_failed
+            try:
+                record = records_by_item_id[item.id]
+                return {"actual": record["actual"]}
+            except Exception:  # noqa: BLE001 - intentional total catch, no exception text kept
+                task_failed = True
+                return {"record_error": "task_failed"}
+
+        experiment_items = [
+            ExperimentItem(
+                id=item_id,
+                dataset_id=self._item_cache[item_id][0],
+                input={"document_id": records_by_item_id[item_id]["document_id"]},
+                expected_output=self._item_cache[item_id][1],
+            )
+            for item_id in record_item_ids
+        ]
+
+        trace_ids = record_experiment(
+            self._tracing_client,
+            run_name=run_name,
+            items=experiment_items,
+            task=task,
+            metadata={
+                "action_id": metadata["action_id"],
+                "action_version": metadata["action_version"],
+                "golden_version": metadata["golden_version"],
+            },
         )
+
+        if task_failed:
+            raise ExperimentRecordFailedError(
+                "record_run: the total task caught an unexpected exception for at least one item"
+            )
+
+        for record in records:
+            trace_id = trace_ids[record["item_id"]]
+            self._write_scores(
+                trace_id=trace_id, document_id=record["document_id"], scores=record["scores"]
+            )
 
     def mark_run_status(
         self,
@@ -256,5 +312,5 @@ def make_platform() -> PlatformAdapter:
     sdk_client = Langfuse(host=host, public_key=public_key, secret_key=secret_key)
     return cast(
         PlatformAdapter,
-        LangfuseAdapter(client=client, tracing_client=cast(TracingClient, sdk_client)),
+        LangfuseAdapter(client=client, tracing_client=cast(ExperimentRunner, sdk_client)),
     )
