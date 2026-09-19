@@ -91,7 +91,10 @@ def build_score_inputs(
                 "id": score_id(run_id=run_id, document_id=document_id, score_name=name),
                 "name": name,
                 "value": _verdict_value(verdict),
-                "comment": _verdict_comment(verdict),
+                # DEBT-18 (user decision, option B): no expected/actual/
+                # confidence value leaves the app — the golden lives only
+                # in its Langfuse dataset item.
+                "comment": None,
             }
         )
 
@@ -103,7 +106,7 @@ def build_score_inputs(
                 "id": score_id(run_id=run_id, document_id=document_id, score_name=name),
                 "name": name,
                 "value": _verdict_value(verdict),
-                "comment": _verdict_comment(verdict),
+                "comment": None,  # DEBT-18 option B — see above
             }
         )
 
@@ -128,10 +131,3 @@ def _verdict_value(verdict: Verdict | TableVerdict) -> str:
     return str(verdict["verdict"])
 
 
-def _verdict_comment(verdict: Verdict | TableVerdict) -> str | None:
-    if verdict.get("verdict") == "detail":
-        return None  # a TableVerdict container has no expected/actual/confidence
-    expected = verdict.get("expected")
-    actual = verdict.get("actual")
-    confidence = verdict.get("confidence")
-    return f"expected={expected!r} actual={actual!r} confidence={confidence!r}"

@@ -153,3 +153,51 @@ def test_a_missing_verdict_raises_instead_of_silently_writing_missing() -> None:
             run_id="run-1",
             document_id="invoice-007.pdf",
         )
+
+
+# --- DEBT-18 option B: no expected/actual/confidence value leaves the app --
+
+_EXPECTED_SENTINEL = "SENTINEL-EXPECTED-4f8c1e"
+_ACTUAL_SENTINEL = "SENTINEL-ACTUAL-9b2d7a"
+
+
+def test_score_comment_is_always_none() -> None:
+    """DEBT-18 option B: the minimal, value-free shape is no comment at
+    all — CT-03 pins this so a future change can't silently reintroduce
+    expected/actual/confidence into a score payload."""
+    scores = build_score_inputs(
+        golden=_golden(),
+        verdicts=_verdicts(),
+        gate="PASS",
+        run_id="run-1",
+        document_id="invoice-007.pdf",
+    )
+
+    for score in scores:
+        assert score.get("comment") is None
+
+
+def test_no_sentinel_expected_or_actual_value_appears_in_any_score_input() -> None:
+    """Plants distinctive sentinels as expected/actual in the verdicts
+    and asserts neither ever reaches a ScoreInput (id/name/value/comment)."""
+    golden = _golden()
+    verdicts = _verdicts()
+    verdicts["total"] = {
+        "verdict": "wrong_value",
+        "expected": _EXPECTED_SENTINEL,
+        "actual": _ACTUAL_SENTINEL,
+        "confidence": 0.42,
+        "critical": True,
+        "type": "number",
+    }
+
+    scores = build_score_inputs(
+        golden=golden, verdicts=verdicts, gate="FAIL", run_id="run-1", document_id="doc-0"
+    )
+
+    for score in scores:
+        for value in score.values():
+            text = str(value)
+            assert _EXPECTED_SENTINEL not in text
+            assert _ACTUAL_SENTINEL not in text
+            assert "0.42" not in text
