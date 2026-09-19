@@ -55,6 +55,10 @@ def test_whitespace_around_comma_separated_statuses_is_stripped(
     assert adapter._terminal_statuses == {"SUCCEEDED", "FAILED"}  # noqa: SLF001
 
 
-def test_missing_required_credential_raises() -> None:
+def test_missing_required_credential_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Clear real creds explicitly — a live .env sourced into the shell
+    # (e.g. RUN_INTEGRATION_TESTS=1 runs) must not make this test flaky.
+    for key in _REQUIRED_ENV:
+        monkeypatch.delenv(key, raising=False)
     with pytest.raises(RuntimeError, match="IDP_CLIENT_ID"):
         make_idp_adapter()
