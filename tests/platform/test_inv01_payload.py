@@ -79,6 +79,7 @@ def test_write_scores_payload_never_carries_a_file_path_or_bytes() -> None:
     adapter._item_cache = {
         "item-1": ("ds-1", {"fields": {"total": {"value": "1250.00", "type": "number"}}})
     }  # noqa: SLF001
+    adapter._cached_dataset_name = "ds"  # noqa: SLF001
     scores = build_score_inputs(
         golden={
             "document_id": "invoice-007.pdf",
@@ -154,6 +155,7 @@ def test_experiment_item_input_contains_only_document_id() -> None:
     tracing_client = RecordingTracingClient()
     adapter = LangfuseAdapter(client=client, tracing_client=tracing_client)
     adapter._item_cache = {"item-1": ("ds-1", {"fields": {}})}  # noqa: SLF001
+    adapter._cached_dataset_name = "ds"  # noqa: SLF001
 
     adapter.record_run(
         dataset_name="ds",
@@ -184,6 +186,7 @@ def test_experiment_task_output_is_only_the_normalized_actual_never_exception_te
     tracing_client = RecordingTracingClient()
     adapter = LangfuseAdapter(client=client, tracing_client=tracing_client)
     adapter._item_cache = {"item-1": ("ds-1", {"fields": {}})}  # noqa: SLF001
+    adapter._cached_dataset_name = "ds"  # noqa: SLF001
     actual: NormalizedOutput = {
         "status": "SUCCEEDED",
         "fields": {"total": {"value": "1250.00", "confidence": 0.9}},
@@ -207,6 +210,7 @@ def test_run_metadata_forwarded_as_experiment_metadata() -> None:
     tracing_client = RecordingTracingClient()
     adapter = LangfuseAdapter(client=client, tracing_client=tracing_client)
     adapter._item_cache = {"item-1": ("ds-1", {"fields": {}})}  # noqa: SLF001
+    adapter._cached_dataset_name = "ds"  # noqa: SLF001
 
     adapter.record_run(
         dataset_name="ds",
@@ -316,6 +320,7 @@ def test_real_sdk_spans_allowlist_path_sentinel_and_task_failed_constant(
     """
     adapter, exporter = real_sdk_adapter_and_exporter
     adapter._item_cache = {"item-1": ("ds-1", {"fields": {}})}  # noqa: SLF001
+    adapter._cached_dataset_name = "ds"  # noqa: SLF001
     actual: NormalizedOutput = {"status": "SUCCEEDED", "fields": {"total": {"value": "100.00"}}}
 
     # --- scenario 1: happy path + path sentinel -----------------------

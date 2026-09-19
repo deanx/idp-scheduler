@@ -64,6 +64,12 @@ class LangfuseAdapter:
         #: call — record_run() reads this instead of re-fetching (INV-04,
         #: ADR-0005 #9 "no second fetch").
         self._item_cache: dict[str, tuple[str, dict[str, Any]]] = {}
+        #: the dataset name that produced ``_item_cache`` — record_run
+        #: checks its own ``dataset_name`` argument against this so a
+        #: caller passing the wrong dataset (while reusing stale item ids
+        #: from a previous, correctly-fetched dataset) is caught rather
+        #: than silently recording against the wrong dataset.
+        self._cached_dataset_name: str | None = None
 
     def get_dataset(self, name: str) -> Dataset:
         encoded_name = urllib.parse.quote(name, safe="")
@@ -87,6 +93,7 @@ class LangfuseAdapter:
         schema = body.get("expectedOutputSchema")
 
         items = self._fetch_all_dataset_items(name, encoded_name, dataset_id)
+        self._cached_dataset_name = name
         return {"items": items, "expected_output_schema": schema}
 
     def _fetch_all_dataset_items(
@@ -185,6 +192,12 @@ class LangfuseAdapter:
         if self._tracing_client is None:
             raise TracingNotConfiguredError(
                 "record_run requires a tracing_client (OTLP/v4 SDK) — none configured"
+            )
+        if dataset_name != self._cached_dataset_name:
+            raise ExperimentRecordFailedError(
+                f"record_run: dataset_name {dataset_name!r} does not match the dataset "
+                f"{self._cached_dataset_name!r} last fetched by get_dataset() — call "
+                "get_dataset(dataset_name) first, in this same run"
             )
 
         record_item_ids = [record["item_id"] for record in records]
