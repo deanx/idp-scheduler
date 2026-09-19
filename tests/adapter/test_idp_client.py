@@ -164,6 +164,47 @@ def test_auth_failure_at_run_start_is_fail_closed_no_retry(
     assert len(calls) == 1  # no retry
 
 
+@pytest.mark.parametrize(
+    "bad_expires_in",
+    [float("nan"), float("inf"), float("-inf"), -1.0, 0.0, "not-a-number", 10**20],
+)
+def test_invalid_expires_in_raises_typed_auth_error_fail_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_expires_in: object
+) -> None:
+    # /test Scenario B item 3: NaN/inf/negative/zero/non-numeric/huge must
+    # never silently become expires_at = nan (or some other unusable
+    # deadline) — fail-closed instead.
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    adapter = _adapter(
+        monkeypatch,
+        fetch_token_result=(200, {"access_token": "tok-1", "expires_in": bad_expires_in}),
+    )
+    with pytest.raises(IDPAuthenticationError):
+        adapter.extract(str(doc), "action-1", "v1")
+
+
+def test_nan_expires_in_does_not_produce_a_token_that_never_refreshes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A NaN expires_in must never silently produce expires_at = nan — every
+    # future `now >= expires_at - margin` comparison would be False (NaN
+    # comparisons are always False), so a bad token would be cached forever
+    # and never refresh again. Since _fetch_token rejects NaN outright, no
+    # token is ever cached from it — repeated extract() calls keep failing
+    # fail-closed rather than silently succeeding on a permanently-stale token.
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    adapter = _adapter(
+        monkeypatch,
+        fetch_token_result=(200, {"access_token": "tok-1", "expires_in": float("nan")}),
+    )
+    with pytest.raises(IDPAuthenticationError):
+        adapter.extract(str(doc), "action-1", "v1")
+    with pytest.raises(IDPAuthenticationError):
+        adapter.extract(str(doc), "action-1", "v1")
+
+
 def test_submit_transport_failure_raises_typed_error_not_retried(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

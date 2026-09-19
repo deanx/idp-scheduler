@@ -177,7 +177,11 @@ def test_unsafe_prompt_key_lone_surrogate_raises() -> None:
     raw = {
         "status": "SUCCEEDED",
         "pages": [
-            {"prompts": [{"prompt": "vendor?\udcff", "answer": {"value": "A", "confidence": None}}]}
+            {
+                "prompts": [
+                    {"prompt": "vendor?\udcff", "answer": {"value": "A", "confidence": None}}
+                ]
+            }
         ],
     }
     with pytest.raises(MalformedIDPOutputError) as excinfo:

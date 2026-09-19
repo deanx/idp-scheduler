@@ -9,6 +9,7 @@ allowlist, monotonic-clock budget, INV-07) -> ``normalize()``.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from collections.abc import Callable
@@ -36,6 +37,11 @@ DEFAULT_SUBMIT_TIMEOUT_SECONDS = 30.0
 DEFAULT_POLL_TIMEOUT_SECONDS = 120.0
 DEFAULT_POLL_INTERVAL_SECONDS = 3.0
 DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS = 60.0
+
+#: A sane upper bound on a token's advertised lifetime (1 year) — anything
+#: beyond this is treated as malformed, not "very long-lived" (/test
+#: Scenario B item 3).
+MAX_EXPIRES_IN_SECONDS = 86_400.0 * 365
 
 
 def _executions_base_url(region: str, org_id: str, action_id: str, version: str) -> str:
@@ -131,8 +137,16 @@ class MuleSoftIDPAdapter:
         expires_in_raw = body.get("expires_in", 300)
         try:
             expires_in = float(expires_in_raw)
-        except (TypeError, ValueError):
-            expires_in = 300.0
+        except (TypeError, ValueError, OverflowError):
+            raise IDPAuthenticationError(
+                "OAuth token response has a non-numeric expires_in"
+            ) from None
+        # Fail-closed on NaN/inf/non-positive/absurdly-large (/test Scenario
+        # B item 3) — a NaN or inf expires_in would silently produce
+        # expires_at = nan/inf, and NaN comparisons are always False, so the
+        # cached token would never be treated as due for refresh again.
+        if not math.isfinite(expires_in) or expires_in <= 0 or expires_in > MAX_EXPIRES_IN_SECONDS:
+            raise IDPAuthenticationError("OAuth token response has an invalid expires_in")
         return access_token, expires_in
 
     # -- Submit (not retried — ADR-0004 #1/#4) -----------------------------
