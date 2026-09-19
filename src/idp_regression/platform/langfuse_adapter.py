@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import logging
 import os
+import random
+import time
 import urllib.parse
+from collections.abc import Callable
 from typing import Any, Literal, cast
 
 from idp_regression.platform.errors import (
@@ -48,6 +51,15 @@ _RUN_STATUS_SCORE_NAME = "run_status"
 #: ``meta.totalPages`` from looping unbounded.
 _MAX_DATASET_PAGES = 500
 
+#: Bounded score-write retry defaults (REG-03, F-2; ADR-0005 #9: the
+#: deterministic score_id makes a retry an upsert, so a 5xx/transport
+#: failure is safe to retry). Backoff shape matches ADR-0004 #3's
+#: transient-transport-retry spec: exponential, full jitter, base 1s,
+#: cap 8s, default 3 attempts.
+_DEFAULT_SCORE_WRITE_MAX_ATTEMPTS = 3
+_DEFAULT_SCORE_WRITE_BACKOFF_BASE_SECONDS = 1.0
+_DEFAULT_SCORE_WRITE_BACKOFF_CAP_SECONDS = 8.0
+
 
 def _body_snippet_for_error(body: Any) -> str:
     """A logging-safe error summary — deliberately NEVER the raw response
@@ -62,9 +74,24 @@ def _body_snippet_for_error(body: Any) -> str:
 class LangfuseAdapter:
     """PlatformAdapter implementation over the Langfuse public REST API."""
 
-    def __init__(self, client: HttpClient, tracing_client: ExperimentRunner | None = None) -> None:
+    def __init__(
+        self,
+        client: HttpClient,
+        tracing_client: ExperimentRunner | None = None,
+        *,
+        score_write_max_attempts: int = _DEFAULT_SCORE_WRITE_MAX_ATTEMPTS,
+        score_write_backoff_base_seconds: float = _DEFAULT_SCORE_WRITE_BACKOFF_BASE_SECONDS,
+        score_write_backoff_cap_seconds: float = _DEFAULT_SCORE_WRITE_BACKOFF_CAP_SECONDS,
+        sleep: Callable[[float], None] = time.sleep,
+        random_func: Callable[[], float] = random.random,
+    ) -> None:
         self._client = client
         self._tracing_client = tracing_client
+        self._score_write_max_attempts = score_write_max_attempts
+        self._score_write_backoff_base_seconds = score_write_backoff_base_seconds
+        self._score_write_backoff_cap_seconds = score_write_backoff_cap_seconds
+        self._sleep = sleep
+        self._random = random_func
         #: item_id -> dataset_id from the most recent get_dataset call —
         #: record_run() reads this instead of re-fetching (INV-04,
         #: ADR-0005 #9 "no second fetch"). DEBT-18 (Atchim suggestion):
@@ -151,10 +178,13 @@ class LangfuseAdapter:
             if (
                 not isinstance(raw_total_pages, int)
                 or isinstance(raw_total_pages, bool)
-                or raw_total_pages < 1
+                or raw_total_pages < 0
             ):
+                # 0 is a legitimate shape (an empty dataset, live-confirmed
+                # on Langfuse 4.38.0) -- only a negative or non-int value
+                # is untrusted/malformed.
                 raise DatasetFetchFailedError(
-                    "dataset-items response 'meta.totalPages' is not a positive integer"
+                    "dataset-items response 'meta.totalPages' is not a non-negative integer"
                 )
 
             for raw_item in data:
@@ -181,19 +211,51 @@ class LangfuseAdapter:
         the document (never the deterministic pre-#9 ``trace_id()``, which
         ``mark_run_status`` still uses for its own sentinel trace)."""
         for score in scores:
-            status, body = self._client.request(
-                "POST",
-                "/api/public/scores",
-                {
-                    "id": score["id"],
-                    "name": score["name"],
-                    "value": score["value"],
-                    "comment": score.get("comment"),
-                    "traceId": trace_id,
-                    "dataType": "CATEGORICAL",
-                },
-            )
-            if status >= 400:
+            self._write_score_with_retry(trace_id=trace_id, document_id=document_id, score=score)
+
+    def _write_score_with_retry(
+        self, *, trace_id: str, document_id: str, score: ScoreInput
+    ) -> None:
+        """REG-03/F-2: a bounded retry (ADR-0004 #3 backoff shape). The
+        score_id is deterministic (ADR-0005 #5), so every retried attempt
+        re-sends the exact same payload -- an upsert, never a duplicate.
+        Retries only 5xx and TransportError (transient); a 4xx is a
+        caller/contract bug and is never retried."""
+        payload = {
+            "id": score["id"],
+            "name": score["name"],
+            "value": score["value"],
+            "comment": score.get("comment"),
+            "traceId": trace_id,
+            "dataType": "CATEGORICAL",
+        }
+        last_status: int | None = None
+        last_body: Any = None
+        for attempt in range(1, self._score_write_max_attempts + 1):
+            try:
+                status, body = self._client.request("POST", "/api/public/scores", payload)
+            except TransportError as exc:
+                if attempt >= self._score_write_max_attempts:
+                    logger.error(
+                        "score_write_failed status=transport document_id=%s score_name=%s "
+                        "attempts=%s detail=%s",
+                        sanitize_for_log(document_id),
+                        sanitize_for_log(score["name"]),
+                        attempt,
+                        sanitize_for_log(str(exc)),
+                    )
+                    raise ScoreWriteFailedError(
+                        f"write_scores transport failure for {score['name']!r} "
+                        f"after {attempt} attempts"
+                    ) from exc
+                self._sleep(self._backoff_delay_seconds(attempt))
+                continue
+
+            if status < 400:
+                return
+            if status < 500:
+                # 4xx is a caller/contract bug (e.g. malformed payload) --
+                # never retried, exactly one attempt.
                 logger.error(
                     "score_write_failed status=%s document_id=%s score_name=%s detail=%s",
                     status,
@@ -204,6 +266,33 @@ class LangfuseAdapter:
                 raise ScoreWriteFailedError(
                     f"write_scores failed for {score['name']!r} with HTTP {status}"
                 )
+
+            last_status, last_body = status, body
+            if attempt >= self._score_write_max_attempts:
+                break
+            self._sleep(self._backoff_delay_seconds(attempt))
+
+        logger.error(
+            "score_write_failed status=%s document_id=%s score_name=%s attempts=%s detail=%s",
+            last_status,
+            sanitize_for_log(document_id),
+            sanitize_for_log(score["name"]),
+            self._score_write_max_attempts,
+            _body_snippet_for_error(last_body),
+        )
+        raise ScoreWriteFailedError(
+            f"write_scores failed for {score['name']!r} with HTTP {last_status} "
+            f"after {self._score_write_max_attempts} attempts"
+        )
+
+    def _backoff_delay_seconds(self, attempt: int) -> float:
+        """Exponential full jitter (ADR-0004 #3): uniform(0, min(cap, base * 2**(attempt-1)))."""
+        ceiling: float = min(
+            self._score_write_backoff_cap_seconds,
+            self._score_write_backoff_base_seconds * (2 ** (attempt - 1)),
+        )
+        jitter: float = self._random()
+        return jitter * ceiling
 
     def record_run(
         self,

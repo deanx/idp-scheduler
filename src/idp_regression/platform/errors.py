@@ -18,7 +18,11 @@ class DatasetFetchFailedError(PlatformError):
 
 
 class ScoreWriteFailedError(PlatformError):
-    """A score write failed — the orchestrator decides retry-vs-abort `hard_failure`."""
+    """A score write failed after the adapter's own bounded retry (REG-03,
+    F-2; ADR-0005 #9 — the score_id is deterministic, so a retry is an
+    upsert). The adapter already exhausted 5xx/transport retries or hit a
+    non-retried 4xx before raising; the orchestrator treats this as
+    `hard_failure` and aborts, it does not retry `record_run` itself."""
 
 
 class FlushFailedError(PlatformError):

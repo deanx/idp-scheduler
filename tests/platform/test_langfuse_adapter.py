@@ -23,6 +23,7 @@ from idp_regression.platform.errors import (
     DatasetFetchFailedError,
     RunStatusWriteFailedError,
     ScoreWriteFailedError,
+    TransportError,
 )
 from idp_regression.platform.langfuse_adapter import LangfuseAdapter, make_platform
 from idp_regression.platform.scoring import RUN_LEVEL_TRACE_SENTINEL, trace_id
@@ -354,7 +355,9 @@ def test_record_run_score_write_5xx_raises_score_write_failed_error() -> None:
             ("POST", "/api/public/scores"): (500, {"message": "boom"}),
         }
     )
-    adapter = LangfuseAdapter(client=client, tracing_client=_CompletingTracingClient())
+    adapter = LangfuseAdapter(
+        client=client, tracing_client=_CompletingTracingClient(), sleep=lambda _seconds: None
+    )
     dataset = adapter.get_dataset("ds")
     records = [
         {
@@ -479,7 +482,9 @@ def test_write_scores_error_log_survives_a_newline_in_document_id_and_score_name
             ("POST", "/api/public/scores"): (500, {"message": "boom"}),
         }
     )
-    adapter = LangfuseAdapter(client=client, tracing_client=_CompletingTracingClient())
+    adapter = LangfuseAdapter(
+        client=client, tracing_client=_CompletingTracingClient(), sleep=lambda _seconds: None
+    )
     dataset = adapter.get_dataset("ds")
     records = [
         {
@@ -529,6 +534,152 @@ def test_mark_run_status_error_log_survives_a_newline_in_run_id(
         rendered = record.getMessage()
         assert "\n" not in rendered, f"raw newline reached a rendered log line: {rendered!r}"
         assert 'dataset="ok"' not in rendered, f"unescaped quote forged a field: {rendered!r}"
+
+
+# --- REG-03 / F-2: a bounded retry on score writes (ADR-0005 #9: scores
+# are idempotent via the deterministic score_id, so a 5xx/transport
+# failure is safe to retry within the transport budget) -----------------
+
+
+class _QueuedScorePostClient:
+    """A FakeHttpClient variant where the ``POST /api/public/scores``
+    response is popped from a queue on each call (one entry per attempt)
+    -- everything else behaves like FakeHttpClient's static map."""
+
+    def __init__(
+        self,
+        *,
+        static_responses: dict[tuple[str, str], tuple[int, Any]],
+        score_post_queue: list[tuple[int, Any] | Exception],
+    ) -> None:
+        self._static_responses = static_responses
+        self._score_post_queue = list(score_post_queue)
+        self.calls: list[tuple[str, str, Any]] = []
+
+    def request(self, method: str, path: str, body: Any = None) -> tuple[int, Any]:
+        self.calls.append((method, path, body))
+        if method == "POST" and path == "/api/public/scores":
+            next_response = self._score_post_queue.pop(0)
+            if isinstance(next_response, Exception):
+                raise next_response
+            return next_response
+        key = (method, path)
+        if key in self._static_responses:
+            return self._static_responses[key]
+        for (m, p), resp in self._static_responses.items():
+            if m == method and path.startswith(p):
+                return resp
+        raise AssertionError(f"unexpected call: {method} {path}")
+
+
+def _dataset_fetch_responses(document_id: str = "doc-0") -> dict[tuple[str, str], tuple[int, Any]]:
+    return {
+        ("GET", "/api/public/v2/datasets/ds"): (200, _v2_dataset_response(None)),
+        ("GET", "/api/public/dataset-items?datasetName=ds"): (
+            200,
+            _dataset_items_page(
+                [
+                    {
+                        "id": "item-1",
+                        "input": {"document_id": document_id},
+                        "expectedOutput": {"fields": {}},
+                    }
+                ],
+                page=1,
+                total_pages=1,
+            ),
+        ),
+    }
+
+
+def _record_run_via(adapter: LangfuseAdapter) -> None:
+    dataset = adapter.get_dataset("ds")
+    records = [
+        {
+            "item_id": dataset["items"][0]["item_id"],
+            "document_id": dataset["items"][0]["document_id"],
+            "scores": [{"id": "s1", "name": "gate", "value": "PASS", "comment": None}],
+        }
+    ]
+    adapter.record_run(
+        dataset_name="ds",
+        run_name="run-1",
+        run_id="run-1",
+        records=records,  # type: ignore[arg-type]
+        metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+    )
+
+
+def test_write_scores_retries_a_5xx_then_succeeds_with_the_same_score_id() -> None:
+    client = _QueuedScorePostClient(
+        static_responses=_dataset_fetch_responses(),
+        score_post_queue=[(503, "down"), (200, {"id": "x"})],
+    )
+    adapter = LangfuseAdapter(
+        client=client,
+        tracing_client=_CompletingTracingClient(),
+        sleep=lambda _seconds: None,
+    )
+
+    _record_run_via(adapter)
+
+    score_post_calls = [c for c in client.calls if c[1] == "/api/public/scores"]
+    assert len(score_post_calls) == 2
+    assert score_post_calls[0][2]["id"] == score_post_calls[1][2]["id"] == "s1"
+
+
+def test_write_scores_retries_a_transport_error_then_succeeds() -> None:
+    client = _QueuedScorePostClient(
+        static_responses=_dataset_fetch_responses(),
+        score_post_queue=[TransportError("connection reset"), (200, {"id": "x"})],
+    )
+    adapter = LangfuseAdapter(
+        client=client,
+        tracing_client=_CompletingTracingClient(),
+        sleep=lambda _seconds: None,
+    )
+
+    _record_run_via(adapter)
+
+    score_post_calls = [c for c in client.calls if c[1] == "/api/public/scores"]
+    assert len(score_post_calls) == 2
+
+
+def test_write_scores_persistent_5xx_raises_score_write_failed_error_after_budget() -> None:
+    client = _QueuedScorePostClient(
+        static_responses=_dataset_fetch_responses(),
+        score_post_queue=[(503, "down"), (503, "down"), (503, "down"), (503, "down")],
+    )
+    adapter = LangfuseAdapter(
+        client=client,
+        tracing_client=_CompletingTracingClient(),
+        score_write_max_attempts=3,
+        sleep=lambda _seconds: None,
+    )
+
+    with pytest.raises(ScoreWriteFailedError):
+        _record_run_via(adapter)
+
+    score_post_calls = [c for c in client.calls if c[1] == "/api/public/scores"]
+    assert len(score_post_calls) == 3
+
+
+def test_write_scores_4xx_makes_exactly_one_attempt_never_retried() -> None:
+    client = _QueuedScorePostClient(
+        static_responses=_dataset_fetch_responses(),
+        score_post_queue=[(422, {"message": "invalid"}), (200, {"id": "x"})],
+    )
+    adapter = LangfuseAdapter(
+        client=client,
+        tracing_client=_CompletingTracingClient(),
+        sleep=lambda _seconds: None,
+    )
+
+    with pytest.raises(ScoreWriteFailedError):
+        _record_run_via(adapter)
+
+    score_post_calls = [c for c in client.calls if c[1] == "/api/public/scores"]
+    assert len(score_post_calls) == 1
 
 
 # --- REG-04 / F-3: get_dataset must not trust the pagination body shape --
