@@ -175,6 +175,38 @@ def test_redact_strips_client_secret_field() -> None:
     assert "topsecret" not in redacted
 
 
+def test_redact_strips_form_encoded_client_secret() -> None:
+    text = "grant_type=client_credentials&client_id=c1&client_secret=topsecret&x=1"
+    redacted = transport.redact(text)
+    assert "topsecret" not in redacted
+
+
+def test_redact_strips_form_encoded_access_token() -> None:
+    text = "response body: access_token=abc.def.ghi&token_type=bearer"
+    redacted = transport.redact(text)
+    assert "abc.def.ghi" not in redacted
+
+
+def test_redact_strips_json_access_token_field() -> None:
+    text = '{"access_token":"abc.def.ghi","expires_in":300}'
+    redacted = transport.redact(text)
+    assert "abc.def.ghi" not in redacted
+
+
+def test_redact_strips_client_secret_with_escaped_quote_inside_the_value() -> None:
+    # A naive `[^"]*` value pattern stops at the first embedded `"`, even
+    # when it's backslash-escaped, leaking the remainder of the secret.
+    text = '{"client_secret":"a\\"bsecret"}'
+    redacted = transport.redact(text)
+    assert "bsecret" not in redacted
+
+
+def test_redact_strips_access_token_with_escaped_quote_inside_the_value() -> None:
+    text = '{"access_token":"a\\"bsecret"}'
+    redacted = transport.redact(text)
+    assert "bsecret" not in redacted
+
+
 def test_sanitize_for_log_escapes_embedded_quotes_and_newlines() -> None:
     rendered = transport.sanitize_for_log('x" injected="1\nfield')
     assert "\n" not in rendered

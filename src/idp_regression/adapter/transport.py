@@ -30,7 +30,15 @@ from idp_regression.adapter.errors import IDPTransportError
 logger = logging.getLogger(__name__)
 
 _BEARER_PATTERN = re.compile(r"Bearer\s+\S+")
-_CLIENT_SECRET_PATTERN = re.compile(r'"client_secret"\s*:\s*"[^"]*"')
+# JSON string values: `(?:[^"\\]|\\.)*` consumes an escaped quote (`\"`)
+# instead of stopping at it — a naive `[^"]*` leaves the remainder of the
+# secret (after the escaped quote) unredacted (/test Scenario B item 4).
+_CLIENT_SECRET_JSON_PATTERN = re.compile(r'"client_secret"\s*:\s*"(?:[^"\\]|\\.)*"')
+_ACCESS_TOKEN_JSON_PATTERN = re.compile(r'"access_token"\s*:\s*"(?:[^"\\]|\\.)*"')
+# Form-encoded (application/x-www-form-urlencoded) bodies: value runs until
+# the next `&`, whitespace, or end of string.
+_CLIENT_SECRET_FORM_PATTERN = re.compile(r"client_secret=[^&\s]*")
+_ACCESS_TOKEN_FORM_PATTERN = re.compile(r"access_token=[^&\s]*")
 
 #: Bounded default — never block indefinitely on a hung connection (ADR-0004 #1).
 DEFAULT_TIMEOUT_SECONDS = 30.0
@@ -56,10 +64,19 @@ _TRANSPORT_FAILURE_TYPES: tuple[type[BaseException], ...] = (
 
 
 def redact(text: str) -> str:
-    """Strip a Bearer token / ``client_secret`` value out of arbitrary text
-    before it reaches a log line or an exception message."""
+    """Strip a Bearer token / ``client_secret`` / ``access_token`` value
+    out of arbitrary text before it reaches a log line or an exception
+    message — covers JSON bodies (incl. an escaped quote inside the
+    value), form-encoded bodies, and Bearer header values (/test Scenario
+    B item 4). When a whole body/response is available and its shape is
+    untrusted, prefer not including it at all (see
+    ``_log_and_raise_transport_error_without_detail``) rather than relying
+    solely on these patterns."""
     text = _BEARER_PATTERN.sub("Bearer ***REDACTED***", text)
-    return _CLIENT_SECRET_PATTERN.sub('"client_secret":"***REDACTED***"', text)
+    text = _CLIENT_SECRET_JSON_PATTERN.sub('"client_secret":"***REDACTED***"', text)
+    text = _ACCESS_TOKEN_JSON_PATTERN.sub('"access_token":"***REDACTED***"', text)
+    text = _CLIENT_SECRET_FORM_PATTERN.sub("client_secret=***REDACTED***", text)
+    return _ACCESS_TOKEN_FORM_PATTERN.sub("access_token=***REDACTED***", text)
 
 
 def sanitize_for_log(value: object) -> str:
