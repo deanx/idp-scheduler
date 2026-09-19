@@ -16,3 +16,9 @@ wheels/
 .env.local
 .env.*.local
 # .env.example stays committable (template only, no real values)
+
+# Editor swap / backup files (QA-S-01.3 hygiene)
+*.swp
+*.swo
+.*.sw[a-p]
+*~
