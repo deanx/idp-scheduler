@@ -65,7 +65,7 @@ class _RunExperimentTracingClient:
 def _adapter_with_cache(*item_ids: str) -> tuple[LangfuseAdapter, _FakeHttpClient]:
     http_client = _FakeHttpClient()
     adapter = LangfuseAdapter(client=http_client, tracing_client=_RunExperimentTracingClient())
-    adapter._item_cache = {item_id: (f"ds-{item_id}", {"fields": {}}) for item_id in item_ids}  # noqa: SLF001
+    adapter._item_cache = {item_id: f"ds-{item_id}" for item_id in item_ids}  # noqa: SLF001
     adapter._cached_dataset_name = "ds"  # noqa: SLF001
     return adapter, http_client
 
@@ -149,7 +149,7 @@ def test_task_failed_raises_experiment_record_failed_and_skips_score_writes() ->
     adapter = LangfuseAdapter(
         client=http_client, tracing_client=_MissingKeyOnPurposeTracingClient()
     )
-    adapter._item_cache = {"item-1": ("ds-1", {"fields": {}})}  # noqa: SLF001
+    adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
     adapter._cached_dataset_name = "ds"  # noqa: SLF001
     # A record missing the required "scores" key — the task's dict
     # comprehension over `record["scores"]` will KeyError, triggering
@@ -174,7 +174,7 @@ def test_task_failed_output_is_the_fixed_constant() -> None:
     "task_failed"} — never the exception, never a partial dict."""
     tracing_client = _RunExperimentTracingClient()
     adapter = LangfuseAdapter(client=_FakeHttpClient(), tracing_client=tracing_client)
-    adapter._item_cache = {"item-1": ("ds-1", {"fields": {}})}  # noqa: SLF001
+    adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
     adapter._cached_dataset_name = "ds"  # noqa: SLF001
     malformed: Any = {"item_id": "item-1", "document_id": "doc-0"}  # no "scores"
 
@@ -200,7 +200,7 @@ def test_task_catch_all_catches_more_than_just_key_error() -> None:
     the records lookup itself explode with a different exception type."""
     tracing_client = _RunExperimentTracingClient()
     adapter = LangfuseAdapter(client=_FakeHttpClient(), tracing_client=tracing_client)
-    adapter._item_cache = {"item-1": ("ds-1", {"fields": {}})}  # noqa: SLF001
+    adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
     adapter._cached_dataset_name = "ds"  # noqa: SLF001
 
     class _ExplodesOnDictAccess(dict):  # type: ignore[type-arg]

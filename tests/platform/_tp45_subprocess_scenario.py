@@ -67,10 +67,10 @@ def _build_isolated_adapter(
         tracer_provider=provider,
     )
     adapter = LangfuseAdapter(client=http_client, tracing_client=sdk)  # type: ignore[arg-type]
-    golden = {
-        "fields": {"total": {"value": GOLDEN_SENTINEL, "type": "number", "critical": True}}
-    }
-    adapter._item_cache = {"item-1": ("ds-1", golden)}  # noqa: SLF001
+    # DEBT-18 (Atchim suggestion): _item_cache only holds dataset_id now
+    # (never the golden) — the GOLDEN_SENTINEL is planted directly in the
+    # build_score_inputs(golden=...) call below instead.
+    adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
     adapter._cached_dataset_name = "ds"  # noqa: SLF001
     return adapter
 

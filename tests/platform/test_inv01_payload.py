@@ -80,9 +80,7 @@ class RecordingTracingClient:
 def test_write_scores_payload_never_carries_a_file_path_or_bytes() -> None:
     client = RecordingHttpClient()
     adapter = LangfuseAdapter(client=client, tracing_client=RecordingTracingClient())
-    adapter._item_cache = {
-        "item-1": ("ds-1", {"fields": {"total": {"value": "1250.00", "type": "number"}}})
-    }  # noqa: SLF001
+    adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
     adapter._cached_dataset_name = "ds"  # noqa: SLF001
     scores = build_score_inputs(
         golden={
@@ -157,7 +155,7 @@ def test_experiment_item_input_contains_only_document_id() -> None:
     client = RecordingHttpClient()
     tracing_client = RecordingTracingClient()
     adapter = LangfuseAdapter(client=client, tracing_client=tracing_client)
-    adapter._item_cache = {"item-1": ("ds-1", {"fields": {}})}  # noqa: SLF001
+    adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
     adapter._cached_dataset_name = "ds"  # noqa: SLF001
 
     adapter.record_run(
@@ -183,14 +181,13 @@ def test_experiment_item_input_contains_only_document_id() -> None:
 def test_experiment_item_expected_output_is_never_the_golden() -> None:
     """DEBT-18 option B: expected_output is ALWAYS {} — the golden lives
     only in its Langfuse dataset item, spans reference the item by id,
-    never a copy of the golden's field values."""
+    never a copy of the golden's field values. Atchim suggestion:
+    _item_cache no longer even HOLDS the golden (only dataset_id) —
+    there's nothing left to leak from that seam."""
     client = RecordingHttpClient()
     tracing_client = RecordingTracingClient()
     adapter = LangfuseAdapter(client=client, tracing_client=tracing_client)
-    golden_sentinel = "SENTINEL-GOLDEN-VALUE-7f3a"
-    adapter._item_cache = {  # noqa: SLF001
-        "item-1": ("ds-1", {"fields": {"total": {"value": golden_sentinel, "type": "number"}}})
-    }
+    adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
     adapter._cached_dataset_name = "ds"  # noqa: SLF001
 
     adapter.record_run(
@@ -203,7 +200,6 @@ def test_experiment_item_expected_output_is_never_the_golden() -> None:
 
     item = tracing_client.run_experiment_calls[0]["data"][0]
     assert item.expected_output == {}
-    assert golden_sentinel not in json.dumps(item.expected_output)
 
 
 def test_experiment_task_output_is_the_verdict_map_never_a_raw_value() -> None:
@@ -215,7 +211,7 @@ def test_experiment_task_output_is_the_verdict_map_never_a_raw_value() -> None:
     client = RecordingHttpClient()
     tracing_client = RecordingTracingClient()
     adapter = LangfuseAdapter(client=client, tracing_client=tracing_client)
-    adapter._item_cache = {"item-1": ("ds-1", {"fields": {}})}  # noqa: SLF001
+    adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
     adapter._cached_dataset_name = "ds"  # noqa: SLF001
     scores: list[ScoreInput] = [
         {"id": "s1", "name": "field:total", "value": "wrong_value", "comment": None},
@@ -239,7 +235,7 @@ def test_run_metadata_forwarded_as_experiment_metadata() -> None:
     client = RecordingHttpClient()
     tracing_client = RecordingTracingClient()
     adapter = LangfuseAdapter(client=client, tracing_client=tracing_client)
-    adapter._item_cache = {"item-1": ("ds-1", {"fields": {}})}  # noqa: SLF001
+    adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
     adapter._cached_dataset_name = "ds"  # noqa: SLF001
 
     adapter.record_run(

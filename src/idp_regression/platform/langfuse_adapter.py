@@ -60,10 +60,14 @@ class LangfuseAdapter:
     def __init__(self, client: HttpClient, tracing_client: ExperimentRunner | None = None) -> None:
         self._client = client
         self._tracing_client = tracing_client
-        #: item_id -> (dataset_id, golden) from the most recent get_dataset
-        #: call — record_run() reads this instead of re-fetching (INV-04,
-        #: ADR-0005 #9 "no second fetch").
-        self._item_cache: dict[str, tuple[str, dict[str, Any]]] = {}
+        #: item_id -> dataset_id from the most recent get_dataset call —
+        #: record_run() reads this instead of re-fetching (INV-04,
+        #: ADR-0005 #9 "no second fetch"). DEBT-18 (Atchim suggestion):
+        #: this used to also cache the golden per item, but nothing reads
+        #: it any more (expected_output is always {} — see record_run) —
+        #: keeping it would be dead sensitive data sitting in memory for
+        #: no reason, so only dataset_id is kept.
+        self._item_cache: dict[str, str] = {}
         #: the dataset name that produced ``_item_cache`` — record_run
         #: checks its own ``dataset_name`` argument against this so a
         #: caller passing the wrong dataset (while reusing stale item ids
@@ -138,7 +142,7 @@ class LangfuseAdapter:
                 items.append(
                     {"item_id": item_id, "document_id": document_id, "golden": golden}
                 )
-                self._item_cache[item_id] = (dataset_id, golden)
+                self._item_cache[item_id] = dataset_id
 
             meta = body.get("meta", {})
             total_pages = meta.get("totalPages", 1) if isinstance(meta, dict) else 1
@@ -230,7 +234,7 @@ class LangfuseAdapter:
         experiment_items = [
             ExperimentItem(
                 id=item_id,
-                dataset_id=self._item_cache[item_id][0],
+                dataset_id=self._item_cache[item_id],
                 input={"document_id": records_by_item_id[item_id]["document_id"]},
                 # DEBT-18 option B: never copy the golden into a span --
                 # spans reference the item by id; the golden lives only in
