@@ -3,12 +3,12 @@
 **Status:** ✅ PASSED
 **Source:** /test gap-fill (Atchim TDD gate)
 **Date:** 2026-09-19
-**Commit:** ba6a9056969136ef488eaeeca37b86e28483ac73
+**Commit:** 71e5e6acc81f6b0bd8bd224f6d0997c9f6ccce7b
 **Author:** alex@divinocosta.com.br
-**Atchim TDD gate:** PASSED (/test gate on 2026-09-19. The independent coverage audit found 10 gaps, filled in 1ec2ace. SCENARIO-B N5 log injection was fixed in 86b7da4 and ba6a905 (json.dumps sanitizer). The TP-37 flake was fixed in ba6a905. Atchim's mutation checks all killed.)
+**Atchim TDD gate:** PASSED (/test gate over the QA fix round 747cf80..71e5e6a on 2026-09-19. An independent coverage audit of the fix round confirmed REG-03/04/05 and Soneca's C1–C3; its gaps were closed in 5795993 and 71e5e6a. Atchim's mutation checks all killed. Earlier /test gate: ba6a905.)
 **Independence:** ✅ structural (different models): Dengoso (sonnet) reviewed by Atchim (opus). SPEC-01 is Risk: high.
 **Static:** ✅ clean: mypy strict (41 files) + ruff; pip-audit clean (`langfuse==4.15.4` confined to `make_platform()`, N24)
-**Files:** CLAUDE.md, docs/adr/0004-run-orchestration-and-failure-containment.md, docs/adr/0005-evaluation-platform-redecision.md, docs/design/CONTRACTS.md, docs/design/DATA-MODEL-01.md, docs/design/INVARIANTS.md, docs/qa/TEST-S-01.3-baseline-regression.md, pyproject.toml, src/idp_regression/platform/errors.py, src/idp_regression/platform/hashing.py, src/idp_regression/platform/langfuse_adapter.py, src/idp_regression/platform/schema/__init__.py, src/idp_regression/platform/schema/golden_schema_v1.json, src/idp_regression/platform/schema_provisioning.py, src/idp_regression/platform/scoring.py, src/idp_regression/platform/tracing.py, src/idp_regression/platform/transport.py, src/idp_regression/platform/types.py, tests/conftest.py, tests/platform/__init__.py, tests/platform/_tp45_subprocess_scenario.py, tests/platform/test_golden_schema_contract.py, tests/platform/test_hashing.py, tests/platform/test_integration_langfuse.py, tests/platform/test_inv01_payload.py, tests/platform/test_langfuse_adapter.py, tests/platform/test_log_redaction.py, tests/platform/test_module_boundary.py, tests/platform/test_record_run_preconditions.py, tests/platform/test_schema_provisioning.py, tests/platform/test_score_contract.py, tests/platform/test_scoring.py, tests/platform/test_tracing.py, tests/platform/test_transport.py, uv.lock
+**Files:** CLAUDE.md, docs/adr/0002-idp-adapter-and-normalize-contract.md, docs/adr/0004-run-orchestration-and-failure-containment.md, docs/adr/0005-evaluation-platform-redecision.md, docs/design/CONTRACTS.md, docs/design/DATA-MODEL-01.md, docs/design/INVARIANTS.md, docs/design/SEQ-UC-01-baseline-regression.md, docs/qa/NFR-01.md, docs/qa/QA-01-baseline-regression-S-01.3.md, docs/qa/TEST-S-01.3-baseline-regression.md, pyproject.toml, src/idp_regression/platform/errors.py, src/idp_regression/platform/hashing.py, src/idp_regression/platform/langfuse_adapter.py, src/idp_regression/platform/schema/__init__.py, src/idp_regression/platform/schema/golden_schema_v1.json, src/idp_regression/platform/schema_provisioning.py, src/idp_regression/platform/scoring.py, src/idp_regression/platform/tracing.py, src/idp_regression/platform/transport.py, src/idp_regression/platform/types.py, tests/conftest.py, tests/platform/__init__.py, tests/platform/_tp45_subprocess_scenario.py, tests/platform/test_golden_schema_contract.py, tests/platform/test_hashing.py, tests/platform/test_integration_langfuse.py, tests/platform/test_inv01_payload.py, tests/platform/test_langfuse_adapter.py, tests/platform/test_log_redaction.py, tests/platform/test_module_boundary.py, tests/platform/test_record_run_preconditions.py, tests/platform/test_schema_provisioning.py, tests/platform/test_score_contract.py, tests/platform/test_scoring.py, tests/platform/test_tracing.py, tests/platform/test_transport.py, uv.lock
 **Sequence:** test-first per slice (git-verified, tests in the same or an earlier commit):
 - CT-05 schema contract, then the schema file (90bc241)
 - test_hashing, then hashing.py (471d7d3)
@@ -24,8 +24,8 @@ Fix rounds: traceId/dataType (f107524); tracing, **probed live before its tests*
 
 | Scope | Passed | Failed |
 |---|---|---|
-| Unit + contract (default run) | 188 | 0 |
-| Full suite incl. live integration (`RUN_INTEGRATION_TESTS=1`, local Langfuse 4.38.0, synthetic data) | 200 | 0 |
+| Unit + contract (default run) | 220 | 0 |
+| Full suite incl. live integration (`RUN_INTEGRATION_TESTS=1`, local Langfuse 4.38.0, synthetic data) | 232 | 0 |
 | Bug-repros (`@bug-repro`) | — | none |
 
 Atchim mutation checks: every survivor from round 2 is killed. The final round killed two more TP-45 mutations: span output leaking `repr(exc)`, and an extra `document_id` in the output.
@@ -55,6 +55,10 @@ Atchim mutation checks: every survivor from round 2 is killed. The final round k
 | ADR-0005 #9 record_run preconditions | test_record_run_preconditions.py:85-233 | ✅ COVERED |
 | Coverage-audit gap-fill (/test, 1ec2ace) | ScoreWriteFailedError; CT-05 `then` walker + `\t`/`\u007F`/201-char cases; absent schema → None; TP-42 no-DELETE/expand/contract/remove-raises; TP-34 date case (live); prompt-hash non-ASCII digest + hash_dataset known digest; OTLP 4xx/5xx redaction; no /api/public/ingestion traffic; Protocol has no get_golden_version; mark_run_status values + RunMetadata | ✅ COVERED |
 | N5 log injection (SCENARIO-B → fixed 86b7da4/ba6a905) | test_langfuse_adapter.py:424,448,504; test_schema_provisioning.py:107; test_transport.py:99 (`\n` + `"` cases per log path) | ✅ COVERED |
+| QA fix F-2 / REG-03: bounded score-write retry | test_langfuse_adapter.py:613,634,660,678,695,714 + persistent TransportError test | ✅ COVERED |
+| QA fix F-3 / REG-04: untrusted pagination shapes + page cap + empty dataset | test_langfuse_adapter.py:735,760,774,789 | ✅ COVERED |
+| QA fix F-5 / REG-05: no raw prompt key in errors | test_score_contract.py:164 | ✅ COVERED |
+| QA fix F-1: Soneca schema C1–C3 + root additionalProperties | test_golden_schema_contract.py:162-262 (behavioral) + C1/C2/C3/root structural walk | ✅ COVERED |
 
 **N/A or deferred:**
 - **TP-43 abort-reason mapping** and the **containment DoD item** → S-01.4 and `/harden`.
@@ -64,6 +68,7 @@ Atchim mutation checks: every survivor from round 2 is killed. The final round k
 - **N25** → user/Mestre, before any real-document run. DEBT-18 is closed: the user chose option B (no values on the platform), implemented in 50ce083, 49c2150, 320460f, 22d7c3c and 825201a.
 
 ## History
+- /test gap-fill (Atchim TDD gate) PASSED at ba6a9056969136ef488eaeeca37b86e28483ac73, before the QA fix round. Superseded after QA S-01.3 ⚠️ (F-1..F-5) was fixed and re-gated.
 - /implement (Atchim TDD gate) PASSED at 825201a07fa8b3de3f31f326eaadbc1dc23a558b. Superseded by this /test stamp (required by the /qa rigor gate for Risk: high).
 - /implement (Atchim TDD gate) PASSED at 02cff1be9a607c91b3dc267a601f5003614a210a. Superseded by this re-stamp after the DEBT-18 option-B change (Atchim found a vacuous score-body assertion, fixed in 825201a, then re-APPROVED).
 - /implement (Atchim REQUEST CHANGES) on 2026-09-19: ❌ INVALIDATED. Round 1 findings R1–R7, then round-2 and round-3 test gaps; all closed. Round-1 detail: (Atchim, 2026-09-19)  **Required:** - **R1 (Critical)** `langfuse_adapter.py:68`: `get_dataset` reads `body["items"]`, but live `GET /api/public/v2/datasets/{name}` on 4.38.0 returns no `items` key. The result is 0 items: an empty golden set that passes without checking anything, and `hash_dataset` hashes nothing. The unit mock (`test_langfuse_adapter.py:53`) invents `items`. Fix: fetch from the paginated `/api/public/dataset-items?datasetName=` and add a live test that asserts the item count. **PIN as a regression.** - **R2** Tests that don't assert anything:   - `test_integration_langfuse.py:105` `_score_visible` only checks HTTP 200;   - the N26 test (`:113`) has no assertion and uses `uuid4` instead of `score_id()`;   - TP-34 lacks "stored value unchanged" and "400 body not logged";   - TP-33's tables-block write is untested. - **R3** TP-45 is missing: there is no in-memory span-exporter test. `run_experiment` writes `EXPECTED_OUTPUT`, `input`, `output` and `str(exception)` into span attributes, so INV-01 is unverified on spans. - **R4** TP-44 is missing: no captured-log test on the REST/provisioning path, and `transport.redact()` is never called. - **R5** `tracing.py:72` `flush_or_raise` gives false negatives:   - (a) `run_experiment` calls `self.flush()` internally, outside the watcher;   - (b) batches exported by the background thread during the run are not watched;   - (c) dataset-run-item failures are logged on the `langfuse` logger, which is not watched. - **R6** Ar
