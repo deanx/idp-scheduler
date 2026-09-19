@@ -117,6 +117,7 @@ def test_write_scores_payload_never_carries_a_file_path_or_bytes() -> None:
     )
 
     score_bodies = [b for b in client.bodies if isinstance(b, dict) and b.get("name")]
+    assert len(score_bodies) > 0  # a body-content check over an empty list proves nothing
     for body in score_bodies:
         assert isinstance(body, dict)
         for value in body.values():
@@ -139,10 +140,72 @@ def test_mark_run_status_payload_never_carries_a_file_path_or_bytes() -> None:
         golden_version="deadbeef",
     )
 
+    assert len(client.bodies) > 0
     for body in client.bodies:
         assert "file" not in body
         assert "path" not in body
         assert "bytes" not in body
+
+
+def test_record_run_completes_and_posts_no_sentinel_value_in_any_score_body() -> None:
+    """Atchim (round 4, Required): the subprocess-based TP-45 test's
+    happy scenario always raises FlushFailedError before _write_scores
+    runs (unreachable host), so its score_bodies list is structurally
+    always empty — a content-check loop there proves nothing (Atchim
+    proved this by mutating _write_scores to post
+    `repr(self._item_cache)` as every score's comment; every test still
+    passed). This test uses the FAKE tracing client instead, so
+    record_run actually COMPLETES and reaches _write_scores — a
+    distinctive golden sentinel is planted (via build_score_inputs'
+    `golden=`/`verdicts=` arguments) and must be absent from every
+    posted score body.
+
+    Note: Atchim's exact mutation (`repr(self._item_cache)`) no longer
+    leaks the sentinel, because the companion fix in this same change
+    (Atchim's suggestion) made `_item_cache` hold only `dataset_id`, not
+    the golden — there is nothing left in it to leak. Verified this
+    test still catches a leaking comment in general by temporarily
+    hardcoding a sentinel-bearing literal into `_write_scores`'s
+    `comment` field: the assertion fired correctly (`golden_sentinel not
+    in json.dumps(body)` failed as expected), then reverted; not
+    committed.
+    """
+    golden_sentinel = "SENTINEL-GOLDEN-VALUE-7f3a"
+    client = RecordingHttpClient()
+    adapter = LangfuseAdapter(client=client, tracing_client=RecordingTracingClient())
+    adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
+    adapter._cached_dataset_name = "ds"  # noqa: SLF001
+    scores = build_score_inputs(
+        golden={
+            "fields": {"total": {"value": golden_sentinel, "type": "number", "critical": True}}
+        },
+        verdicts={
+            "total": {
+                "verdict": "match",
+                "expected": golden_sentinel,
+                "actual": golden_sentinel,
+                "confidence": 0.9,
+                "critical": True,
+                "type": "number",
+            }
+        },
+        gate="PASS",
+        run_id="run-1",
+        document_id="doc-1",
+    )
+
+    adapter.record_run(
+        dataset_name="ds",
+        run_name="run-1",
+        run_id="run-1",
+        records=[{"item_id": "item-1", "document_id": "doc-1", "scores": scores}],
+        metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+    )
+
+    score_bodies = [b for b in client.bodies if isinstance(b, dict) and b.get("name")]
+    assert len(score_bodies) > 0
+    for body in score_bodies:
+        assert golden_sentinel not in json.dumps(body)
 
 
 # --- TP-45: span-attribute allowlist (ADR-0005 #9) -------------------------
@@ -372,13 +435,17 @@ def test_real_sdk_span_allowlist_and_no_golden_or_actual_sentinel_via_isolated_s
             assert "0.42" not in text  # the confidence sentinel
             assert "Traceback" not in text
 
-    score_bodies = result["score_bodies"]
-    for body in score_bodies:
-        text = json.dumps(body)
-        assert _GOLDEN_SENTINEL not in text
-        assert _EXPECTED_SENTINEL not in text
-        assert _ACTUAL_SENTINEL not in text
-        assert "0.42" not in text
+    # Atchim (round 4): this scenario's host is unreachable by design (no
+    # live creds needed), so record_experiment ALWAYS raises
+    # FlushFailedError before record_run's score-write loop ever runs —
+    # score_bodies is therefore always []. A content-check loop over an
+    # empty list asserts nothing (Atchim's mutation proof: posting
+    # `repr(self._item_cache)` as every score's comment still passed
+    # every test here). The real, meaningful score-payload-leak check is
+    # `test_record_run_completes_and_posts_no_sentinel_value_in_any_score_body`
+    # below, which uses a fake tracing client that actually completes
+    # record_run and reaches _write_scores.
+    assert result["score_bodies"] == []
 
 
 def test_real_sdk_span_output_is_the_task_failed_constant_via_isolated_subprocess() -> None:
