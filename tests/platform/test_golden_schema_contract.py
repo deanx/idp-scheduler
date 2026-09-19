@@ -28,13 +28,19 @@ PROMPT_PROPERTY_NAMES_PATTERN = r"^[^\u0000-\u001F\u007F]{1,200}$"
 
 
 def _walk_if_then(node: Any, path: str = "$") -> list[str]:
-    """Return a list of violations: every if/then subschema must declare type."""
+    """Return a list of violations: every if/then subschema must declare
+    type (Ajv strictTypes — /test gap 2 extends this from ``if``-only to
+    ``then`` too, since strictTypes applies to both halves of the pair)."""
     violations: list[str] = []
     if isinstance(node, dict):
         if "if" in node:
             if_schema = node["if"]
             if isinstance(if_schema, dict) and "type" not in if_schema:
                 violations.append(f"{path}.if missing 'type'")
+        if "then" in node:
+            then_schema = node["then"]
+            if isinstance(then_schema, dict) and "type" not in then_schema:
+                violations.append(f"{path}.then missing 'type'")
         for key, value in node.items():
             violations.extend(_walk_if_then(value, f"{path}.{key}"))
     elif isinstance(node, list):
@@ -119,3 +125,29 @@ def test_rejects_control_character_in_prompt_key(schema: dict[str, Any]) -> None
     bad = {"fields": {}, "prompts": {"bad\nkey": {"answer": "x"}}}
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(bad, schema)
+
+
+# --- /test gap 2: explicit accept/reject content, not just pattern equality
+
+
+def test_rejects_tab_character_in_prompt_key(schema: dict[str, Any]) -> None:
+    bad = {"fields": {}, "prompts": {"bad\tkey": {"answer": "x"}}}
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(bad, schema)
+
+
+def test_rejects_delete_control_character_u007f_in_prompt_key(schema: dict[str, Any]) -> None:
+    bad = {"fields": {}, "prompts": {"bad\u007fkey": {"answer": "x"}}}
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(bad, schema)
+
+
+def test_rejects_a_201_char_prompt_key(schema: dict[str, Any]) -> None:
+    bad = {"fields": {}, "prompts": {"x" * 201: {"answer": "x"}}}
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(bad, schema)
+
+
+def test_accepts_a_200_char_prompt_key(schema: dict[str, Any]) -> None:
+    ok = {"fields": {}, "prompts": {"x" * 200: {"answer": "x"}}}
+    jsonschema.validate(ok, schema)  # must not raise

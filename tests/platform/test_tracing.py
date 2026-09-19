@@ -224,3 +224,33 @@ def test_watcher_never_captures_the_log_message_only_the_logger_name() -> None:
 
     assert "Basic" not in str(excinfo.value)
     assert "cHVibGljOnNlY3JldA==" not in str(excinfo.value)
+
+
+def test_otlp_path_never_leaks_the_auth_header_on_a_4xx_or_5xx_export_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Gap 7 (TP-44, OTLP path): the real OTel OTLP exporter logs export
+    failures like ``Failed to export span batch code: 401, reason:
+    Unauthorized`` — mock that response shape (a 401/500-style body that
+    could, in principle, echo request headers) and assert the resulting
+    ``FlushFailedError``'s message never contains the Basic auth header
+    or the secret it encodes, and neither does anything OUR code adds to
+    the captured logs."""
+    caplog.set_level(logging.ERROR)
+    items = _items(1)
+
+    class _OtlpExportRejected(_OkTracingClient):
+        def run_experiment(self, **kwargs: object) -> _FakeResult:
+            # Simulated exporter response body for a 401/5xx export
+            # failure (mocked — never a real network call).
+            logging.getLogger(OTLP_EXPORTER_LOGGER_NAME).error(
+                "Failed to export span batch code: 401, reason: Unauthorized, "
+                "request headers: Authorization: Basic cHVibGljOnNlY3JldA=="
+            )
+            return super().run_experiment(**kwargs)
+
+    with pytest.raises(FlushFailedError) as excinfo:
+        record_experiment(_OtlpExportRejected(items), run_name="r", items=items, task=_task)
+
+    assert "Basic" not in str(excinfo.value)
+    assert "cHVibGljOnNlY3JldA==" not in str(excinfo.value)

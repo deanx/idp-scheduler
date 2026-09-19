@@ -72,3 +72,25 @@ def test_socket_timeout_message_never_leaks_the_auth_header(
 
     assert "topsecret" not in str(excinfo.value)
     assert "topsecret" not in caplog.text
+
+
+def test_no_source_reference_to_the_v4_trace_ingestion_endpoint() -> None:
+    """Gap 8 (TP-38): scores go via /api/public/scores; traces go via
+    OTLP (the langfuse SDK's own exporter, confined to make_platform()).
+    /api/public/ingestion is the v4 "events_only" score-events-only
+    ingestion path this codebase deliberately does NOT use for traces —
+    static grep across the whole platform package that no source line
+    ever references it (a change that started posting trace data there
+    would be a real regression, not something this repo's own REST
+    transport should ever need)."""
+    import pathlib
+
+    platform_dir = (
+        pathlib.Path(__file__).resolve().parents[2] / "src" / "idp_regression" / "platform"
+    )
+    offenders = [
+        str(path)
+        for path in platform_dir.rglob("*.py")
+        if "/api/public/ingestion" in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == [], f"unexpected /api/public/ingestion reference(s): {offenders}"

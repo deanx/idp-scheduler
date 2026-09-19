@@ -56,3 +56,13 @@ def test_hash_changes_when_document_order_changes() -> None:
     dataset = _dataset()
     reversed_dataset = list(reversed(dataset))
     assert hash_dataset(dataset) != hash_dataset(reversed_dataset)
+
+
+def test_hash_matches_a_known_digest_literal_for_a_fixed_dataset() -> None:
+    """Gap 6: pin the exact encoding with a known-digest literal, not just
+    stability/order-independence properties — computed independently of
+    hashing.py, 2026-09-19, over _dataset()'s exact content."""
+    assert (
+        hash_dataset(_dataset())
+        == "f25b68241785eef9d99e23a5507943182da6494036cb33f8d8dd11a78877498b"
+    )

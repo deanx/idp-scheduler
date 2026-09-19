@@ -12,7 +12,7 @@ import re
 import pytest
 
 from idp_regression.classifier.types import Golden, VerdictMap
-from idp_regression.platform.scoring import build_score_inputs
+from idp_regression.platform.scoring import build_score_inputs, prompt_score_name
 
 FIELD_SCORE_RE = re.compile(r"^field:.+$")
 PROMPT_SCORE_RE = re.compile(r"^prompt:[0-9a-f]{16}$")
@@ -86,6 +86,8 @@ def test_one_prompt_score_per_golden_prompt_with_16_hex_shape() -> None:
     # the raw prompt text never appears as (or inside) a score name
     for s in prompt_scores:
         assert "What is the vendor name?" not in s["name"]
+    # gap 6 (TP-39): pin the exact encoding, not just the shape pattern
+    assert prompt_scores[0]["name"] == prompt_score_name("What is the vendor name?")
 
 
 def test_exactly_one_gate_score_per_document() -> None:

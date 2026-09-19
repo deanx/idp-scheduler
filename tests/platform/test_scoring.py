@@ -52,6 +52,18 @@ def test_prompt_score_name_matches_the_pinned_shape() -> None:
     assert re.fullmatch(r"prompt:[0-9a-f]{16}", prompt_score_name("Qual é o fornecedor?"))
 
 
+def test_prompt_score_name_non_ascii_key_pinned_to_a_precomputed_digest_literal() -> None:
+    """Gap 6 (TP-39): pin the exact encoding for a non-ASCII key against a
+    precomputed sha256[:16] literal of the UTF-8 bytes — not a pattern
+    match, and not computed inline (a hashlib-based "expected" in the
+    test could silently agree with an encoding regression the same way
+    the implementation would)."""
+    key = "Qual é o fornecedor?"
+    # sha256("Qual é o fornecedor?".encode("utf-8")).hexdigest()[:16]
+    # precomputed independently of scoring.py, 2026-09-19.
+    assert prompt_score_name(key) == "prompt:90fa1c7d3ca326e4"
+
+
 def test_prompt_score_name_never_echoes_the_raw_prompt() -> None:
     key = "SENSITIVE PROMPT TEXT SHOULD NOT LEAK"
     assert key not in prompt_score_name(key)

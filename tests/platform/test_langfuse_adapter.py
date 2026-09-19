@@ -22,6 +22,7 @@ import pytest
 from idp_regression.platform.errors import (
     DatasetFetchFailedError,
     RunStatusWriteFailedError,
+    ScoreWriteFailedError,
 )
 from idp_regression.platform.langfuse_adapter import LangfuseAdapter, make_platform
 from idp_regression.platform.scoring import RUN_LEVEL_TRACE_SENTINEL, trace_id
@@ -104,6 +105,26 @@ def test_get_dataset_returns_items_and_expected_output_schema() -> None:
             "golden": {"fields": {"total": {"value": "1250.00", "type": "number"}}},
         }
     ]
+
+
+def test_get_dataset_returns_none_schema_when_dataset_has_no_schema() -> None:
+    """Gap 3: an absent expectedOutputSchema must return None, not raise
+    and not be silently dropped from the Dataset shape (the orchestrator
+    turns None into schema_drift, ADR-0005 Decision #8)."""
+    client = FakeHttpClient(
+        {
+            ("GET", "/api/public/v2/datasets/spike-01"): (200, _v2_dataset_response(None)),
+            ("GET", "/api/public/dataset-items?datasetName=spike-01"): (
+                200,
+                _dataset_items_page([], page=1, total_pages=1),
+            ),
+        }
+    )
+    adapter = LangfuseAdapter(client=client)
+
+    dataset = adapter.get_dataset("spike-01")
+
+    assert dataset["expected_output_schema"] is None
 
 
 def test_get_dataset_paginates_through_all_pages() -> None:
@@ -272,3 +293,169 @@ def test_make_platform_raises_on_unknown_platform(monkeypatch: pytest.MonkeyPatc
 
     with pytest.raises(ValueError):
         make_platform()
+
+
+# --- /test gap-fill: ScoreWriteFailedError (langfuse_adapter.py:178) -------
+
+
+class _FakeExperimentItemResult:
+    def __init__(self, item: Any, trace_id_: str, dataset_run_id: str) -> None:
+        self.item = item
+        self.trace_id = trace_id_
+        self.dataset_run_id = dataset_run_id
+
+
+class _FakeExperimentResult:
+    def __init__(self, item_results: list[_FakeExperimentItemResult]) -> None:
+        self.item_results = item_results
+
+
+class _CompletingTracingClient:
+    """A fake ExperimentRunner that always completes successfully (no
+    network, no OTLP) — lets record_run reach its score-write loop."""
+
+    def run_experiment(self, **kwargs: Any) -> _FakeExperimentResult:
+        results = [
+            _FakeExperimentItemResult(
+                item=item, trace_id_=f"trace-{item.id}", dataset_run_id="run-x"
+            )
+            for item in kwargs["data"]
+        ]
+        for item in kwargs["data"]:
+            kwargs["task"](item=item)
+        return _FakeExperimentResult(results)
+
+    def flush(self) -> None:
+        return None
+
+
+def test_record_run_score_write_5xx_raises_score_write_failed_error() -> None:
+    """Gap 1: ScoreWriteFailedError was never exercised. A 5xx on the
+    score POST, inside an otherwise-completing record_run (dataset
+    fetch + experiment linkage both succeed), must surface as the typed
+    error from langfuse_adapter.py's _write_scores (~:178)."""
+    client = FakeHttpClient(
+        {
+            ("GET", "/api/public/v2/datasets/ds"): (200, _v2_dataset_response(None)),
+            ("GET", "/api/public/dataset-items?datasetName=ds"): (
+                200,
+                _dataset_items_page(
+                    [
+                        {
+                            "id": "item-1",
+                            "input": {"document_id": "doc-0"},
+                            "expectedOutput": {"fields": {}},
+                        }
+                    ],
+                    page=1,
+                    total_pages=1,
+                ),
+            ),
+            ("POST", "/api/public/scores"): (500, {"message": "boom"}),
+        }
+    )
+    adapter = LangfuseAdapter(client=client, tracing_client=_CompletingTracingClient())
+    dataset = adapter.get_dataset("ds")
+    records = [
+        {
+            "item_id": dataset["items"][0]["item_id"],
+            "document_id": dataset["items"][0]["document_id"],
+            "scores": [{"id": "s1", "name": "gate", "value": "PASS", "comment": None}],
+        }
+    ]
+
+    with pytest.raises(ScoreWriteFailedError):
+        adapter.record_run(
+            dataset_name="ds",
+            run_name="run-1",
+            run_id="run-1",
+            records=records,  # type: ignore[arg-type]
+            metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+        )
+
+
+def test_record_run_never_posts_to_the_v4_trace_ingestion_endpoint() -> None:
+    """Gap 8 (TP-38, runtime): a full, successfully-completing record_run
+    (dataset fetch + score writes, over the REST HttpClient seam) never
+    issues a call to /api/public/ingestion -- scores go via
+    /api/public/scores; trace ingestion is the SDK's own OTLP exporter,
+    confined to make_platform(), never this module's raw-REST path."""
+    client = FakeHttpClient(
+        {
+            ("GET", "/api/public/v2/datasets/ds"): (200, _v2_dataset_response(None)),
+            ("GET", "/api/public/dataset-items?datasetName=ds"): (
+                200,
+                _dataset_items_page(
+                    [
+                        {
+                            "id": "item-1",
+                            "input": {"document_id": "doc-0"},
+                            "expectedOutput": {"fields": {}},
+                        }
+                    ],
+                    page=1,
+                    total_pages=1,
+                ),
+            ),
+            ("POST", "/api/public/scores"): (200, {"id": "x"}),
+        }
+    )
+    adapter = LangfuseAdapter(client=client, tracing_client=_CompletingTracingClient())
+    dataset = adapter.get_dataset("ds")
+    records = [
+        {
+            "item_id": dataset["items"][0]["item_id"],
+            "document_id": dataset["items"][0]["document_id"],
+            "scores": [{"id": "s1", "name": "gate", "value": "PASS", "comment": None}],
+        }
+    ]
+
+    adapter.record_run(
+        dataset_name="ds",
+        run_name="run-1",
+        run_id="run-1",
+        records=records,  # type: ignore[arg-type]
+        metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+    )
+
+    assert all("/api/public/ingestion" not in path for _, path, _ in client.calls)
+
+
+def test_get_dataset_error_log_survives_a_newline_in_the_dataset_name(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """SCENARIO-B (/test, gap 9, NFR N5 log injection — S-01.3 AC): a
+    dataset name containing "\\n" or '"' must not be able to forge what
+    looks like a second, independent log line to a naive log
+    tailer/alerting pipeline -- the rendered log message must stay on
+    one line (escaped or JSON-quoted), not contain a raw embedded
+    newline. RED as written: langfuse_adapter.py's %-style logging
+    (`logger.error("dataset_fetch_failed status=%s dataset=%s
+    detail=%s", status, name, ...)`) does not escape `name`, so an
+    embedded "\\n" reaches the rendered message verbatim (confirmed via
+    caplog). Not fixed here per /test rules (tests only, no
+    implementation changes) — this is an NFR N5 gap in S-01.3's own
+    logging helper (`_body_snippet_for_error`'s callers), to be routed
+    as a card, not a pre-existing unrelated bug."""
+    caplog.set_level(logging.ERROR)
+    malicious_name = 'evil\ninjected fake log line status=200 dataset="ok"'
+    client = FakeHttpClient({("GET", "/api/public/v2/datasets/"): (404, {})})
+    adapter = LangfuseAdapter(client=client)
+
+    with pytest.raises(DatasetFetchFailedError):
+        adapter.get_dataset(malicious_name)
+
+    for record in caplog.records:
+        rendered = record.getMessage()
+        assert "\n" not in rendered, f"raw newline reached a rendered log line: {rendered!r}"
+
+
+def test_platform_adapter_protocol_has_no_get_golden_version() -> None:
+    """Gap 9 (INV-04 single-fetch): golden_version is the caller's
+    hash_dataset(dataset) over the SAME fetch it iterates (TOCTOU guard)
+    -- there must be no get_golden_version method on the PlatformAdapter
+    Protocol tempting a second, separately-timed fetch."""
+    from idp_regression.platform.types import PlatformAdapter
+
+    assert not hasattr(PlatformAdapter, "get_golden_version")
+    assert not hasattr(LangfuseAdapter, "get_golden_version")

@@ -142,9 +142,23 @@ def test_mark_run_status_payload_never_carries_a_file_path_or_bytes() -> None:
 
     assert len(client.bodies) > 0
     for body in client.bodies:
+        # gap 10: assert on VALUES too, not just key absence — a key
+        # named "file"/"path"/"bytes" is not the only way to leak one.
+        for value in body.values():
+            if isinstance(value, str):
+                assert not _FILE_PATH_LIKE.search(value), f"file-path-like content: {value!r}"
         assert "file" not in body
         assert "path" not in body
         assert "bytes" not in body
+
+    # gap 10: RunMetadata (action_id/action_version/golden_version) must
+    # actually be present in the posted body — ADR-0004 #14's run_status
+    # marker is meant to carry it, and INV-01/INV-04 both depend on it
+    # being posted, not silently dropped.
+    posted_text = json.dumps(client.bodies)
+    assert "action-1" in posted_text
+    assert "v1" in posted_text
+    assert "deadbeef" in posted_text
 
 
 def test_record_run_completes_and_posts_no_sentinel_value_in_any_score_body() -> None:

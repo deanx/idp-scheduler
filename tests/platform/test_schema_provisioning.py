@@ -44,6 +44,55 @@ def test_provision_never_sends_an_empty_or_null_schema() -> None:
     assert body["expectedOutputSchema"]  # truthy: non-empty, non-null
 
 
+# --- TP-42 (gap 4): the truthiness check above can never fail — every
+# provisioning call posts the same fixed, always-populated committed
+# schema, so the guard it exercises is dead under the current code path.
+# These replace/extend it with cases that can actually go red.
+
+
+def test_provision_raises_and_makes_no_call_when_the_committed_schema_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The never-drop guard (schema_provisioning.py) must fire BEFORE any
+    REST call — an empty/null committed schema must never reach the wire
+    as an attempt to null out an existing platform schema."""
+    import idp_regression.platform.schema_provisioning as schema_provisioning_module
+
+    monkeypatch.setattr(schema_provisioning_module, "load_golden_schema", lambda: {})
+    client = RecordingHttpClient()
+
+    with pytest.raises(PlatformError):
+        provision_golden_schema(client, dataset_name="spike-01-patterns")
+
+    assert client.calls == []  # never sent — not even a null-schema attempt
+
+
+def test_provision_never_issues_a_delete_call() -> None:
+    client = RecordingHttpClient()
+
+    provision_golden_schema(client, dataset_name="spike-01-patterns")
+
+    assert all(method != "DELETE" for method, _, _ in client.calls)
+
+
+def test_provision_expand_and_contract_style_calls_both_upsert_never_delete() -> None:
+    """Two provisioning calls against the same dataset name (standing in
+    for an expand, then a later contract, schema-version bump per
+    ADR-0005 #4) — both must be plain upserts (POST, non-empty schema),
+    and neither may ever be preceded or followed by a DELETE."""
+    client = RecordingHttpClient()
+
+    provision_golden_schema(client, dataset_name="spike-01-patterns")  # "expand" call
+    provision_golden_schema(client, dataset_name="spike-01-patterns")  # "contract" call
+
+    assert len(client.calls) == 2
+    for method, path, body in client.calls:
+        assert method == "POST"
+        assert path == "/api/public/v2/datasets"
+        assert body["expectedOutputSchema"]  # never empty/null
+    assert all(method != "DELETE" for method, _, _ in client.calls)
+
+
 def test_provision_raises_typed_error_on_failure_without_retrying_a_drop() -> None:
     client = RecordingHttpClient(status=400, response={"message": "rejected"})
 

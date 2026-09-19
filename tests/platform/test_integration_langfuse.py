@@ -182,6 +182,55 @@ def test_schema_invalid_write_rejected_400_stored_value_unchanged(
     assert readback["expectedOutput"]["fields"]["total"]["value"] == "100.00"
 
 
+def test_schema_invalid_date_write_rejected_400_stored_value_unchanged(
+    client: UrllibHttpClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Gap 5 (TP-34, date case): the same live pattern as the number case
+    above, but for the ``date`` type's pinned ISO YYYY-MM-DD pattern —
+    a non-ISO date ("15/01/2026") must be rejected 400, the previously
+    stored valid value unchanged, and the 400 body never logged."""
+    caplog.set_level(logging.ERROR)
+    dataset_name = f"test-s013-{uuid.uuid4().hex[:8]}"
+    provision_golden_schema(client, dataset_name=dataset_name)
+    status, item = client.request(
+        "POST",
+        "/api/public/dataset-items",
+        {
+            "datasetName": dataset_name,
+            "input": {"document_id": "doc-0"},
+            "expectedOutput": {
+                "fields": {
+                    "invoice_date": {"value": "2024-03-15", "type": "date", "critical": True}
+                }
+            },
+        },
+    )
+    assert status == 200
+    item_id = item["id"]
+
+    status, body = client.request(
+        "POST",
+        "/api/public/dataset-items",
+        {
+            "id": item_id,
+            "datasetName": dataset_name,
+            "input": {"document_id": "doc-0"},
+            "expectedOutput": {
+                "fields": {
+                    "invoice_date": {"value": "15/01/2026", "type": "date", "critical": True}
+                }
+            },
+        },
+    )
+    assert status == 400
+    assert isinstance(body, dict)
+    assert "15/01/2026" not in caplog.text
+
+    status, readback = client.request("GET", f"/api/public/dataset-items/{item_id}")
+    assert status == 200
+    assert readback["expectedOutput"]["fields"]["invoice_date"]["value"] == "2024-03-15"
+
+
 def test_schema_covers_tables_block_write(client: UrllibHttpClient) -> None:
     """TP-33: the tables-block write is untested — write a golden with a
     tables block against the committed schema and confirm it's accepted
