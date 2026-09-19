@@ -45,6 +45,22 @@ class IDPExecutionFailedError(IDPAdapterError):
         self.status = status
 
 
+class IDPAmbiguousStatusError(IDPAdapterError):
+    """A poll response's ``status`` is missing, null, or not a non-empty
+    string — ADR-0004 #17 requires an immediate abort, never inferring
+    success by continuing to poll on an ambiguous status."""
+
+
+class IDPPollHardFailureError(IDPAdapterError):
+    """A poll request returned a non-2xx HTTP status other than 401/403 —
+    ADR-0004 #5, a hard failure, aborted immediately. The response body's
+    ``status`` field is never read on this path."""
+
+    def __init__(self, message: str, *, http_status: int) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+
+
 class MalformedIDPOutputError(IDPAdapterError):
     """``normalize()`` rejected a malformed/untrusted raw IDP body (NFR N21).
 

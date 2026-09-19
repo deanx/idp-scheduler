@@ -25,6 +25,7 @@ dev = [
     "pip-audit>=2.10.1",
     "pytest>=9.1.1",
     "pytest-benchmark>=5.1.0",
+    "pytest-timeout>=2.4.0",
     "ruff>=0.16.8",
     "types-jsonschema>=4.26.0.20260518",
 ]
@@ -32,6 +33,10 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+# A regression in poll/retry budget math (frozen fake clock, unbounded
+# loop) must never hang the suite — bounded per-test wall clock, generous
+# enough for the live-integration tests (Atchim suggestion).
+timeout = 120
 markers = [
     "integration: requires live external services (skipped by default; opt in with RUN_INTEGRATION_TESTS=1)",
 ]

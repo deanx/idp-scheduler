@@ -15,8 +15,10 @@ from collections.abc import Callable
 
 from idp_regression.adapter import transport
 from idp_regression.adapter.errors import (
+    IDPAmbiguousStatusError,
     IDPAuthenticationError,
     IDPExecutionFailedError,
+    IDPPollHardFailureError,
     IDPPollTimeoutError,
     IDPSubmitError,
     IDPTransportError,
@@ -61,6 +63,8 @@ class MuleSoftIDPAdapter:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
+        if not success_statuses <= terminal_statuses:
+            raise ValueError("success_statuses must be a subset of terminal_statuses")
         self._client_id = client_id
         self._client_secret = client_secret
         self._region = region
@@ -96,6 +100,13 @@ class MuleSoftIDPAdapter:
     # -- OAuth ------------------------------------------------------------
 
     def _fetch_token(self) -> tuple[str, float]:
+        # The deferred-raise pattern (fail outside the `except` block) is
+        # deliberate: raising *inside* an `except` clause always sets the
+        # new exception's __context__ to the exception being handled, even
+        # with `from None` (which only clears __cause__) — that would keep
+        # a possibly-secret-bearing exception reachable via __context__
+        # (Atchim R8).
+        transport_failed = False
         try:
             status, body = transport.post_json(
                 TOKEN_URL,
@@ -106,8 +117,10 @@ class MuleSoftIDPAdapter:
                 },
                 timeout_seconds=self._submit_timeout_seconds,
             )
-        except IDPTransportError as exc:
-            raise IDPAuthenticationError("OAuth token request failed") from exc
+        except IDPTransportError:
+            transport_failed = True
+        if transport_failed:
+            raise IDPAuthenticationError("OAuth token request failed") from None
         if status != 200 or not isinstance(body, dict):
             raise IDPAuthenticationError("OAuth token request was rejected")
         access_token = body.get("access_token")
@@ -124,6 +137,10 @@ class MuleSoftIDPAdapter:
 
     def _submit(self, document_path: str, action_id: str, version: str, token: str) -> str:
         url = _executions_base_url(self._region, self._org_id, action_id, version)
+        # Deferred-raise (see _fetch_token) — never raise while an
+        # IDPTransportError is the "currently handled" exception, or it
+        # would leak into __context__ even under `from None` (Atchim R8).
+        transport_failed = False
         try:
             status, body = transport.post_multipart_file(
                 url,
@@ -132,8 +149,10 @@ class MuleSoftIDPAdapter:
                 timeout_seconds=self._submit_timeout_seconds,
                 headers={"Authorization": f"Bearer {token}"},
             )
-        except IDPTransportError as exc:
-            raise IDPSubmitError("IDP submit call failed or timed out") from exc
+        except IDPTransportError:
+            transport_failed = True
+        if transport_failed:
+            raise IDPSubmitError("IDP submit call failed or timed out") from None
         if status not in (200, 201, 202) or not isinstance(body, dict):
             raise IDPSubmitError(f"IDP submit call was rejected (status={status})")
         execution_id = body.get("id")
@@ -161,35 +180,57 @@ class MuleSoftIDPAdapter:
                     "IDP execution did not reach a terminal status within the poll budget",
                     last_status=last_status,
                 )
+            remaining = max(deadline - now, 0.0)
+            # Clamp the per-GET timeout and the inter-poll sleep to what's
+            # left of the budget — a poll can no longer overshoot the
+            # deadline waiting on a single slow request or a final sleep
+            # (Atchim suggestion).
+            per_call_timeout = min(self._poll_interval_seconds * 2, remaining) or remaining
             try:
                 status_code, body = transport.get_json(
                     url,
-                    timeout_seconds=self._poll_interval_seconds * 2,
+                    timeout_seconds=per_call_timeout,
                     headers={"Authorization": f"Bearer {token}"},
                 )
             except IDPTransportError:
                 # Transient transport error — keep polling within the same budget.
-                self._sleep(self._poll_interval_seconds)
+                self._sleep(min(self._poll_interval_seconds, max(deadline - self._clock(), 0.0)))
                 continue
             if status_code in (401, 403):
                 raise IDPAuthenticationError("IDP rejected the request mid-run (401/403)")
+            if not (200 <= status_code < 300):
+                # ADR-0004 #5: any other non-2xx is a hard failure, aborted
+                # immediately — the body's "status" is never read on this
+                # path (Atchim R5).
+                raise IDPPollHardFailureError(
+                    "IDP poll request returned a non-success HTTP status",
+                    http_status=status_code,
+                )
             if not isinstance(body, dict):
-                self._sleep(self._poll_interval_seconds)
-                continue
+                raise IDPAmbiguousStatusError(
+                    "IDP poll response body was not a JSON object"
+                )
             raw_status = body.get("status")
-            if isinstance(raw_status, str) and raw_status:
-                last_status = raw_status
-                # ADR-0004 #17: fail-closed — never infer a terminal status,
-                # never hard-code the success string (BR9). Both allowlists
-                # are config, checked here as set membership, never a literal.
-                if raw_status in self._terminal_statuses:
-                    if raw_status in self._success_statuses:
-                        return body
-                    raise IDPExecutionFailedError(
-                        "IDP execution ended in a non-success terminal status",
-                        status=raw_status,
-                    )
-            self._sleep(self._poll_interval_seconds)
+            # ADR-0004 #17: a missing/null/non-string status must abort
+            # immediately — never inferred as "unknown, keep polling"
+            # (Atchim R4). An unknown-but-present status string is NOT
+            # ambiguous: it may just not be terminal yet, so keep polling.
+            if raw_status is None or not isinstance(raw_status, str) or not raw_status:
+                raise IDPAmbiguousStatusError(
+                    "IDP poll response 'status' is missing, null, or not a non-empty string"
+                )
+            last_status = raw_status
+            # Fail-closed: never hard-code the success string (BR9). Both
+            # allowlists are config, checked here as set membership, never
+            # a literal.
+            if raw_status in self._terminal_statuses:
+                if raw_status in self._success_statuses:
+                    return body
+                raise IDPExecutionFailedError(
+                    "IDP execution ended in a non-success terminal status",
+                    status=raw_status,
+                )
+            self._sleep(min(self._poll_interval_seconds, max(deadline - self._clock(), 0.0)))
 
 
 def make_idp_adapter() -> MuleSoftIDPAdapter:
