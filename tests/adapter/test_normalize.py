@@ -108,7 +108,10 @@ def test_unsafe_field_name_raises_typed_error(bad_name: str) -> None:
 
 def test_field_name_at_the_128_char_cap_is_accepted() -> None:
     name = "x" * 128
-    raw = {"status": "SUCCEEDED", "pages": [{"fields": {name: {"value": "v", "confidence": None}}}]}
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [{"fields": {name: {"value": "v", "confidence": None}}}],
+    }
     out = normalize(raw, success_statuses={"SUCCEEDED"})
     assert name in out["fields"]
 

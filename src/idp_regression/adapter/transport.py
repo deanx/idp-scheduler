@@ -15,6 +15,7 @@ NFR N23, ADR-0002 §Threat model).
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import mimetypes
@@ -22,7 +23,7 @@ import re
 import urllib.error
 import urllib.request
 import uuid
-from typing import Any
+from typing import Any, NoReturn
 
 from idp_regression.adapter.errors import IDPTransportError
 
@@ -33,6 +34,25 @@ _CLIENT_SECRET_PATTERN = re.compile(r'"client_secret"\s*:\s*"[^"]*"')
 
 #: Bounded default — never block indefinitely on a hung connection (ADR-0004 #1).
 DEFAULT_TIMEOUT_SECONDS = 30.0
+
+#: A response beyond this many bytes is rejected rather than buffered whole
+#: (Atchim suggestion — resp.read() was otherwise unbounded).
+MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+
+#: Transport-level failures that must never escape as a raw stdlib
+#: exception (Atchim R3): connection drops, partial reads, generic
+#: ``http.client``/``OSError`` failures. ``TimeoutError``/``URLError`` are
+#: handled alongside these; ``ConnectionResetError`` is an ``OSError``
+#: subclass and ``http.client.RemoteDisconnected``/``IncompleteRead`` are
+#: ``HTTPException`` subclasses, both already covered by the tuple below —
+#: listed explicitly anyway for readability.
+_TRANSPORT_FAILURE_TYPES: tuple[type[BaseException], ...] = (
+    TimeoutError,
+    urllib.error.URLError,
+    http.client.HTTPException,
+    ConnectionResetError,
+    OSError,
+)
 
 
 def redact(text: str) -> str:
@@ -76,6 +96,14 @@ def get_json(
     return _send(req, timeout_seconds)
 
 
+def _escape_multipart_filename(filename: str) -> str:
+    """RFC 7578-style escaping for a multipart ``filename`` parameter:
+    backslash and quote are backslash-escaped, and CR/LF are stripped so a
+    malicious local filename can't inject an extra MIME header."""
+    escaped = filename.replace("\\", "\\\\").replace('"', '\\"')
+    return escaped.replace("\r", "").replace("\n", "")
+
+
 def post_multipart_file(
     url: str,
     field_name: str,
@@ -83,10 +111,15 @@ def post_multipart_file(
     timeout_seconds: float,
     headers: dict[str, str] | None = None,
 ) -> tuple[int, Any]:
+    try:
+        with open(file_path, "rb") as fh:
+            file_bytes = fh.read()
+    except OSError:
+        # Never echo the local path — it can reveal filesystem layout (R3).
+        raise IDPTransportError("failed to read the local document file") from None
+
     boundary = uuid.uuid4().hex
-    with open(file_path, "rb") as fh:
-        file_bytes = fh.read()
-    filename = file_path.rsplit("/", 1)[-1]
+    filename = _escape_multipart_filename(file_path.rsplit("/", 1)[-1])
     content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
     body = bytearray()
@@ -105,27 +138,48 @@ def post_multipart_file(
     return _send(req, timeout_seconds)
 
 
+def _log_and_raise_transport_error(req: urllib.request.Request, detail: str) -> NoReturn:
+    message = redact(f"{req.get_method()} {req.full_url} failed: {detail}")
+    logger.error(
+        "idp_transport_failed method=%s detail=%s",
+        sanitize_for_log(req.get_method()),
+        sanitize_for_log(message),
+    )
+    raise IDPTransportError(message)
+
+
+def _read_bounded(readable: Any) -> bytes:
+    data = readable.read(MAX_RESPONSE_BYTES + 1)
+    if len(data) > MAX_RESPONSE_BYTES:
+        raise IDPTransportError(f"response body exceeded the {MAX_RESPONSE_BYTES}-byte cap")
+    return bytes(data)
+
+
 def _send(req: urllib.request.Request, timeout_seconds: float) -> tuple[int, Any]:
     try:
         with urllib.request.urlopen(  # noqa: S310 - internal MuleSoft IDP host only
             req, timeout=timeout_seconds
         ) as resp:
-            raw = resp.read().decode("utf-8")
+            raw_bytes = _read_bounded(resp)
             status = resp.status
     except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8")
+        try:
+            raw_bytes = _read_bounded(exc)
+        except _TRANSPORT_FAILURE_TYPES as read_exc:
+            _log_and_raise_transport_error(req, str(read_exc))
         status = exc.code
-    except (TimeoutError, urllib.error.URLError) as exc:
-        message = redact(f"{req.get_method()} {req.full_url} failed: {exc}")
-        logger.error(
-            "idp_transport_failed method=%s detail=%s",
-            sanitize_for_log(req.get_method()),
-            sanitize_for_log(message),
-        )
-        raise IDPTransportError(message) from exc
+    except _TRANSPORT_FAILURE_TYPES as exc:
+        _log_and_raise_transport_error(req, str(exc))
+
+    try:
+        raw = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        _log_and_raise_transport_error(req, "response body was not valid UTF-8")
     if not raw:
         return status, None
     try:
         return status, json.loads(raw)
     except json.JSONDecodeError:
         return status, raw
+    except (RecursionError, ValueError):
+        _log_and_raise_transport_error(req, "response body could not be parsed as JSON")
