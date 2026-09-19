@@ -711,6 +711,33 @@ def test_write_scores_persistent_5xx_raises_score_write_failed_error_after_budge
     assert len(score_post_calls) == 3
 
 
+def test_write_scores_persistent_transport_error_raises_after_exactly_max_attempts() -> None:
+    """Coverage audit gap: the 5xx-budget test above never exercises a
+    persistent TransportError (every attempt fails at the transport
+    layer, never reaching an HTTP status) -- must also raise
+    ScoreWriteFailedError after exactly max_attempts POSTs."""
+    client = _QueuedScorePostClient(
+        static_responses=_dataset_fetch_responses(),
+        score_post_queue=[
+            TransportError("connection reset"),
+            TransportError("connection reset"),
+            TransportError("connection reset"),
+        ],
+    )
+    adapter = LangfuseAdapter(
+        client=client,
+        tracing_client=_CompletingTracingClient(),
+        score_write_max_attempts=3,
+        sleep=lambda _seconds: None,
+    )
+
+    with pytest.raises(ScoreWriteFailedError):
+        _record_run_via(adapter)
+
+    score_post_calls = [c for c in client.calls if c[1] == "/api/public/scores"]
+    assert len(score_post_calls) == 3
+
+
 def test_write_scores_4xx_makes_exactly_one_attempt_never_retried() -> None:
     client = _QueuedScorePostClient(
         static_responses=_dataset_fetch_responses(),
@@ -807,7 +834,10 @@ def test_get_dataset_pagination_stops_at_the_page_cap_instead_of_looping_forever
         adapter.get_dataset("spike-01")
 
     request_calls = [c for c in client.calls if c[1].startswith("/api/public/dataset-items")]
-    assert len(request_calls) <= _MAX_DATASET_PAGES + 1
+    # the cap check runs before each request, so pages 1.._MAX_DATASET_PAGES
+    # are actually requested and page _MAX_DATASET_PAGES+1 raises before a
+    # request is made -- an off-by-one on the cap comparison must fail this.
+    assert len(request_calls) == _MAX_DATASET_PAGES
 
 
 def test_platform_adapter_protocol_has_no_get_golden_version() -> None:

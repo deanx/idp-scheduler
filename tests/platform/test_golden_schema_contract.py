@@ -274,3 +274,41 @@ def test_rows_items_remain_open_to_arbitrary_columns(schema: dict[str, Any]) -> 
         },
     }
     jsonschema.validate(ok, schema)  # must not raise
+
+
+# --- Coverage-audit gap-fill: a structural walk of the committed schema,
+# in addition to the example-based accept/reject tests above -- asserts
+# the exact C1-C3 keywords land where the review specified, not just
+# that some example happens to be rejected/accepted. The minified <10k
+# check is NOT duplicated here; it's already pinned by
+# test_minified_schema_under_10000_chars above.
+
+
+def test_c1_fields_and_tables_property_names_pattern(schema: dict[str, Any]) -> None:
+    name_charset = {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}
+    assert schema["properties"]["fields"]["propertyNames"] == name_charset
+    assert schema["properties"]["tables"]["propertyNames"] == name_charset
+
+
+def test_c2_field_table_and_prompt_entries_close_additional_properties(
+    schema: dict[str, Any],
+) -> None:
+    field_entry = schema["properties"]["fields"]["additionalProperties"]
+    table_entry = schema["properties"]["tables"]["additionalProperties"]
+    prompt_entry = schema["properties"]["prompts"]["additionalProperties"]
+    assert field_entry["additionalProperties"] is False
+    assert table_entry["additionalProperties"] is False
+    assert prompt_entry["additionalProperties"] is False
+
+
+def test_c2_rows_items_stay_open(schema: dict[str, Any]) -> None:
+    table_entry = schema["properties"]["tables"]["additionalProperties"]
+    rows_items = table_entry["properties"]["rows"]["items"]
+    assert "additionalProperties" in rows_items
+    assert rows_items["additionalProperties"] is not False
+
+
+def test_c3_fields_min_properties_and_match_key_min_length(schema: dict[str, Any]) -> None:
+    assert schema["properties"]["fields"]["minProperties"] == 1
+    table_entry = schema["properties"]["tables"]["additionalProperties"]
+    assert table_entry["properties"]["match_key"]["minLength"] == 1
