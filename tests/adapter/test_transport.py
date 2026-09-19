@@ -121,6 +121,30 @@ def test_url_error_raises_typed_transport_error(monkeypatch: pytest.MonkeyPatch)
         transport.get_json("https://x/y", timeout_seconds=5.0)
 
 
+def test_crlf_in_header_value_raises_typed_error_without_the_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # /test Scenario B item 1: a CR/LF-carrying token makes urlopen() raise
+    # a raw ValueError whose message embeds the token (as a bytes repr,
+    # literal "\r\n", not real control chars — so it would survive the
+    # Bearer-pattern regex too). Preferred fix: don't include the exception
+    # text at all on this path (a static message), rather than trust a
+    # regex to redact bytes-repr text reliably.
+    def fake_urlopen(req: urllib.request.Request, timeout: float) -> _FakeResponse:
+        raise ValueError(
+            "Invalid header value b'Bearer super-secret-token-123\\r\\nX-Evil: 1'"
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(IDPTransportError) as excinfo:
+        transport.get_json(
+            "https://x/y", timeout_seconds=5.0, headers={"Authorization": "Bearer x"}
+        )
+    assert "super-secret-token-123" not in str(excinfo.value)
+    assert "super-secret-token-123" not in repr(excinfo.value.__cause__)
+    assert "super-secret-token-123" not in repr(excinfo.value.__context__)
+
+
 def test_bearer_token_never_appears_in_a_redacted_transport_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

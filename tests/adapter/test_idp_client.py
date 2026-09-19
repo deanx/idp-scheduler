@@ -533,6 +533,26 @@ def test_no_time_time_reference_anywhere_under_adapter_package() -> None:
     assert offenders == [], f"time.time() referenced in adapter/: {offenders}"
 
 
+@pytest.mark.parametrize("bad_token", ["tok\r\ninjected", "tok\nvalue", "tok\x00null"])
+def test_access_token_with_control_chars_is_rejected_at_fetch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_token: str
+) -> None:
+    # /test Scenario B item 1 (primary defense): reject a malformed
+    # access_token at fetch time so a CR/LF-carrying token can never reach
+    # header construction in the first place (the transport-level
+    # ValueError catch is the defense-in-depth backstop, tested in
+    # test_transport.py).
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    adapter = _adapter(
+        monkeypatch,
+        fetch_token_result=(200, {"access_token": bad_token, "expires_in": 300}),
+    )
+    with pytest.raises(IDPAuthenticationError) as excinfo:
+        adapter.extract(str(doc), "action-1", "v1")
+    assert bad_token not in str(excinfo.value)
+
+
 def test_secrets_never_appear_in_a_token_fetch_failure_log(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

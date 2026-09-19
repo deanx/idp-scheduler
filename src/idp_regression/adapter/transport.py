@@ -150,6 +150,24 @@ def _log_and_raise_transport_error(req: urllib.request.Request, detail: str) -> 
     raise IDPTransportError(message)
 
 
+def _log_and_raise_transport_error_without_detail(
+    req: urllib.request.Request, reason: str
+) -> NoReturn:
+    """Like ``_log_and_raise_transport_error`` but never includes the raw
+    exception text at all — for failures (e.g. a CR/LF-carrying header
+    value) where the underlying stdlib message can embed a secret in a
+    form (a bytes repr) that ``redact()``'s regexes aren't guaranteed to
+    catch (/test Scenario B item 1). A static, secret-free reason is
+    safer than a clever-but-fallible redaction."""
+    message = f"{req.get_method()} {req.full_url} failed: {reason}"
+    logger.error(
+        "idp_transport_failed method=%s detail=%s",
+        sanitize_for_log(req.get_method()),
+        sanitize_for_log(message),
+    )
+    raise IDPTransportError(message)
+
+
 def _read_bounded(readable: Any) -> bytes:
     data = readable.read(MAX_RESPONSE_BYTES + 1)
     if len(data) > MAX_RESPONSE_BYTES:
@@ -158,12 +176,24 @@ def _read_bounded(readable: Any) -> bytes:
 
 
 def _send(req: urllib.request.Request, timeout_seconds: float) -> tuple[int, Any]:
+    # Deferred-raise: a header value containing CR/LF (e.g. a corrupted
+    # token) makes http.client raise a raw ValueError whose message embeds
+    # the value (as a bytes repr — Atchim R8's redact()-regex approach
+    # isn't trusted to catch that form). Raising *inside* the `except`
+    # would leak that ValueError into __context__ even under `from None`,
+    # so the raise is deferred to after the try/except exits (same pattern
+    # as idp_client.py's _fetch_token/_submit).
+    invalid_header_value = False
     try:
         with urllib.request.urlopen(  # noqa: S310 - internal MuleSoft IDP host only
             req, timeout=timeout_seconds
         ) as resp:
             raw_bytes = _read_bounded(resp)
             status = resp.status
+    except ValueError:
+        invalid_header_value = True
+        raw_bytes = b""
+        status = 0
     except urllib.error.HTTPError as exc:
         try:
             raw_bytes = _read_bounded(exc)
@@ -172,6 +202,8 @@ def _send(req: urllib.request.Request, timeout_seconds: float) -> tuple[int, Any
         status = exc.code
     except _TRANSPORT_FAILURE_TYPES as exc:
         _log_and_raise_transport_error(req, str(exc))
+    if invalid_header_value:
+        _log_and_raise_transport_error_without_detail(req, "request headers were rejected")
 
     try:
         raw = raw_bytes.decode("utf-8")

@@ -134,6 +134,16 @@ class MuleSoftIDPAdapter:
         access_token = body.get("access_token")
         if not isinstance(access_token, str) or not access_token:
             raise IDPAuthenticationError("OAuth token response is missing access_token")
+        if any(not ch.isprintable() for ch in access_token):
+            # /test Scenario B item 1 (primary defense): a token with CR/LF
+            # or other control characters would otherwise be embedded
+            # verbatim into an `Authorization: Bearer <token>` header,
+            # which urllib rejects with a raw ValueError that echoes the
+            # token — reject it here instead, before it ever reaches a
+            # header. Never echo the token itself in the message.
+            raise IDPAuthenticationError(
+                "OAuth token response's access_token contains invalid characters"
+            )
         expires_in_raw = body.get("expires_in", 300)
         try:
             expires_in = float(expires_in_raw)
