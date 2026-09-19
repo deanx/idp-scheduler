@@ -230,6 +230,19 @@ def test_missing_local_file_raises_typed_error_without_the_path(tmp_path: Path) 
     assert "does-not-exist.pdf" not in str(excinfo.value)
 
 
+def test_embedded_null_byte_in_document_path_raises_typed_error_without_the_path() -> None:
+    # /test Scenario B item 2: open() raises a raw ValueError ("embedded
+    # null byte"), not caught by the old `except OSError`, and would carry
+    # the path in its message.
+    evil_path = "/tmp/invoice\x00.pdf"
+    with pytest.raises(IDPTransportError) as excinfo:
+        transport.post_multipart_file(
+            "https://x/executions", "file", evil_path, timeout_seconds=5.0
+        )
+    assert evil_path not in str(excinfo.value)
+    assert "invoice" not in str(excinfo.value)
+
+
 def test_multipart_filename_escapes_quotes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -114,8 +114,10 @@ def post_multipart_file(
     try:
         with open(file_path, "rb") as fh:
             file_bytes = fh.read()
-    except OSError:
-        # Never echo the local path — it can reveal filesystem layout (R3).
+    except (OSError, ValueError):
+        # ValueError: a NUL byte embedded in the path raises this, not
+        # OSError (/test Scenario B item 2). Never echo the local path —
+        # it can reveal filesystem layout (R3).
         raise IDPTransportError("failed to read the local document file") from None
 
     boundary = uuid.uuid4().hex
