@@ -610,6 +610,53 @@ def _record_run_via(adapter: LangfuseAdapter) -> None:
     )
 
 
+def test_write_scores_transport_error_retry_actually_sleeps_before_retrying() -> None:
+    """Atchim (mutation survivor): a transport-error retry must call the
+    injected sleep with a positive delay before the next attempt -- not
+    just eventually succeed regardless of whether sleep was invoked."""
+    client = _QueuedScorePostClient(
+        static_responses=_dataset_fetch_responses(),
+        score_post_queue=[TransportError("connection reset"), (200, {"id": "x"})],
+    )
+    sleep_calls: list[float] = []
+    adapter = LangfuseAdapter(
+        client=client,
+        tracing_client=_CompletingTracingClient(),
+        sleep=sleep_calls.append,
+    )
+
+    _record_run_via(adapter)
+
+    assert len(sleep_calls) == 1
+    assert sleep_calls[0] > 0
+
+
+def test_write_scores_backoff_delay_is_jitter_times_ceiling_not_the_full_backoff() -> None:
+    """Atchim (mutation survivor): the jitter must actually scale the
+    delay -- a fixed random_func()==0.25 must produce 0.25 * ceiling, not
+    the unscaled ceiling (which would kill a `jitter * ceiling` ->
+    `ceiling` mutation)."""
+    client = _QueuedScorePostClient(
+        static_responses=_dataset_fetch_responses(),
+        score_post_queue=[(503, "down"), (200, {"id": "x"})],
+    )
+    sleep_calls: list[float] = []
+    adapter = LangfuseAdapter(
+        client=client,
+        tracing_client=_CompletingTracingClient(),
+        sleep=sleep_calls.append,
+        random_func=lambda: 0.25,
+        score_write_backoff_base_seconds=1.0,
+        score_write_backoff_cap_seconds=8.0,
+    )
+
+    _record_run_via(adapter)
+
+    # attempt 1: ceiling = min(8.0, 1.0 * 2**0) = 1.0 -> delay = 0.25 * 1.0
+    assert len(sleep_calls) == 1
+    assert sleep_calls[0] == pytest.approx(0.25)
+
+
 def test_write_scores_retries_a_5xx_then_succeeds_with_the_same_score_id() -> None:
     client = _QueuedScorePostClient(
         static_responses=_dataset_fetch_responses(),
@@ -683,6 +730,31 @@ def test_write_scores_4xx_makes_exactly_one_attempt_never_retried() -> None:
 
 
 # --- REG-04 / F-3: get_dataset must not trust the pagination body shape --
+
+
+def test_get_dataset_empty_dataset_totalPages_zero_returns_no_items_one_request() -> None:
+    """Atchim (Required): totalPages=0 is the live-confirmed shape for an
+    empty dataset (not malformed) -- pins that get_dataset returns
+    items == [] with exactly one dataset-items request and no exception,
+    so S-01.4's empty_set abort can't be misrouted to
+    dataset_fetch_failed. Also kills the `raw_total_pages < 0` ->
+    `< 1` mutation (which would wrongly reject totalPages=0)."""
+    client = FakeHttpClient(
+        {
+            ("GET", "/api/public/v2/datasets/spike-01"): (200, _v2_dataset_response(None)),
+            ("GET", "/api/public/dataset-items?datasetName=spike-01"): (
+                200,
+                {"data": [], "meta": {"totalPages": 0}},
+            ),
+        }
+    )
+    adapter = LangfuseAdapter(client=client)
+
+    dataset = adapter.get_dataset("spike-01")
+
+    assert dataset["items"] == []
+    dataset_items_calls = [c for c in client.calls if c[1].startswith("/api/public/dataset-items")]
+    assert len(dataset_items_calls) == 1
 
 
 @pytest.mark.parametrize(
