@@ -12,6 +12,72 @@ Format:
 
 ## Handoffs (newest first)
 
+### HANDOFF Dunga → Dengoso  (2026-09-19, /plan SPEC-01 re-scope)
+- Done: SPEC-01 re-scoped after ADR-0005. Atchim DoD gate passed after 2 rounds (14/14 + 2 follow-ons closed), and the estimates are transcribed (S-01.3 = 35, S-01.4 = 37, total 148). Test plan TP-32..TP-46. Artifact: docs/specs/SPEC-01-baseline-regression.md.
+- Contract: S-01.3 is Ready for build with synthetic data. Credentials are configured, and N25 blocks only a real golden load. The DoD + `## Test plan` are the /implement contract. Pre-run order is pinned: fetch → schema_drift → empty_set → N28 → hash/run_id → first IDP call.
+- Open:
+  (1) F-1: pin the Langfuse images to 4.38.0 before running T-01.3.8 integration (user).
+  (2) T-01.3.10a: confirm which Python SDK is v4-capable under `events_only` before building on it.
+  (3) T-01.4.5: `MalformedGoldenError` messages echo golden content, so a structured path attribute is needed before `malformed_golden` logs anything.
+  (4) T-01.3.11 and T-01.4.12 are Soneca docs tasks.
+  (5) S-01.2/S-01.4/S-01.6 live work needs a real IDP action id + published version.
+- Next: `/implement S-01.3` (TDD). Start with T-01.3.0/T-01.3.9 (schema + CT-05), then T-01.3.1–.7, then .10a/.10b, with .8 integration last.
+
+### HANDOFF Dunga → Atchim  (2026-09-19, /plan SPEC-01 re-scope fixes — re-check request)
+- Done: I applied all 14 items from the "Atchim → Dunga" DoD-gate block to docs/specs/SPEC-01-baseline-regression.md. Nothing else changed: docs only, nothing committed.
+- S-01.3 fixes:
+  - an absent schema is returned as `None`;
+  - the F2 lengths are recorded in DATA-MODEL-01 §1 "Schema limits";
+  - "never drop the schema" is covered by TP-42;
+  - an OTLP export failure maps to `flush_failed` and is not best-effort (TP-43);
+  - the Basic-auth header redaction is tested on the provisioning and OTLP paths (TP-44);
+  - INV-01 now covers OTLP span attributes (TP-15 + TP-45);
+  - the prompt hash encoding is pinned to `sha256(key.encode("utf-8"))`;
+  - bounded polls use a 30 s max wait with a 1 s interval.
+- S-01.4 fixes:
+  - the pre-run order is pinned: fetch → `schema_drift` → `empty_set` → N28 → golden_version hash + run_id → first IDP call;
+  - TP-40 gains an empty-set + drifted-schema case, which must abort `schema_drift`;
+  - N28 reuses the classifier's `_validate_golden` via a public alias, not `jsonschema`, and adds a new abort reason `malformed_golden` (TP-46; TP-23 points to it);
+  - pre-run aborts write no marker;
+  - the drift log carries both hashes (or "absent");
+  - the N28 error carries document_id + JSON path only;
+  - `write_scores` retry exhaustion → `hard_failure`;
+  - the docs line is replaced by the ADR-0004 #12 (F4) and NFR-01 N10/N26 wording updates.
+- S-01.5 fixes: the "currently MISSING" nit is corrected, and TP-26/27 are marked DONE.
+- Contract: T-01.4.5 is now also marked changed, `est: TBD`.
+- Open, for Atchim to confirm:
+  - (a) `malformed_golden` is a new abort-reason literal. It needs a CT-04 case and an ADR-0004 taxonomy entry; the entry is in the Soneca docs line.
+  - (b) The public alias for `_validate_golden` touches the module of S-01.1, which is Done. The DoD makes it an additive re-export plus a stamp-freshness re-check.
+  - (c) The 30 s / 1 s poll bound is my pick.
+- Next: Atchim re-checks. APPROVE → Dengoso estimates the TBD tasks. REQUEST CHANGES → back to Dunga.
+
+### HANDOFF Atchim → Dunga  (2026-09-19, /plan DoD gate — SPEC-01 re-scope)
+- Done: DoD review of the SPEC-01 re-scope. S-01.3 and S-01.4 NEED CLARIFICATION; S-01.5 Done PASS (stale "currently MISSING" at ~L213; TP-26/27 still read as open).
+- Contract: TP-32..41 all trace to DoD lines. The only DoD line without a TP row is ~L114 ("never drop the schema").
+- Open, S-01.3:
+  (1) L115: OTLP export failure → `flush_failed` or explicitly best-effort, plus a test.
+  (2) L125: N5 redaction unit test for the Langfuse Basic `Authorization` header (raw-REST provisioning + OTLP exporter).
+  (3) L120/TP-15: INV-01 check extended to OTLP span attributes.
+  (4) L114: needs a TP row, or fold into TP-33.
+  (5) L111: absent schema → `None` (to match TP-35).
+  (6) L118/TP-39: pin UTF-8 as the prompt-hash encoding.
+  (7) L115/TP-37/TP-38: give a numeric max wait.
+  (8) L112: state where the schema length is recorded.
+- Open, S-01.4:
+  (1) L161–162: pin the pre-run order fetch(`dataset_fetch_failed`) → `schema_drift` → `empty_set` → N28 → golden_version hash + run_id → first IDP call, and add a TP-40 case for an empty set with a drifted schema.
+  (2) L162: the N28 validator = structural checks reusing the classifier's N22 golden validation (not `jsonschema`).
+  (3) L165: pre-run aborts write no `run_status=aborted` marker, because no run exists yet.
+  (4) L171: the `schema_drift` log carries both hashes (or "absent"); the N28 error carries document_id + JSON path, never the golden value.
+  (5) L167: `write_scores` retry exhaustion → `hard_failure`.
+  (6) L178: drop the stale `get_golden_version` item (DEBT-07 closed); add ADR-0004 #12 (F4) and the NFR-01 N10/N26 wording updates.
+- Next: Dunga amends the DoD lines, then Atchim re-checks.
+
+### HANDOFF Dunga → Atchim  (2026-09-19, /plan re-scope SPEC-01 — DoD review gate)
+- Done: SPEC-01 re-scoped in place (docs/specs/SPEC-01-baseline-regression.md). S-01.5 → DONE (QA-S-01.5, ADR-0005; branch-intent note). S-01.3: new T-01.3.0 (generic string-valued schema + REST provisioning, F2 tables measured, <10k), T-01.3.9 (CT-05 test), T-01.3.10 (v4 events_only), T-01.3.11 (Soneca widens INV-03/CT-03, DEBT-13); changed T-01.3.1 (get_dataset returns expectedOutputSchema), T-01.3.3 (uuid5 score id, pinned NAMESPACE, run_id not run_name), T-01.3.5 (CT-03 pins prompt:<16-hex>), T-01.3.8 (pinned 4.38.0, bounded poll). S-01.4: new T-01.4.11 (schema_drift), changed T-01.4.2/3/7. TP-32–TP-41 added, each source-tagged. DoR table added.
+- Contract: every ADR-0005 #1–#8 / F2–F4, CT-05 and DEBT-13 item maps to a DoD line + a TP row. The SPEC ~l.114 (run_name, document_id, field_name) wording is replaced. New/changed tasks are est: TBD and the estimates table is not recomputed (changed rows marked †). No src/tests touched, nothing committed, no board ops.
+- Open: F-1 image pin (user/Mestre) gates S-01.3 integration; N25 blocks real-golden load only; a real IDP action id + published version blocks S-01.2/S-01.4/S-01.6 live work; INV-03/CT-03 doc rows are not yet widened (T-01.3.11, Soneca). QA-S-01.5 F-5 (misplaced Soneca→Dunga block) left as is because the log is append-only.
+- Next: Atchim reviews the S-01.3/S-01.4 DoD + TP-32–TP-41 against ADR-0005 and CT-04/CT-05. Check for testable, non-overlapping gates, and in particular the ordering of the schema_drift check versus N28 pre-run validation and empty_set. APPROVE → Dengoso estimates the TBD tasks. REQUEST CHANGES → back to Dunga.
+
 ### HANDOFF Zangado → (top-level)  (2026-09-19, /qa S-01.5 — SPIKE-01 DoD audit)
 - Done: S-01.5 audited → ⚠️ PASS with follow-ups; report docs/qa/QA-S-01.5-langfuse-form-mode-spike.md. All 14 DoD items met or met-with-deviation; no TEST stamp (correct for a spike); spike code untracked, nothing merged.
 - Contract: SPIKE-01 verdict (partially confirmed / no-code Curator refuted) is recorded and consistent with ADR-0005 (Accepted, Atchim APPROVED R1–R4), ADR-0001 (Superseded) and ASM-05 (resolved, split). S-01.5 may be marked Done.
