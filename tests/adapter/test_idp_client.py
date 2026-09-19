@@ -146,6 +146,113 @@ def test_extract_logs_a_per_document_timing_metric(
     assert any("idp_extraction_timing" in r.message for r in caplog.records)
 
 
+def test_two_extract_calls_reuse_the_cached_token_one_fetch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # /test Scenario B item 12: adapter-level (not just TokenCache-unit-
+    # level) proof that two extract() calls share one token fetch.
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    token_fetch_calls: list[int] = []
+
+    def counting_post_json(*args: object, **kwargs: object) -> tuple[int, dict[str, Any]]:
+        token_fetch_calls.append(1)
+        return 200, {"access_token": "tok-1", "expires_in": 300}
+
+    adapter = _adapter(monkeypatch, clock=_clock_from([0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0]))
+    monkeypatch.setattr(transport, "post_json", counting_post_json)
+    adapter.extract(str(doc), "action-1", "v1")
+    adapter.extract(str(doc), "action-1", "v1")
+    assert len(token_fetch_calls) == 1
+
+
+def test_poll_transport_error_keeps_polling_within_budget_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # /test Scenario B item 13a: a transient poll-level transport error is
+    # retried within the same poll budget (ADR-0004 #6, bounded by the
+    # #2/#3 timeout — no separate abort code, the poll deadline itself is
+    # the bound), not treated as an immediate hard failure.
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    call_count = {"n": 0}
+
+    def flaky_get_json(*args: object, **kwargs: object) -> tuple[int, dict[str, Any]]:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise IDPTransportError("transient connection reset")
+        return 200, {"status": "SUCCEEDED", "pages": []}
+
+    adapter = _adapter(
+        monkeypatch,
+        clock=_clock_from([0.0, 0.0, 1.0, 1.0, 2.0, 3.0]),
+        sleep=lambda _seconds: None,
+    )
+    monkeypatch.setattr(transport, "get_json", flaky_get_json)
+    out = adapter.extract(str(doc), "action-1", "v1")
+    assert out["status"] == "SUCCEEDED"
+    assert call_count["n"] == 2  # one transient failure, one success
+
+
+def test_poll_transport_error_eventually_times_out_if_never_recovers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+
+    def always_failing_get_json(*args: object, **kwargs: object) -> tuple[int, dict[str, Any]]:
+        raise IDPTransportError("connection reset")
+
+    adapter = _adapter(
+        monkeypatch,
+        poll_timeout_seconds=3.0,
+        clock=_clock_from([0.0, 0.0, 1.0, 2.0, 3.0, 4.0]),
+        sleep=lambda _seconds: None,
+    )
+    monkeypatch.setattr(transport, "get_json", always_failing_get_json)
+    with pytest.raises(IDPPollTimeoutError):
+        adapter.extract(str(doc), "action-1", "v1")
+
+
+def test_poll_non_dict_body_raises_typed_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # /test Scenario B item 13b.
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    adapter = _adapter(
+        monkeypatch,
+        poll_results=[(200, "not a dict")],  # type: ignore[list-item]
+        clock=_clock_from([0.0, 0.0, 0.5]),
+    )
+    with pytest.raises(IDPAmbiguousStatusError):
+        adapter.extract(str(doc), "action-1", "v1")
+
+
+def test_submit_response_missing_id_raises_typed_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # /test Scenario B item 13c.
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    adapter = _adapter(monkeypatch, submit_result=(202, {"not_id": "exec-1"}))
+    with pytest.raises(IDPSubmitError):
+        adapter.extract(str(doc), "action-1", "v1")
+
+
+def test_token_response_missing_access_token_raises_typed_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # /test Scenario B item 13d.
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    adapter = _adapter(
+        monkeypatch, fetch_token_result=(200, {"token_type": "bearer", "expires_in": 300})
+    )
+    with pytest.raises(IDPAuthenticationError):
+        adapter.extract(str(doc), "action-1", "v1")
+
+
 def test_extracted_values_never_appear_in_logs_or_stdout_stderr(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

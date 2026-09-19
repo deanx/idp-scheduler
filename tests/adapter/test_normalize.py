@@ -145,6 +145,21 @@ def test_unsafe_table_name_raises_typed_error() -> None:
     assert excinfo.value.reason == "unsafe_field_name"
 
 
+def test_unsafe_table_column_name_raises_typed_error() -> None:
+    # /test Scenario B item 11: a coverage gap — _validate_name is called
+    # on table column names too (normalize.py's _merge_tables), but no
+    # test previously exercised it directly.
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [
+            {"tables": {"line_items": [{"a:b": {"value": "x", "confidence": None}}]}}
+        ],
+    }
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "unsafe_field_name"
+
+
 def test_safe_field_name_charset_accepted() -> None:
     raw = {
         "status": "SUCCEEDED",
