@@ -116,6 +116,28 @@ def test_field_name_at_the_128_char_cap_is_accepted() -> None:
     assert name in out["fields"]
 
 
+def test_field_name_129_chars_is_rejected() -> None:
+    # Dedicated regression pin (Atchim round 2) — kills a "remove {1,128}"
+    # mutant on _SAFE_NAME_PATTERN: at 129 chars an unbounded charset would
+    # still match, but the golden schema's `^[A-Za-z0-9_-]{1,128}$` caps it.
+    name = "x" * 129
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [{"fields": {name: {"value": "v", "confidence": None}}}],
+    }
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "unsafe_field_name"
+
+
+def test_table_name_129_chars_is_rejected() -> None:
+    name = "x" * 129
+    raw = {"status": "SUCCEEDED", "pages": [{"tables": {name: []}}]}
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "unsafe_field_name"
+
+
 def test_unsafe_table_name_raises_typed_error() -> None:
     raw = {"status": "SUCCEEDED", "pages": [{"tables": {"a:b": []}}]}
     with pytest.raises(MalformedIDPOutputError) as excinfo:

@@ -5,7 +5,11 @@ per-document timing metric (INV-07, NFR N1/BR9)."""
 from __future__ import annotations
 
 import contextlib
+import inspect
 import logging
+import pathlib
+import re
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -366,6 +370,47 @@ def test_success_statuses_must_be_a_subset_of_terminal_statuses() -> None:
         )
 
 
+def test_poll_clamps_per_get_timeout_and_sleep_to_remaining_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Kills both "remove clamp" mutants (idp_client.py per_call_timeout /
+    # sleep computation, Atchim round 2): near the deadline, neither the
+    # per-GET timeout nor the inter-poll sleep may exceed what's left of
+    # the poll budget.
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+
+    captured_timeouts: list[float] = []
+    captured_sleeps: list[float] = []
+
+    def fake_get_json(*args: object, **kwargs: object) -> tuple[int, dict[str, Any]]:
+        captured_timeouts.append(kwargs["timeout_seconds"])  # type: ignore[arg-type]
+        return 200, {"status": "RUNNING", "pages": []}
+
+    def fake_sleep(seconds: float) -> None:
+        captured_sleeps.append(seconds)
+
+    adapter = _adapter(
+        monkeypatch,
+        poll_timeout_seconds=10.0,
+        poll_interval_seconds=5.0,
+        # calls, in order: token.get() now, token._refresh() expires_at,
+        # extract() start, poll iter1 now (=8.0, remaining=2.0), sleep-calc
+        # now (=8.0, remaining=2.0), poll iter2 now (=11.0, past deadline).
+        clock=_clock_from([0.0, 0.0, 0.0, 8.0, 8.0, 11.0]),
+        sleep=fake_sleep,
+    )
+    monkeypatch.setattr(transport, "get_json", fake_get_json)
+    with pytest.raises(IDPPollTimeoutError):
+        adapter.extract(str(doc), "action-1", "v1")
+
+    remaining_budget = 2.0  # deadline(10.0) - now(8.0)
+    assert captured_timeouts, "get_json was never called"
+    assert all(t <= remaining_budget for t in captured_timeouts), captured_timeouts
+    assert captured_sleeps, "sleep was never called"
+    assert all(s <= remaining_budget for s in captured_sleeps), captured_sleeps
+
+
 def test_uses_monotonic_clock_never_time_time(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -383,17 +428,15 @@ def test_uses_monotonic_clock_never_time_time(
 def test_default_clock_and_sleep_are_time_monotonic_and_time_sleep_not_time_time(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # Kills the "default clock/sleep silently falls back to time.time"
-    # mutant (Atchim R8): construct the adapter (and TokenCache inside it)
-    # WITHOUT passing clock/sleep — the real defaults must be exercised,
-    # and time.time() must explode if consulted.
+    # Sanity smoke test: the real defaults, unmocked, still work end to end.
+    # NB: patching `time.time` here would NOT catch a "default is time.time"
+    # mutant — a function's default argument value is bound to the actual
+    # object once, at `def` time, so re-pointing the module attribute
+    # afterwards can't affect an already-captured default. The mutant-killing
+    # assertions are the signature/grep tests below (Atchim round 2).
     doc = tmp_path / "invoice.pdf"
     doc.write_bytes(b"%PDF")
 
-    def boom() -> float:
-        raise AssertionError("time.time() must never be the default clock (INV-07)")
-
-    monkeypatch.setattr("time.time", boom)
     monkeypatch.setattr(
         transport,
         "post_json",
@@ -418,15 +461,64 @@ def test_default_clock_and_sleep_are_time_monotonic_and_time_sleep_not_time_time
     assert out["status"] == "SUCCEEDED"
 
 
-def test_token_cache_default_clock_is_time_monotonic(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_adapter_clock_default_parameter_is_time_monotonic() -> None:
+    # Kills a "default clock silently changed to time.time" mutant: a
+    # default argument is bound once at def-time, so this must inspect the
+    # actual bound default object, not probe behavior at call time.
+    sig = inspect.signature(MuleSoftIDPAdapter.__init__)
+    assert sig.parameters["clock"].default is time.monotonic
+    assert sig.parameters["sleep"].default is time.sleep
+
+
+def test_token_cache_clock_default_parameter_is_time_monotonic() -> None:
     from idp_regression.adapter.token_cache import TokenCache
 
-    def boom() -> float:
-        raise AssertionError("time.time() must never be TokenCache's default clock (INV-07)")
+    sig = inspect.signature(TokenCache.__init__)
+    assert sig.parameters["clock"].default is time.monotonic
 
-    monkeypatch.setattr("time.time", boom)
-    cache = TokenCache(fetch=lambda: ("tok-1", 300.0), refresh_margin_seconds=60.0)
-    assert cache.get() == "tok-1"
+
+def test_no_time_time_reference_anywhere_under_adapter_package() -> None:
+    # Static gate (Atchim round 2): time.time() must never be consulted for
+    # budget math anywhere in the adapter package (INV-07), not just in the
+    # two entry points checked above.
+    adapter_dir = (
+        pathlib.Path(__file__).resolve().parents[2] / "src" / "idp_regression" / "adapter"
+    )
+    offenders = []
+    for path in adapter_dir.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        if re.search(r"\btime\.time\b", text):
+            offenders.append(str(path))
+    assert offenders == [], f"time.time() referenced in adapter/: {offenders}"
+
+
+def test_secrets_never_appear_in_a_token_fetch_failure_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Mirrors test_secrets_never_appear_in_a_submit_failure_log for the
+    # _fetch_token path — kills a "re-add `from exc`" regression there
+    # (Atchim round 2, R8b): if `_fetch_token` went back to
+    # `raise IDPAuthenticationError(...) from exc`, the secret-bearing
+    # IDPTransportError would reappear in __cause__/__context__.
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+
+    def failing_post_json(*args: object, **kwargs: object) -> tuple[int, dict[str, Any]]:
+        raise IDPTransportError(
+            "POST .../oauth2/token failed: connection reset while sending "
+            "client_secret=csecret"
+        )
+
+    adapter = _adapter(monkeypatch)
+    monkeypatch.setattr(transport, "post_json", failing_post_json)
+    with caplog.at_level(logging.ERROR), pytest.raises(IDPAuthenticationError) as excinfo:
+        adapter.extract(str(doc), "action-1", "v1")
+    assert "csecret" not in caplog.text
+    assert "csecret" not in str(excinfo.value)
+    assert excinfo.value.__cause__ is None
+    assert "csecret" not in repr(excinfo.value.__cause__)
+    assert excinfo.value.__context__ is None
+    assert "csecret" not in repr(excinfo.value.__context__)
 
 
 def test_secrets_never_appear_in_a_submit_failure_log(

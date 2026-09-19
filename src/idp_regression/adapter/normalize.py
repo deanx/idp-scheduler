@@ -202,5 +202,5 @@ def _merge_prompts(
                 )
 
         into[prompt_key] = PromptValue(
-            answer=answer_cell["value"], confidence=answer_cell["confidence"], source=source
+            answer=answer_cell["value"], confidence=answer_cell.get("confidence"), source=source
         )
