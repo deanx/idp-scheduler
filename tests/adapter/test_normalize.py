@@ -180,6 +180,12 @@ def test_prompt_key_allows_punctuation_and_charset_outside_field_names() -> None
 # ---- bounded sizes -----------------------------------------------------
 
 
+def test_max_value_bytes_is_pinned_at_64kb() -> None:
+    # Pinned literal (Atchim suggestion) — the cap itself is load-bearing
+    # (ADR-0002), not just "whatever the constant happens to be".
+    assert MAX_VALUE_BYTES == 65_536
+
+
 def test_field_value_too_large_raises_typed_error() -> None:
     huge = "x" * (MAX_VALUE_BYTES + 1)
     raw = {
@@ -189,6 +195,92 @@ def test_field_value_too_large_raises_typed_error() -> None:
     with pytest.raises(MalformedIDPOutputError) as excinfo:
         normalize(raw, success_statuses={"SUCCEEDED"})
     assert excinfo.value.reason == "value_too_large"
+
+
+def test_field_value_at_the_64kb_limit_is_accepted() -> None:
+    at_limit = "x" * MAX_VALUE_BYTES
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [{"fields": {"total": {"value": at_limit, "confidence": None}}}],
+    }
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert out["fields"]["total"]["value"] == at_limit
+
+
+def test_field_value_multibyte_utf8_is_measured_in_bytes_not_characters() -> None:
+    # "€" is 3 UTF-8 bytes — a character-count check would under-measure
+    # this and let a byte-oversized value through.
+    char_count = MAX_VALUE_BYTES // 3 + 1  # 3 bytes/char -> exceeds the byte cap
+    huge_multibyte = "€" * char_count
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [{"fields": {"total": {"value": huge_multibyte, "confidence": None}}}],
+    }
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "value_too_large"
+
+
+def test_field_value_multibyte_utf8_at_the_byte_limit_is_accepted() -> None:
+    at_limit_multibyte = "€" * (MAX_VALUE_BYTES // 3)  # exactly at the 64KB byte cap
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [{"fields": {"total": {"value": at_limit_multibyte, "confidence": None}}}],
+    }
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert out["fields"]["total"]["value"] == at_limit_multibyte
+
+
+def test_max_table_rows_is_pinned_at_10000() -> None:
+    assert MAX_TABLE_ROWS == 10_000
+
+
+def test_table_at_the_10000_row_limit_is_accepted() -> None:
+    rows = [{"description": {"value": "x", "confidence": None}}] * MAX_TABLE_ROWS
+    raw = {"status": "SUCCEEDED", "pages": [{"tables": {"line_items": rows}}]}
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert len(out["tables"]["line_items"]) == MAX_TABLE_ROWS
+
+
+def test_prompt_source_too_large_raises_typed_error() -> None:
+    huge_source = "x" * (MAX_VALUE_BYTES + 1)
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [
+            {
+                "prompts": [
+                    {
+                        "prompt": "vendor?",
+                        "source": huge_source,
+                        "answer": {"value": "A", "confidence": None},
+                    }
+                ]
+            }
+        ],
+    }
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "value_too_large"
+
+
+def test_prompt_source_at_the_64kb_limit_is_accepted() -> None:
+    at_limit_source = "x" * MAX_VALUE_BYTES
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [
+            {
+                "prompts": [
+                    {
+                        "prompt": "vendor?",
+                        "source": at_limit_source,
+                        "answer": {"value": "A", "confidence": None},
+                    }
+                ]
+            }
+        ],
+    }
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert out["prompts"]["vendor?"]["source"] == at_limit_source
 
 
 def test_table_too_large_raises_typed_error() -> None:

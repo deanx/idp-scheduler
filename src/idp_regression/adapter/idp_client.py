@@ -107,6 +107,8 @@ class MuleSoftIDPAdapter:
         # a possibly-secret-bearing exception reachable via __context__
         # (Atchim R8).
         transport_failed = False
+        status: int = 0
+        body: object = None
         try:
             status, body = transport.post_json(
                 TOKEN_URL,
@@ -141,6 +143,8 @@ class MuleSoftIDPAdapter:
         # IDPTransportError is the "currently handled" exception, or it
         # would leak into __context__ even under `from None` (Atchim R8).
         transport_failed = False
+        status: int = 0
+        body: object = None
         try:
             status, body = transport.post_multipart_file(
                 url,

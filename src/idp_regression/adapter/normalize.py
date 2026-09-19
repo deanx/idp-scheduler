@@ -187,6 +187,19 @@ def _merge_prompts(
             raise MalformedIDPOutputError(
                 "invalid_page", "prompt 'source' must be a string or null"
             )
+        if source is not None:
+            try:
+                source_byte_length = len(source.encode("utf-8"))
+            except UnicodeEncodeError:
+                raise MalformedIDPOutputError(
+                    "invalid_cell_value", "a prompt source contains an unencodable character"
+                ) from None
+            if source_byte_length > MAX_VALUE_BYTES:
+                # Unbounded prompt source (Atchim suggestion) — same cap as
+                # a field/cell value, same reason tag.
+                raise MalformedIDPOutputError(
+                    "value_too_large", f"a prompt source exceeds {MAX_VALUE_BYTES} bytes"
+                )
 
         into[prompt_key] = PromptValue(
             answer=answer_cell["value"], confidence=answer_cell["confidence"], source=source
