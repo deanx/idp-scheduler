@@ -312,3 +312,16 @@ def test_c3_fields_min_properties_and_match_key_min_length(schema: dict[str, Any
     assert schema["properties"]["fields"]["minProperties"] == 1
     table_entry = schema["properties"]["tables"]["additionalProperties"]
     assert table_entry["properties"]["match_key"]["minLength"] == 1
+
+
+def test_root_additional_properties_is_closed(schema: dict[str, Any]) -> None:
+    assert schema["additionalProperties"] is False
+
+
+def test_rejects_an_unknown_top_level_key(schema: dict[str, Any]) -> None:
+    bad = {
+        "fields": {"total": {"value": "1.00", "type": "number", "critical": True}},
+        "extra": 1,
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(bad, schema)
