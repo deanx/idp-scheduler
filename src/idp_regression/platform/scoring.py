@@ -19,7 +19,7 @@ import hashlib
 import uuid
 from typing import Literal
 
-from idp_regression.classifier.types import Golden
+from idp_regression.classifier.types import Golden, TableVerdict, Verdict, VerdictMap
 from idp_regression.platform.types import ScoreInput
 
 # Pinned committed constant (ADR-0005 #5). NEVER regenerate or change this
@@ -66,7 +66,7 @@ def field_score_name(field_name: str) -> str:
 def build_score_inputs(
     *,
     golden: Golden,
-    verdicts: object,
+    verdicts: VerdictMap,
     gate: Literal["PASS", "FAIL"],
     run_id: str,
     document_id: str,
@@ -75,13 +75,17 @@ def build_score_inputs(
     per golden prompt, and exactly one ``gate`` per document (NFR N9 — no
     unbounded score write). Table-block verdicts are not individually
     scored under this contract (documented limitation, see DEBT.md).
+
+    Raises ``ValueError`` if a golden field/prompt has no matching verdict
+    entry — ``classify()`` always produces one for every golden ∪ actual
+    key (CT-02), so a miss here is a caller bug, not a "missing" value to
+    paper over (Atchim suggestion, scoring.py:121).
     """
-    verdict_map = verdicts if isinstance(verdicts, dict) else {}
     scores: list[ScoreInput] = []
 
     for field_name in golden.get("fields", {}):
-        verdict = verdict_map.get(field_name)
         name = field_score_name(field_name)
+        verdict = _require_verdict(verdicts, field_name)
         scores.append(
             {
                 "id": score_id(run_id=run_id, document_id=document_id, score_name=name),
@@ -92,8 +96,8 @@ def build_score_inputs(
         )
 
     for prompt_key in golden.get("prompts", {}):
-        verdict = verdict_map.get(prompt_key)
         name = prompt_score_name(prompt_key)
+        verdict = _require_verdict(verdicts, prompt_key)
         scores.append(
             {
                 "id": score_id(run_id=run_id, document_id=document_id, score_name=name),
@@ -114,16 +118,19 @@ def build_score_inputs(
     return scores
 
 
-def _verdict_value(verdict: object) -> str:
-    if isinstance(verdict, dict) and "verdict" in verdict:
-        value = verdict["verdict"]
-        return str(value)
-    return "missing"
+def _require_verdict(verdicts: VerdictMap, key: str) -> Verdict | TableVerdict:
+    if key not in verdicts:
+        raise ValueError(f"no verdict entry for golden key {key!r} — classify() must cover it")
+    return verdicts[key]
 
 
-def _verdict_comment(verdict: object) -> str | None:
-    if not isinstance(verdict, dict):
-        return None
+def _verdict_value(verdict: Verdict | TableVerdict) -> str:
+    return str(verdict["verdict"])
+
+
+def _verdict_comment(verdict: Verdict | TableVerdict) -> str | None:
+    if verdict.get("verdict") == "detail":
+        return None  # a TableVerdict container has no expected/actual/confidence
     expected = verdict.get("expected")
     actual = verdict.get("actual")
     confidence = verdict.get("confidence")

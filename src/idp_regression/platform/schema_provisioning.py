@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 
-from idp_regression.platform.errors import PlatformError
+from idp_regression.platform.errors import PlatformError, TransportError
 from idp_regression.platform.schema import load_golden_schema
 from idp_regression.platform.transport import HttpClient
 
@@ -25,12 +25,20 @@ def provision_golden_schema(client: HttpClient, *, dataset_name: str) -> None:
     leaves whatever schema (if any) already exists on the platform intact.
     """
     schema = load_golden_schema()
-    assert schema, "the committed golden schema must never be empty"  # noqa: S101
-    status, body = client.request(
-        "POST",
-        "/api/public/v2/datasets",
-        {"name": dataset_name, "expectedOutputSchema": schema},
-    )
+    if not schema:
+        # Atchim suggestion: this was an `assert` (stripped under -O).
+        # The committed schema file must never be empty/absent — a code
+        # defect, not a caller error, but still a real raise, not a
+        # silently-optimized-away guard.
+        raise PlatformError("the committed golden schema must never be empty")
+    try:
+        status, body = client.request(
+            "POST",
+            "/api/public/v2/datasets",
+            {"name": dataset_name, "expectedOutputSchema": schema},
+        )
+    except TransportError as exc:
+        raise PlatformError(f"provision_golden_schema transport failure: {exc}") from exc
     if status >= 400:
         logger.error(
             "schema_provisioning_failed status=%s dataset=%s",

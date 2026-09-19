@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from idp_regression.classifier.types import Golden, VerdictMap
 from idp_regression.platform.scoring import build_score_inputs
 
@@ -132,3 +134,22 @@ def test_score_count_formula_n9() -> None:
     )
     expected_count = len(golden["fields"]) + len(golden.get("prompts", {})) + 1
     assert len(scores) == expected_count
+
+
+def test_a_missing_verdict_raises_instead_of_silently_writing_missing() -> None:
+    """Atchim suggestion (scoring.py:121): a golden field with no matching
+    verdict entry is a caller bug (classify() always produces a verdict
+    for every golden ∪ actual key) — loud failure, not a silent
+    "missing" value masking the real problem."""
+    golden = _golden()
+    verdicts = _verdicts()
+    del verdicts["total"]  # simulate a caller that forgot to classify a field
+
+    with pytest.raises(ValueError, match="total"):
+        build_score_inputs(
+            golden=golden,
+            verdicts=verdicts,
+            gate="FAIL",
+            run_id="run-1",
+            document_id="invoice-007.pdf",
+        )
