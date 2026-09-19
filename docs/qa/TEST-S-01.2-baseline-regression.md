@@ -1,14 +1,14 @@
 # /test stamp — SPEC-01 (S-01.2 IDP adapter + normalize)
 
 **Status:** ✅ PASSED
-**Source:** /implement (Atchim code review TDD gate)
+**Source:** /test gap-fill (Atchim TDD gate)
 **Date:** 2026-09-19
-**Commit:** 481e0db788a94b1ff39bd96879dab5168812322d
+**Commit:** d84bfa6fe2ffdc28ff2cdf7375569e06f1787637
 **Author:** alex@divinocosta.com.br
-**Atchim TDD gate:** PASSED after 2 rounds of REQUEST CHANGES; round-3 APPROVE on 2026-09-19
+**Atchim TDD gate:** PASSED on 2026-09-19. /test gate over b393564..d84bfa6: the independent coverage audit found 13 items, 6 of them Scenario-B defects (fixed test-first) and 7 coverage gaps (now pinned). Atchim's mutation checks killed everything except one equivalent mutant.
 **Independence:** ✅ structural (different models): Dengoso (sonnet) reviewed by Atchim (opus). SPEC-01 is Risk: high.
-**Static:** ✅ clean: mypy strict (55 files) + ruff. No `# type: ignore` in src/tests.
-**Files:** docs/design/CONTRACTS.md, docs/design/INVARIANTS.md, docs/qa/TEST-S-01.2-baseline-regression.md, pyproject.toml, src/idp_regression/adapter/errors.py, src/idp_regression/adapter/idp_client.py, src/idp_regression/adapter/normalize.py, src/idp_regression/adapter/token_cache.py, src/idp_regression/adapter/transport.py, src/idp_regression/adapter/types.py, tests/adapter/__init__.py, tests/adapter/fixtures/raw_idp_response.json, tests/adapter/test_idp_client.py, tests/adapter/test_integration_idp.py, tests/adapter/test_module_boundary.py, tests/adapter/test_normalize.py, tests/adapter/test_normalize_contract.py, tests/adapter/test_token_cache.py, tests/adapter/test_transport.py, uv.lock
+**Static:** ✅ clean: mypy strict (57 files) + ruff. No `# type: ignore` in src/tests.
+**Files:** docs/design/CONTRACTS.md, docs/design/INVARIANTS.md, docs/qa/TEST-S-01.2-baseline-regression.md, pyproject.toml, src/idp_regression/adapter/errors.py, src/idp_regression/adapter/idp_client.py, src/idp_regression/adapter/normalize.py, src/idp_regression/adapter/token_cache.py, src/idp_regression/adapter/transport.py, src/idp_regression/adapter/types.py, tests/adapter/__init__.py, tests/adapter/fixtures/raw_idp_response.json, tests/adapter/test_errors.py, tests/adapter/test_idp_client.py, tests/adapter/test_integration_idp.py, tests/adapter/test_make_idp_adapter.py, tests/adapter/test_module_boundary.py, tests/adapter/test_normalize.py, tests/adapter/test_normalize_contract.py, tests/adapter/test_token_cache.py, tests/adapter/test_transport.py, uv.lock
 **Sequence:** test-first per slice:
 - types/errors/TokenCache (6bc5e02)
 - transport (622d7c8)
@@ -22,8 +22,8 @@ Fix rounds: R1 8d84491, R2 7131712, R3 e1742d3, R4/R5/R8 75987a8, R7 320fd7c, R6
 
 | Scope | Passed | Failed |
 |---|---|---|
-| Unit + contract (default run) | 348 | 0 |
-| Full suite incl. live integration (`RUN_INTEGRATION_TESTS=1`; live IDP OAuth token + live Langfuse) | 361 | 0 (1 skip: live submit/poll needs a real IDP action id + version → S-01.6) |
+| Unit + contract (default run) | 387 | 0 |
+| Full suite incl. live integration (`RUN_INTEGRATION_TESTS=1`; live IDP OAuth token + live Langfuse) | 400 | 0 (1 skip: live submit/poll needs a real IDP action id + version → S-01.6) |
 
 ## AC coverage
 
@@ -49,6 +49,17 @@ Fix rounds: R1 8d84491, R2 7131712, R3 e1742d3, R4/R5/R8 75987a8, R7 320fd7c, R6
 | `extract` signature (ADR-0002 amendment) | test_normalize_contract.py:68 | ✅ COVERED |
 | N23/N5 redaction + sanitized logs | test_transport.py:124,154,261; test_idp_client.py:495,524 | ✅ COVERED |
 | N1 timing metric; integration | test_idp_client.py:138; test_integration_idp.py:36,53 | ✅ COVERED (live submit/poll skipped) |
+| N23: CR/LF token not leaked | test_idp_client.py:757; test_transport.py:124 | ✅ COVERED |
+| N23: `redact` covers form-encoded + escaped-quote values | test_transport.py:178-204 | ✅ COVERED |
+| NUL byte in path → typed error, path not echoed | test_transport.py:289 | ✅ COVERED |
+| BR7: `expires_in` fail-closed | test_idp_client.py:346,362 | ✅ COVERED |
+| BR7: two `extract()` calls → one token fetch | test_idp_client.py:149 | ✅ COVERED |
+| N21: surrogate prompt key / unsafe column name | test_normalize.py:187,148 | ✅ COVERED |
+| Status strings capped + sanitized | test_errors.py:14-47 | ✅ COVERED |
+| BR9: env default `SUCCEEDED` | test_make_idp_adapter.py:29 | ✅ COVERED |
+| Poll budget includes submit time | test_idp_client.py:589 | ✅ COVERED |
+| N1: timing equals the clock delta | test_idp_client.py:302 | ✅ COVERED |
+| Domain: extracted values never in logs/stdout/stderr | test_idp_client.py:256 | ✅ COVERED |
 
 **Deferred:**
 - DEBT-24: 5xx/429 retry (ADR-0004 #6) → S-01.4.
@@ -58,5 +69,6 @@ Fix rounds: R1 8d84491, R2 7131712, R3 e1742d3, R4/R5/R8 75987a8, R7 320fd7c, R6
 - Containment → /harden before the epic is Done.
 
 ## History
+- /implement (Atchim TDD gate) PASSED at 481e0db788a94b1ff39bd96879dab5168812322d. Superseded by this /test stamp (the Risk: high rigor gate requires one).
 - /implement (Atchim REQUEST CHANGES) on 2026-09-19: ❌ INVALIDATED. Round-1 R1–R8 and round-2 test gaps, all closed. Round-1 summary: (Atchim, 2026-09-19)  ### Required 1. **Name check too loose** (`normalize.py:22,66`): `$` matches before a trailing newline, so `"total\n"` is accepted; there is also no length cap (DoD line 82). 2. **Raw exceptions escape `normalize()`:** `OverflowError` on a huge-int confidence (`:96`); `UnicodeEncodeError` on a lone surrogate (`:83`), which carries the PII value. 3. **Raw exceptions escape `extract()` through the transport** (`transport.py:108-131`): RemoteDisconnected, ConnectionResetError, IncompleteRead, UnicodeDecodeError and RecursionError. A missing file raises `FileNotFoundError` with the path in the message. 4. **A missing or null status polls to timeout** (`idp_client.py:179-192`), but ADR-0004 #17 says it must abort. `test_idp_client.py:247` pins the wrong behaviour. 5. **The poll ignores non-2xx except 401/403** (`:174-178`): a 404/400 keeps polling (ADR-0004 #5 says hard 
 - Initial stamp
