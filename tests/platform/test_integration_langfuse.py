@@ -228,7 +228,14 @@ def _build_record_for_item(item: Any, *, run_id: str) -> DocumentRecord:
 
 
 def _gate_score_value(client: UrllibHttpClient, gate_score_id: str) -> str | None:
-    status, body = client.request("GET", "/api/public/v3/scores?fields=details")
+    # Filter by id= server-side rather than scanning the default 50-row
+    # page unfiltered — the shared local instance accumulates scores
+    # across every test run in a session, and an unfiltered scan can
+    # miss a just-written score once total volume exceeds one page
+    # (flaky, observed 2026-09-19).
+    status, body = client.request(
+        "GET", f"/api/public/v3/scores?fields=details&id={gate_score_id}"
+    )
     if status != 200 or not isinstance(body, dict):
         return None
     for score in body.get("data", []):
@@ -411,16 +418,7 @@ def test_record_run_writes_readable_scores_and_is_visible_in_experiments(
         run_id=run_id, document_id=records[0]["document_id"], score_name="gate"
     )
 
-    def _gate_score_readable() -> bool:
-        status, body = client.request("GET", "/api/public/v3/scores?fields=details")
-        if status != 200 or not isinstance(body, dict):
-            return False
-        for score in body.get("data", []):
-            if score.get("id") == gate_score_id and score.get("value") == "PASS":
-                return True
-        return False
-
-    assert _bounded_poll(_gate_score_readable)
+    assert _bounded_poll(lambda: _gate_score_value(client, gate_score_id) == "PASS")
 
     one_hour_ago = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=1)
     from_ts = one_hour_ago.strftime("%Y-%m-%dT%H:%M:%SZ")
