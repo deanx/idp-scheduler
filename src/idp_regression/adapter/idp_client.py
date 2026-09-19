@@ -18,6 +18,7 @@ from idp_regression.adapter import transport
 from idp_regression.adapter.errors import (
     IDPAmbiguousStatusError,
     IDPAuthenticationError,
+    IDPConfigurationError,
     IDPExecutionFailedError,
     IDPPollHardFailureError,
     IDPPollTimeoutError,
@@ -42,6 +43,35 @@ DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS = 60.0
 #: beyond this is treated as malformed, not "very long-lived" (/test
 #: Scenario B item 3).
 MAX_EXPIRES_IN_SECONDS = 86_400.0 * 365
+
+#: Sane upper bounds for the adapter's own timing config (QA F-1) — a
+#: NaN/inf submit or poll timeout must never reach a real timeout call
+#: (`now >= deadline` is always False for a NaN deadline, so the poll
+#: loop never terminates) or an `OverflowError` from a socket-timeout
+#: call with `inf`. An hour is generous for any of these.
+MAX_SUBMIT_TIMEOUT_SECONDS = 3_600.0
+MAX_POLL_TIMEOUT_SECONDS = 3_600.0
+MAX_POLL_INTERVAL_SECONDS = 3_600.0
+MAX_TOKEN_REFRESH_MARGIN_SECONDS = 3_600.0
+
+
+def _validate_timing(name: str, value: object, *, allow_zero: bool, max_value: float) -> float:
+    """Fail closed on a non-numeric/non-finite/out-of-range timing config
+    value (QA F-1) — raised as a typed ``IDPConfigurationError`` at
+    construction, not discovered mid-poll."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise IDPConfigurationError(f"{name} must be a number")
+    fvalue = float(value)
+    if not math.isfinite(fvalue):
+        raise IDPConfigurationError(f"{name} must be finite (not NaN/inf)")
+    if allow_zero:
+        if fvalue < 0:
+            raise IDPConfigurationError(f"{name} must be >= 0")
+    elif fvalue <= 0:
+        raise IDPConfigurationError(f"{name} must be > 0")
+    if fvalue > max_value:
+        raise IDPConfigurationError(f"{name} exceeds the sane upper bound of {max_value}")
+    return fvalue
 
 
 def _executions_base_url(region: str, org_id: str, action_id: str, version: str) -> str:
@@ -71,6 +101,30 @@ class MuleSoftIDPAdapter:
     ) -> None:
         if not success_statuses <= terminal_statuses:
             raise ValueError("success_statuses must be a subset of terminal_statuses")
+        submit_timeout_seconds = _validate_timing(
+            "submit_timeout_seconds",
+            submit_timeout_seconds,
+            allow_zero=False,
+            max_value=MAX_SUBMIT_TIMEOUT_SECONDS,
+        )
+        poll_timeout_seconds = _validate_timing(
+            "poll_timeout_seconds",
+            poll_timeout_seconds,
+            allow_zero=False,
+            max_value=MAX_POLL_TIMEOUT_SECONDS,
+        )
+        poll_interval_seconds = _validate_timing(
+            "poll_interval_seconds",
+            poll_interval_seconds,
+            allow_zero=False,
+            max_value=MAX_POLL_INTERVAL_SECONDS,
+        )
+        token_refresh_margin_seconds = _validate_timing(
+            "token_refresh_margin_seconds",
+            token_refresh_margin_seconds,
+            allow_zero=True,
+            max_value=MAX_TOKEN_REFRESH_MARGIN_SECONDS,
+        )
         self._client_id = client_id
         self._client_secret = client_secret
         self._region = region
@@ -278,6 +332,21 @@ def make_idp_adapter() -> MuleSoftIDPAdapter:
         raw = os.environ.get(name, default)
         return {item.strip() for item in raw.split(",") if item.strip()}
 
+    def _timing_env(name: str, default: float) -> float:
+        # A bare float(...) on an env string raises a raw ValueError for
+        # "nan"/"inf" parse *successfully* (float("nan") is valid!) but
+        # would otherwise escape unvalidated — MuleSoftIDPAdapter.__init__
+        # is the authoritative gate (_validate_timing), but a non-numeric
+        # env string ("banana") should fail with the same typed error
+        # here too, not a raw ValueError (QA F-1).
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        try:
+            return float(raw)
+        except ValueError:
+            raise IDPConfigurationError(f"{name} env var is not numeric") from None
+
     return MuleSoftIDPAdapter(
         client_id=_require("IDP_CLIENT_ID"),
         client_secret=_require("IDP_CLIENT_SECRET"),
@@ -285,15 +354,13 @@ def make_idp_adapter() -> MuleSoftIDPAdapter:
         org_id=_require("IDP_ORG_ID"),
         terminal_statuses=_statuses("IDP_TERMINAL_STATUSES", "SUCCEEDED"),
         success_statuses=_statuses("IDP_SUCCESS_STATUSES", "SUCCEEDED"),
-        submit_timeout_seconds=float(
-            os.environ.get("IDP_SUBMIT_TIMEOUT_SECONDS", DEFAULT_SUBMIT_TIMEOUT_SECONDS)
+        submit_timeout_seconds=_timing_env(
+            "IDP_SUBMIT_TIMEOUT_SECONDS", DEFAULT_SUBMIT_TIMEOUT_SECONDS
         ),
-        poll_timeout_seconds=float(
-            os.environ.get("IDP_EXECUTION_TIMEOUT_SECONDS", DEFAULT_POLL_TIMEOUT_SECONDS)
+        poll_timeout_seconds=_timing_env(
+            "IDP_EXECUTION_TIMEOUT_SECONDS", DEFAULT_POLL_TIMEOUT_SECONDS
         ),
-        token_refresh_margin_seconds=float(
-            os.environ.get(
-                "IDP_TOKEN_REFRESH_MARGIN_SECONDS", DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS
-            )
+        token_refresh_margin_seconds=_timing_env(
+            "IDP_TOKEN_REFRESH_MARGIN_SECONDS", DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS
         ),
     )

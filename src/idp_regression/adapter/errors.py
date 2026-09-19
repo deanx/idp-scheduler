@@ -25,6 +25,13 @@ class IDPAdapterError(Exception):
     """Base for IDP transport/auth/execution errors (not shape errors)."""
 
 
+class IDPConfigurationError(IDPAdapterError):
+    """A numeric timing config value (a timeout, interval, or margin) is
+    non-finite, out of range, or non-numeric — QA F-1: a NaN/inf timeout
+    must never silently produce an infinite poll or let a raw
+    ``OverflowError`` escape."""
+
+
 class IDPTransportError(IDPAdapterError):
     """The raw HTTP call failed before a status code was returned (timeout,
     connection error) — R7-style: never a raw ``urllib`` exception escapes."""

@@ -20,6 +20,7 @@ from idp_regression.adapter import transport
 from idp_regression.adapter.errors import (
     IDPAmbiguousStatusError,
     IDPAuthenticationError,
+    IDPConfigurationError,
     IDPExecutionFailedError,
     IDPPollHardFailureError,
     IDPPollTimeoutError,
@@ -584,6 +585,93 @@ def test_success_statuses_must_be_a_subset_of_terminal_statuses() -> None:
             terminal_statuses={"SUCCEEDED"},
             success_statuses={"SUCCEEDED", "DONE"},  # DONE not in terminal_statuses
         )
+
+
+_BAD_TIMING_VALUES: list[object] = [
+    float("nan"),
+    float("inf"),
+    float("-inf"),
+    0.0,
+    -1.0,
+    "not-a-number",
+]
+
+
+def _adapter_kwargs(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "client_id": "cid",
+        "client_secret": "csecret",
+        "region": "us-east-2",
+        "org_id": "org-1",
+        "terminal_statuses": {"SUCCEEDED"},
+        "success_statuses": {"SUCCEEDED"},
+    }
+    base.update(overrides)
+    return base
+
+
+@pytest.mark.parametrize("bad_value", _BAD_TIMING_VALUES)
+def test_invalid_submit_timeout_raises_typed_config_error_at_construction(
+    bad_value: object,
+) -> None:
+    # QA F-1: nan/inf/-inf/0/negative/non-numeric must never reach a real
+    # timeout call (idp_client.py:66-67, :288-293) — validated at
+    # construction, not discovered mid-poll.
+    with pytest.raises(IDPConfigurationError):
+        MuleSoftIDPAdapter(**_adapter_kwargs(submit_timeout_seconds=bad_value))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("bad_value", _BAD_TIMING_VALUES)
+def test_invalid_poll_timeout_raises_typed_config_error_at_construction(
+    bad_value: object,
+) -> None:
+    with pytest.raises(IDPConfigurationError):
+        MuleSoftIDPAdapter(**_adapter_kwargs(poll_timeout_seconds=bad_value))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("bad_value", _BAD_TIMING_VALUES)
+def test_invalid_poll_interval_raises_typed_config_error_at_construction(
+    bad_value: object,
+) -> None:
+    with pytest.raises(IDPConfigurationError):
+        MuleSoftIDPAdapter(**_adapter_kwargs(poll_interval_seconds=bad_value))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf"), "not-a-number"])
+def test_invalid_token_refresh_margin_raises_typed_config_error_at_construction(
+    bad_value: object,
+) -> None:
+    # The refresh margin may legitimately be 0 (refresh right at expiry) —
+    # only nan/inf/non-numeric are rejected here, not 0.
+    with pytest.raises(IDPConfigurationError):
+        MuleSoftIDPAdapter(**_adapter_kwargs(token_refresh_margin_seconds=bad_value))  # type: ignore[arg-type]
+
+
+def test_token_refresh_margin_of_zero_is_accepted() -> None:
+    MuleSoftIDPAdapter(**_adapter_kwargs(token_refresh_margin_seconds=0.0))  # type: ignore[arg-type]
+
+
+def test_negative_token_refresh_margin_raises_typed_config_error() -> None:
+    with pytest.raises(IDPConfigurationError):
+        MuleSoftIDPAdapter(**_adapter_kwargs(token_refresh_margin_seconds=-1.0))  # type: ignore[arg-type]
+
+
+def test_absurdly_large_poll_timeout_raises_typed_config_error() -> None:
+    with pytest.raises(IDPConfigurationError):
+        MuleSoftIDPAdapter(**_adapter_kwargs(poll_timeout_seconds=1e20))  # type: ignore[arg-type]
+
+
+def test_nan_poll_timeout_poll_terminates_instead_of_looping_forever(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # QA F-1 regression: Zangado reproduced 1,000 polls over 20,040
+    # simulated seconds with no timeout when IDP_EXECUTION_TIMEOUT_SECONDS
+    # was nan/inf (`now >= deadline` is always False when deadline is
+    # nan). Construction itself must reject it — this test kills a "remove
+    # the isfinite check" mutant by asserting construction raises rather
+    # than letting a broken adapter be built at all.
+    with pytest.raises(IDPConfigurationError):
+        _adapter(monkeypatch, poll_timeout_seconds=float("nan"))
 
 
 def test_poll_budget_is_measured_from_before_submit_not_after(
