@@ -14,13 +14,18 @@ exactly what ``record_run`` hands to ``run_experiment``.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
+import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
 from idp_regression.classifier.types import NormalizedOutput
+from idp_regression.platform.errors import ExperimentRecordFailedError
 from idp_regression.platform.langfuse_adapter import LangfuseAdapter
 from idp_regression.platform.scoring import build_score_inputs
-from idp_regression.platform.tracing import ExperimentItem
+from idp_regression.platform.tracing import ExperimentItem, ExperimentRunner
 
 _FILE_PATH_LIKE = re.compile(r"(/[\w.\-]+){2,}|\.pdf\b|\.png\b|\.jpg\b")
 
@@ -224,3 +229,148 @@ def test_run_metadata_forwarded_as_experiment_metadata() -> None:
         "action_version": "v1",
         "golden_version": "deadbeef",
     }
+
+
+# --- TP-45 (Atchim R3, re-review): the REAL langfuse SDK + a REAL OTel
+# InMemorySpanExporter (Langfuse's own `span_exporter=` constructor param),
+# no fake client. Points at an unreachable host so no live credentials or
+# network are needed — record_run always raises ExperimentRecordFailedError
+# here (the dataset-run-item REST call fails, logged on the `langfuse`
+# logger, R5c), but the OTel spans are recorded locally regardless of that
+# network outcome (empirically confirmed 2026-09-19), so we inspect them
+# from the `pytest.raises` block.
+
+_PATH_SENTINEL = "/IDP_DOCUMENT_DIR/invoice-007.pdf"
+
+# The only span-attribute keys the SDK's run_experiment is known to set
+# (live/local-probed 2026-09-19) — none of them may carry raw exception
+# text or a file-path blob beyond the document_id value itself.
+_KNOWN_SPAN_ATTRIBUTE_KEYS = {
+    "langfuse.observation.input",
+    "langfuse.observation.output",
+    "langfuse.observation.type",
+    "langfuse.observation.metadata.experiment_name",
+    "langfuse.observation.metadata.experiment_run_name",
+    "langfuse.observation.metadata.dataset_id",
+    "langfuse.observation.metadata.dataset_item_id",
+    # RunMetadata (action_id/action_version/golden_version), forwarded as
+    # run_experiment's metadata= kwarg — the only "extra" allowlisted
+    # content per ADR-0005 #9 ("trace metadata = the three RunMetadata
+    # strings"); the SDK attaches it under both prefixes.
+    "langfuse.observation.metadata.action_id",
+    "langfuse.observation.metadata.action_version",
+    "langfuse.observation.metadata.golden_version",
+    "langfuse.experiment.metadata.action_id",
+    "langfuse.experiment.metadata.action_version",
+    "langfuse.experiment.metadata.golden_version",
+    "langfuse.environment",
+    "langfuse.experiment.id",
+    "langfuse.experiment.name",
+    "langfuse.experiment.dataset.id",
+    "langfuse.experiment.item.id",
+    "langfuse.experiment.item.expected_output",
+    "langfuse.experiment.item.root_observation_id",
+    "langfuse.internal.is_app_root",
+}
+
+
+def _real_tracing_client_with_unreachable_host(exporter: InMemorySpanExporter) -> ExperimentRunner:
+    from langfuse import Langfuse
+
+    client = Langfuse(
+        host="http://localhost:1",
+        public_key="pk-test",
+        secret_key="sk-test",
+        span_exporter=exporter,
+    )
+    return client  # type: ignore[return-value]  # duck-typed against ExperimentRunner
+
+
+@pytest.fixture
+def real_sdk_adapter_and_exporter() -> tuple[LangfuseAdapter, InMemorySpanExporter]:
+    """One shared Langfuse SDK client (+ exporter) for both scenarios in
+    this section — OTel only honours the FIRST TracerProvider registered
+    per process, so a second ``Langfuse(span_exporter=...)`` instance
+    silently doesn't get its own exporter wired up (confirmed empirically
+    2026-09-19). Both tests below must reuse the same client."""
+    exporter = InMemorySpanExporter()
+    adapter = LangfuseAdapter(
+        client=RecordingHttpClient(),
+        tracing_client=_real_tracing_client_with_unreachable_host(exporter),
+    )
+    return adapter, exporter
+
+
+def test_real_sdk_spans_allowlist_path_sentinel_and_task_failed_constant(
+    real_sdk_adapter_and_exporter: tuple[LangfuseAdapter, InMemorySpanExporter],
+) -> None:
+    """R3: the full ADR-0005 #9 allowlist, asserted over EVERY attribute of
+    a REAL span from the REAL langfuse SDK + a REAL InMemorySpanExporter
+    (Langfuse's own ``span_exporter=`` constructor param) — no fake
+    tracing client. A path-sentinel is planted as ``document_id`` (the
+    one place a path-shaped string is allowed to appear, INV-01) and must
+    never appear anywhere else on any span. A second call with a
+    malformed record (missing the required ``actual`` key) exercises the
+    REAL failure branch inside the total task and asserts the span's
+    output is the fixed constant, never ``str(KeyError(...))``.
+    """
+    adapter, exporter = real_sdk_adapter_and_exporter
+    adapter._item_cache = {"item-1": ("ds-1", {"fields": {}})}  # noqa: SLF001
+    actual: NormalizedOutput = {"status": "SUCCEEDED", "fields": {"total": {"value": "100.00"}}}
+
+    # --- scenario 1: happy path + path sentinel -----------------------
+    with pytest.raises(ExperimentRecordFailedError):
+        adapter.record_run(
+            dataset_name="ds",
+            run_name="test-s013-run-1",
+            run_id="run-1",
+            records=[
+                {
+                    "item_id": "item-1",
+                    "document_id": _PATH_SENTINEL,
+                    "actual": actual,
+                    "scores": [],
+                }
+            ],
+            metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+        )
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) > 0
+    for span in spans:
+        attributes = dict(span.attributes or {})
+        assert set(attributes.keys()) <= _KNOWN_SPAN_ATTRIBUTE_KEYS, (
+            f"unexpected span attribute key(s): "
+            f"{set(attributes.keys()) - _KNOWN_SPAN_ATTRIBUTE_KEYS}"
+        )
+        for key, value in attributes.items():
+            text = str(value)
+            if key == "langfuse.observation.input":
+                assert _PATH_SENTINEL in text  # the one allowed place
+                assert json.loads(text) == {"document_id": _PATH_SENTINEL}
+            else:
+                assert _PATH_SENTINEL not in text, f"sentinel leaked into {key!r}: {text!r}"
+            assert "Traceback" not in text
+
+    # --- scenario 2: the real failure branch, never exception text ----
+    exporter.clear()
+    malformed_record: Any = {"item_id": "item-1", "document_id": "doc-1", "scores": []}
+
+    with pytest.raises(ExperimentRecordFailedError):
+        adapter.record_run(
+            dataset_name="ds",
+            run_name="test-s013-run-2",
+            run_id="run-2",
+            records=[malformed_record],
+            metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+        )
+
+    failure_spans = exporter.get_finished_spans()
+    assert len(failure_spans) > 0
+    for span in failure_spans:
+        raw_output = (span.attributes or {}).get("langfuse.observation.output")
+        assert raw_output is not None
+        output = str(raw_output)
+        assert json.loads(output) == {"record_error": "task_failed"}
+        assert "KeyError" not in output
+        assert "actual" not in output  # the missing-key name never leaks either
