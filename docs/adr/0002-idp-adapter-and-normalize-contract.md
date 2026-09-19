@@ -79,6 +79,8 @@ class FieldValue(TypedDict):
     value: str | None
     confidence: float | None                       # kept available; NOT part of golden comparison
 
+> **Amended 2026-09-19 (QA S-01.2 F-3, typing only).** In code, the adapter's TypedDicts mirror the classifier's (`src/idp_regression/classifier/types.py`) so that `NormalizedOutput` is assignable to `classify()` under mypy (CT-01 key-parity test). They mark `tables`, `prompts`, `FieldValue.confidence`, `PromptValue.confidence` and `PromptValue.source` as `NotRequired`. At runtime `normalize()` always emits every key: the contract above describes the emitted shape, and `NotRequired` only marks keys a *consumer* must tolerate as absent.
+
 # A row is a dict keyed by column name (NOT a TypedDict with wildcard keys —
 # TypedDict cannot express `column_name -> FieldValue` for arbitrary columns,
 # and `dict[str, list[Row]]` would not be mypy-typeable. A plain

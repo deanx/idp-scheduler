@@ -12,6 +12,12 @@ Format:
 
 ## Handoffs (newest first)
 
+### HANDOFF Zangado → (top-level)  (2026-09-19, /qa S-01.2)
+- Done: DoD audit of S-01.2 → docs/qa/QA-01-baseline-regression-S-01.2.md, ⚠️ Pass with follow-ups. Unit: 387 passed. Live: 400 passed, 1 skip (submit/poll pending S-01.6; nothing submitted to the live IDP). mypy, ruff and pip-audit are clean, and the grep secret scan is clean. CT-01 (incl. classifier parity and the real classify() call), INV-02 and INV-07 are green. check_clean exit 0.
+- Contract: every DoD line is met or deferred as the SPEC allows. Containment goes to S-01.4 /harden (epic-scoped), and the real CT-01 fixture to S-01.6 (DEBT-22). N21 ✅ PASS. N1's S-01.2 leg passes (the row stays PENDING for S-01.4). Observability ✅ VERIFIED at S-01.2 scope; the timing line has no document_id, so S-01.4 must correlate it and log elapsed time on abort.
+- Open: F-1 (Major, escaped-atchim yes): IDP_EXECUTION_TIMEOUT_SECONDS=nan/inf makes the poll loop run forever; submit timeout inf → raw OverflowError. F-2 (Minor, yes): urllib forwards the Bearer token across redirects, and platform/transport.py:85 is a sibling. F-3 (Minor, no): ADR-0002 TypedDict vs NotRequired docs drift. F-4 (Minor, yes): stamp inaccuracies (two type: ignore, stale line refs). F-5 (Minor, yes): a submit 401/403 is typed as IDPSubmitError, not auth → append to DEBT-21.
+- Next: Dunga marks S-01.2 Done in docs/state and cards F-1/F-2/F-3/F-4 (F-5 → DEBT-21). Rule on regression-worthiness for F-1, F-2 and F-5. Dengoso fixes F-1 before S-01.4 /harden. Branca's HARDEN-01 scope adds F-1, F-2, DEBT-21 and DEBT-24.
+
 ### HANDOFF Zangado → (top-level)  (2026-09-19, /qa S-01.3 re-check)
 - Done: re-check of the fix round → docs/qa/QA-01-baseline-regression-S-01.3.md, ✅ Pass. Independently re-ran 220 unit + 232 live tests, all passing. Static checks and SCA are clean. Contracts and invariants are green. DEBT-18 option B holds.
 - Contract: S-01.3 is Done. F-1 is closed: Soneca's conditional APPROVED is met, and C1–C3 landed exactly as specified and are CT-05-pinned. F-2 (REG-03), F-3 (REG-04), F-4 and F-5 (REG-05) are closed.
