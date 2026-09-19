@@ -56,25 +56,33 @@ def test_whitespace_around_comma_separated_statuses_is_stripped(
     assert adapter._terminal_statuses == {"SUCCEEDED", "FAILED"}  # noqa: SLF001
 
 
-@pytest.mark.parametrize(
-    "env_name",
-    [
-        "IDP_SUBMIT_TIMEOUT_SECONDS",
-        "IDP_EXECUTION_TIMEOUT_SECONDS",
-        "IDP_TOKEN_REFRESH_MARGIN_SECONDS",
-    ],
-)
-@pytest.mark.parametrize("bad_value", ["nan", "inf", "-inf", "0", "-1", "banana"])
+_TIMING_ENV_NAMES = [
+    "IDP_SUBMIT_TIMEOUT_SECONDS",
+    "IDP_EXECUTION_TIMEOUT_SECONDS",
+    "IDP_TOKEN_REFRESH_MARGIN_SECONDS",
+]
+
+# (env_name, bad_value) pairs — every combination of env var and bad value
+# EXCEPT (IDP_TOKEN_REFRESH_MARGIN_SECONDS, "0"), which is legitimately
+# valid and asserted separately by
+# test_zero_token_refresh_margin_env_var_is_accepted below (Atchim
+# suggestion: drop the redundant runtime skip, exclude it declaratively).
+_INVALID_TIMING_ENV_CASES = [
+    (env_name, bad_value)
+    for env_name in _TIMING_ENV_NAMES
+    for bad_value in ("nan", "inf", "-inf", "0", "-1", "banana")
+    if not (env_name == "IDP_TOKEN_REFRESH_MARGIN_SECONDS" and bad_value == "0")
+]
+
+
+@pytest.mark.parametrize(("env_name", "bad_value"), _INVALID_TIMING_ENV_CASES)
 def test_invalid_timing_env_var_raises_typed_config_error(
     monkeypatch: pytest.MonkeyPatch, env_name: str, bad_value: str
 ) -> None:
     # QA F-1: IDP_EXECUTION_TIMEOUT_SECONDS=nan/inf must be rejected at env
     # parsing (and/or the constructor gate), never silently accepted —
     # float("nan")/float("inf") parse "successfully" so a bare float(...)
-    # call doesn't catch these; token_refresh_margin's "0" is legitimately
-    # valid (checked separately below), so it's excluded from that combo.
-    if env_name == "IDP_TOKEN_REFRESH_MARGIN_SECONDS" and bad_value == "0":
-        pytest.skip("0 is a valid token refresh margin")
+    # call doesn't catch these.
     _set_required_env(monkeypatch)
     monkeypatch.setenv(env_name, bad_value)
     with pytest.raises(IDPConfigurationError):

@@ -387,6 +387,35 @@ def _start_server(
     return server
 
 
+class _TrackedCloseBytesIO(io.BytesIO):
+    def __init__(self, data: bytes) -> None:
+        super().__init__(data)
+        self.closed_count = 0
+
+    def close(self) -> None:
+        self.closed_count += 1
+        super().close()
+
+
+def test_3xx_http_error_response_is_closed_before_the_typed_error_is_raised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Atchim suggestion: the unread 3xx HTTPError's underlying fp must be
+    # closed (releases the socket/file) rather than left dangling since
+    # its body is intentionally never read.
+    fp = _TrackedCloseBytesIO(b"")
+
+    def fake_urlopen(req: urllib.request.Request, timeout: float) -> _FakeResponse:
+        raise urllib.error.HTTPError(
+            req.full_url, 302, "Found", email.message.Message(), fp
+        )
+
+    monkeypatch.setattr(transport, "_urlopen", fake_urlopen)
+    with pytest.raises(IDPTransportError):
+        transport.get_json("https://x/y", timeout_seconds=5.0)
+    assert fp.closed_count == 1
+
+
 def test_redirect_response_raises_typed_error_and_the_token_never_reaches_the_target() -> None:
     # Two REAL local servers (not mocks) — server B would receive the
     # Bearer token if the real urllib opener followed the 302 from server

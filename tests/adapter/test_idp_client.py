@@ -661,6 +661,36 @@ def test_absurdly_large_poll_timeout_raises_typed_config_error() -> None:
         MuleSoftIDPAdapter(**_adapter_kwargs(poll_timeout_seconds=1e20))  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    "kwarg",
+    ["submit_timeout_seconds", "poll_timeout_seconds", "poll_interval_seconds"],
+)
+def test_timing_param_at_the_3600_second_cap_is_accepted(kwarg: str) -> None:
+    # Atchim suggestion: pin the exact boundary, not just "absurdly large"
+    # — kills a "cap 1h -> 2h" survivor (the max_value constant silently
+    # loosened would not be caught by a value that's still comfortably
+    # under 2h too).
+    MuleSoftIDPAdapter(**_adapter_kwargs(**{kwarg: 3600.0}))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "kwarg",
+    ["submit_timeout_seconds", "poll_timeout_seconds", "poll_interval_seconds"],
+)
+def test_timing_param_just_above_the_3600_second_cap_is_rejected(kwarg: str) -> None:
+    with pytest.raises(IDPConfigurationError):
+        MuleSoftIDPAdapter(**_adapter_kwargs(**{kwarg: 3600.1}))  # type: ignore[arg-type]
+
+
+def test_token_refresh_margin_at_the_3600_second_cap_is_accepted() -> None:
+    MuleSoftIDPAdapter(**_adapter_kwargs(token_refresh_margin_seconds=3600.0))  # type: ignore[arg-type]
+
+
+def test_token_refresh_margin_just_above_the_3600_second_cap_is_rejected() -> None:
+    with pytest.raises(IDPConfigurationError):
+        MuleSoftIDPAdapter(**_adapter_kwargs(token_refresh_margin_seconds=3600.1))  # type: ignore[arg-type]
+
+
 def test_nan_poll_timeout_poll_terminates_instead_of_looping_forever(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

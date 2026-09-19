@@ -248,7 +248,12 @@ def _send(req: urllib.request.Request, timeout_seconds: float) -> tuple[int, Any
             # re-sending the Authorization header to a different host. A
             # redirect is a transport-level anomaly here, not an
             # application response — treat it as a typed transport error
-            # immediately, and never read/return its body.
+            # immediately, and never read/return its body. Close the
+            # unread response explicitly (releases the socket/file) —
+            # don't rely on addinfourl's __del__ finalizer, whose timing
+            # is a CPython refcounting implementation detail, not a
+            # language guarantee (Atchim suggestion).
+            exc.close()
             unexpected_redirect = True
             raw_bytes = b""
             status = exc.code
