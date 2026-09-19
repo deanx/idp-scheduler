@@ -210,6 +210,32 @@ def test_table_too_large_counts_rows_across_pages() -> None:
 # ---- confidence coercion: NaN/out-of-range -> None, never clamped -----
 
 
+def test_huge_int_confidence_does_not_raise_overflow_error_becomes_none() -> None:
+    # int -> float conversion of a huge int raises OverflowError; this must
+    # never escape normalize() and is out-of-range -> None (Atchim R2).
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [{"fields": {"total": {"value": "100.00", "confidence": 10**400}}}],
+    }
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert out["fields"]["total"]["confidence"] is None
+
+
+def test_lone_surrogate_value_raises_typed_error_not_a_raw_unicode_error() -> None:
+    # str.encode("utf-8") on a lone surrogate raises UnicodeEncodeError; this
+    # must never escape normalize() as a raw exception, and the typed error
+    # must not carry the value in its message or its exception chain.
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [{"fields": {"total": {"value": "\udcff", "confidence": None}}}],
+    }
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert "\udcff" not in str(excinfo.value)
+    assert excinfo.value.__cause__ is None
+    assert "\udcff" not in repr(excinfo.value.__cause__)
+
+
 @pytest.mark.parametrize("bad_conf", [math.nan, 1.5, -0.1])
 def test_invalid_confidence_becomes_none_not_clamped(bad_conf: float) -> None:
     raw = {

@@ -83,10 +83,20 @@ def _coerce_cell(raw_cell: object, kind: str) -> FieldValue:
         raise MalformedIDPOutputError(
             "invalid_cell_value", f"a {kind} cell value must be a string or null"
         )
-    if value is not None and len(value.encode("utf-8")) > MAX_VALUE_BYTES:
-        raise MalformedIDPOutputError(
-            "value_too_large", f"a {kind} cell value exceeds {MAX_VALUE_BYTES} bytes"
-        )
+    if value is not None:
+        try:
+            value_byte_length = len(value.encode("utf-8"))
+        except UnicodeEncodeError:
+            # Never echo the offending value (a lone surrogate, etc.) — the
+            # message is static and the chain is broken with `from None`
+            # (Atchim R2: str(exc) and repr(exc.__cause__) must hold no value).
+            raise MalformedIDPOutputError(
+                "invalid_cell_value", f"a {kind} cell value contains an unencodable character"
+            ) from None
+        if value_byte_length > MAX_VALUE_BYTES:
+            raise MalformedIDPOutputError(
+                "value_too_large", f"a {kind} cell value exceeds {MAX_VALUE_BYTES} bytes"
+            )
     confidence = _coerce_confidence(raw_cell.get("confidence"))
     return FieldValue(value=value, confidence=confidence)
 
@@ -96,7 +106,13 @@ def _coerce_confidence(raw: object) -> float | None:
         return None
     if not isinstance(raw, (int, float)):
         return None
-    fval = float(raw)
+    try:
+        fval = float(raw)
+    except OverflowError:
+        # A huge int (e.g. 10**400) can't convert to float — out of any
+        # sane range, so this is "out of range" -> None (Atchim R2),
+        # consistent with the NaN/out-of-range handling below.
+        return None
     if math.isnan(fval) or fval < 0.0 or fval > 1.0:
         return None  # never clamped — a broken IDP action must be visible, not hidden
     return fval
