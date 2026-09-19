@@ -74,6 +74,9 @@ class LangfuseAdapter:
         return {"items": items, "expected_output_schema": schema}
 
     def write_scores(self, run_id: str, document_id: str, scores: list[ScoreInput]) -> None:
+        from idp_regression.platform.scoring import trace_id
+
+        score_trace_id = trace_id(run_id=run_id, document_id=document_id)
         for score in scores:
             status, body = self._client.request(
                 "POST",
@@ -83,6 +86,8 @@ class LangfuseAdapter:
                     "name": score["name"],
                     "value": score["value"],
                     "comment": score.get("comment"),
+                    "traceId": score_trace_id,
+                    "dataType": "CATEGORICAL",
                 },
             )
             if status >= 400:
@@ -113,15 +118,22 @@ class LangfuseAdapter:
         action_version: str,
         golden_version: str,
     ) -> None:
-        from idp_regression.platform.scoring import score_id
+        from idp_regression.platform.scoring import (
+            RUN_LEVEL_TRACE_SENTINEL,
+            score_id,
+            trace_id,
+        )
 
         comment = (
             f"action_id={action_id} action_version={action_version} "
             f"golden_version={golden_version}"
         )
         run_status_id = score_id(
-            run_id=run_id, document_id="run", score_name=_RUN_STATUS_SCORE_NAME
+            run_id=run_id,
+            document_id=RUN_LEVEL_TRACE_SENTINEL,
+            score_name=_RUN_STATUS_SCORE_NAME,
         )
+        run_status_trace_id = trace_id(run_id=run_id, document_id=RUN_LEVEL_TRACE_SENTINEL)
         resp_status, body = self._client.request(
             "POST",
             "/api/public/scores",
@@ -130,6 +142,8 @@ class LangfuseAdapter:
                 "name": _RUN_STATUS_SCORE_NAME,
                 "value": status,
                 "comment": comment,
+                "traceId": run_status_trace_id,
+                "dataType": "CATEGORICAL",
             },
         )
         if resp_status >= 400:

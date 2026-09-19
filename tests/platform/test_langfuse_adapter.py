@@ -18,6 +18,7 @@ from idp_regression.platform.errors import (
     ScoreWriteFailedError,
 )
 from idp_regression.platform.langfuse_adapter import LangfuseAdapter, make_platform
+from idp_regression.platform.scoring import RUN_LEVEL_TRACE_SENTINEL, trace_id
 from idp_regression.platform.types import ScoreInput
 
 
@@ -142,10 +143,17 @@ def test_write_scores_posts_deterministic_ids() -> None:
     adapter.write_scores(run_id="run-1", document_id="invoice-007.pdf", scores=scores)
 
     posted = [call[2] for call in client.calls if call[0] == "POST"]
-    assert {"id": "score-id-1", "name": "field:total", "value": "match", "comment": None} in [
-        {**p} for p in posted
-    ]
     assert len(posted) == 2
+    for body in posted:
+        # Live-probed 2026-09-19: POST /api/public/scores 400s without
+        # exactly one of traceId/sessionId/datasetRunId — a score may
+        # target a trace that was never ingested.
+        assert body["traceId"] == trace_id(run_id="run-1", document_id="invoice-007.pdf")
+        assert body["dataType"] == "CATEGORICAL"
+    assert posted[0]["id"] == "score-id-1"
+    assert posted[0]["name"] == "field:total"
+    assert posted[0]["value"] == "match"
+    assert posted[0]["comment"] is None
 
 
 def test_write_scores_failure_raises_typed_error() -> None:
@@ -199,6 +207,8 @@ def test_mark_run_status_writes_a_run_status_score() -> None:
     assert path == "/api/public/scores"
     assert body["name"] == "run_status"
     assert body["value"] == "aborted"
+    assert body["dataType"] == "CATEGORICAL"
+    assert body["traceId"] == trace_id(run_id="run-1", document_id=RUN_LEVEL_TRACE_SENTINEL)
 
 
 def test_mark_run_status_failure_raises_typed_error() -> None:

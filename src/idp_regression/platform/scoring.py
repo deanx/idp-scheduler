@@ -33,6 +33,25 @@ def score_id(*, run_id: str, document_id: str, score_name: str) -> str:
     return str(uuid.uuid5(NAMESPACE, key))
 
 
+#: Sentinel document_id for the run-level trace (mark_run_status, DEBT-15).
+#: Never a real document_id (those come from the golden set).
+RUN_LEVEL_TRACE_SENTINEL = "run"
+
+
+def trace_id(*, run_id: str, document_id: str) -> str:
+    """Deterministic per-document OTel trace id (32 lowercase hex chars).
+
+    Langfuse's ``POST /api/public/scores`` requires exactly one of
+    ``traceId``/``sessionId``/``datasetRunId`` on every score (live-probed,
+    2026-09-19) — a score with none of those is rejected 400, even though
+    the DoD's original wording didn't call this out. A score may target a
+    trace that was never ingested (live-confirmed), so this id is safe to
+    use even before/without T-01.3.10a's OTLP trace export.
+    """
+    key = f"{run_id}|{document_id}"
+    return uuid.uuid5(NAMESPACE, key).hex
+
+
 def prompt_score_name(prompt_key: str) -> str:
     """``prompt:<16-hex sha256>`` — the raw prompt never appears in the name."""
     digest = hashlib.sha256(prompt_key.encode("utf-8")).hexdigest()

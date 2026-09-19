@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import uuid
 
-from idp_regression.platform.scoring import NAMESPACE, prompt_score_name, score_id
+from idp_regression.platform.scoring import NAMESPACE, prompt_score_name, score_id, trace_id
 
 
 def test_namespace_is_a_pinned_constant_uuid() -> None:
@@ -55,3 +55,37 @@ def test_prompt_score_name_matches_the_pinned_shape() -> None:
 def test_prompt_score_name_never_echoes_the_raw_prompt() -> None:
     key = "SENSITIVE PROMPT TEXT SHOULD NOT LEAK"
     assert key not in prompt_score_name(key)
+
+
+def test_trace_id_is_32_hex_chars_valid_otel_trace_id() -> None:
+    tid = trace_id(run_id="run-1", document_id="invoice-007.pdf")
+    assert re.fullmatch(r"[0-9a-f]{32}", tid)
+    assert tid != "0" * 32  # OTel forbids the all-zero trace id
+
+
+def test_trace_id_is_deterministic_for_the_same_inputs() -> None:
+    a = trace_id(run_id="run-1", document_id="invoice-007.pdf")
+    b = trace_id(run_id="run-1", document_id="invoice-007.pdf")
+    assert a == b
+
+
+def test_trace_id_differs_across_runs_and_documents() -> None:
+    base = trace_id(run_id="run-1", document_id="invoice-007.pdf")
+    other_run = trace_id(run_id="run-2", document_id="invoice-007.pdf")
+    other_doc = trace_id(run_id="run-1", document_id="invoice-008.pdf")
+    assert base != other_run
+    assert base != other_doc
+
+
+def test_trace_id_is_uuid5_hex_over_namespace_and_pipe_joined_key() -> None:
+    expected = uuid.uuid5(NAMESPACE, "run-1|invoice-007.pdf").hex
+    assert trace_id(run_id="run-1", document_id="invoice-007.pdf") == expected
+
+
+def test_trace_id_run_level_sentinel_for_run_status() -> None:
+    # mark_run_status targets a run-level trace id — document_id="run" is
+    # the pinned sentinel (DEBT-15) so it never collides with a real
+    # document_id (document ids come from the golden set, never "run").
+    run_level = trace_id(run_id="run-1", document_id="run")
+    per_doc = trace_id(run_id="run-1", document_id="invoice-007.pdf")
+    assert run_level != per_doc
