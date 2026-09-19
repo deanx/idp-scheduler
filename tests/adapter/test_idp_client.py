@@ -411,6 +411,51 @@ def test_success_statuses_must_be_a_subset_of_terminal_statuses() -> None:
         )
 
 
+def test_poll_budget_is_measured_from_before_submit_not_after(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # /test Scenario B item 8: ADR-0004 says the poll-wall-clock budget
+    # covers submit + all polls cumulatively — `start` must be captured
+    # BEFORE `_submit()` runs. Kills a "move `start` after `_submit`"
+    # mutant: simulate submit consuming 8 of a 10s budget (via 8 calls to
+    # the shared injected clock from inside the mocked submit call) — the
+    # correct code should then time out almost immediately (~1 get_json
+    # call); if `start` were captured after submit, the budget would reset
+    # to a fresh 10s and get_json would be called many more times.
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+
+    ticks = {"n": 0}
+
+    def clock() -> float:
+        ticks["n"] += 1
+        return float(ticks["n"])
+
+    def slow_submit(*args: object, **kwargs: object) -> tuple[int, dict[str, Any]]:
+        for _ in range(8):
+            clock()
+        return 202, {"id": "exec-1"}
+
+    get_json_calls: list[int] = []
+
+    def fake_get_json(*args: object, **kwargs: object) -> tuple[int, dict[str, Any]]:
+        get_json_calls.append(1)
+        return 200, {"status": "RUNNING", "pages": []}
+
+    adapter = _adapter(
+        monkeypatch,
+        poll_timeout_seconds=10.0,
+        poll_interval_seconds=1.0,
+        clock=clock,
+        sleep=lambda _seconds: None,
+    )
+    monkeypatch.setattr(transport, "post_multipart_file", slow_submit)
+    monkeypatch.setattr(transport, "get_json", fake_get_json)
+    with pytest.raises(IDPPollTimeoutError):
+        adapter.extract(str(doc), "action-1", "v1")
+    assert len(get_json_calls) <= 2, get_json_calls
+
+
 def test_poll_clamps_per_get_timeout_and_sleep_to_remaining_budget(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
