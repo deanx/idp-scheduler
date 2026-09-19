@@ -1,19 +1,122 @@
 {
   "schema": 1,
-  "generated": "2026-09-17T16:12:25+00:00",
+  "generated": "2026-09-19T04:23:01+00:00",
   "note": "Derived from on-disk artifacts. Local verification status, not the board column (which stays canonical). Never hand-edit — regenerated on Stop.",
   "summary": {
-    "total": 0,
+    "total": 6,
     "done_eligible": 0,
-    "in_qa": 0,
+    "in_qa": 1,
     "in_progress": 0,
-    "planned": 0
+    "planned": 5
   },
   "registers": {
     "assumptions_high_open": 0,
-    "regressions_pending": 0,
-    "debt_items": 0
+    "regressions_pending": 1,
+    "debt_items": 13
   },
-  "stories": [],
-  "next": "1 UC(s) discovered, no design yet — run /design on a UC, then /plan."
+  "stories": [
+    {
+      "id": "S-1.1",
+      "uc": 1,
+      "status": "in-qa",
+      "stamp": "passed",
+      "qa_report": true,
+      "markers": {
+        "containment": "required",
+        "llm_evals": "n/a",
+        "observability": "required"
+      },
+      "gates": {
+        "containment": "unmet",
+        "llm_evals": "n/a",
+        "observability": "unmet"
+      }
+    },
+    {
+      "id": "S-1.2",
+      "uc": 1,
+      "status": "planned",
+      "stamp": "none",
+      "qa_report": true,
+      "markers": {
+        "containment": "required",
+        "llm_evals": "n/a",
+        "observability": "required"
+      },
+      "gates": {
+        "containment": "unmet",
+        "llm_evals": "n/a",
+        "observability": "unmet"
+      }
+    },
+    {
+      "id": "S-1.3",
+      "uc": 1,
+      "status": "planned",
+      "stamp": "none",
+      "qa_report": true,
+      "markers": {
+        "containment": "required",
+        "llm_evals": "n/a",
+        "observability": "required"
+      },
+      "gates": {
+        "containment": "unmet",
+        "llm_evals": "n/a",
+        "observability": "unmet"
+      }
+    },
+    {
+      "id": "S-1.4",
+      "uc": 1,
+      "status": "planned",
+      "stamp": "none",
+      "qa_report": true,
+      "markers": {
+        "containment": "required",
+        "llm_evals": "n/a",
+        "observability": "required"
+      },
+      "gates": {
+        "containment": "unmet",
+        "llm_evals": "n/a",
+        "observability": "unmet"
+      }
+    },
+    {
+      "id": "S-1.5",
+      "uc": 1,
+      "status": "planned",
+      "stamp": "none",
+      "qa_report": true,
+      "markers": {
+        "containment": "required",
+        "llm_evals": "n/a",
+        "observability": "required"
+      },
+      "gates": {
+        "containment": "unmet",
+        "llm_evals": "n/a",
+        "observability": "unmet"
+      }
+    },
+    {
+      "id": "S-1.6",
+      "uc": 1,
+      "status": "planned",
+      "stamp": "none",
+      "qa_report": true,
+      "markers": {
+        "containment": "required",
+        "llm_evals": "n/a",
+        "observability": "required"
+      },
+      "gates": {
+        "containment": "unmet",
+        "llm_evals": "n/a",
+        "observability": "unmet"
+      }
+    }
+  ],
+  "next": "6 story(ies) not done-eligible; next: /qa on S-1.1 (in-qa)."
 }

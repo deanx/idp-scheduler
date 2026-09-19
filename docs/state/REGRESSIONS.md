@@ -1,6 +1,8 @@
-# Regression watch — defects promoted to permanent tests
+# Regression register
 
-Staff-gated: not every bug earns a permanent test. At `/qa`, Atchim (Staff Engineer) rules whether a confirmed defect represents a *class* worth pinning forever — a regression test, or (for an LLM feature) an eval golden-set entry. Pinned defects can't silently recur; a one-off isn't pinned so the suite doesn't bloat.
+Permanent tests/evals that pin defect classes so they can never silently recur. Managed by the `/qa` regression-worthiness ruling (Atchim decides PIN vs SKIP; the orchestrator records). A row is `pending-test` until the fix adds the permanent test, then `/implement`/`/qa` marks it `covered`.
 
-| ID | Defect (the class it guards against) | Origin (QA-N / bug card) | Kind | Permanent-test location | Status |
-|----|--------------------------------------|--------------------------|------|-------------------------|--------|
+| ID | Defect class | Permanent test / eval entry | Lives at | Pins story | Status | Origin |
+|----|--------------|------------------------------|----------|------------|--------|--------|
+| REG-01 | Non-dict classifier input cell leaks a raw `AttributeError` from `.get()` instead of a typed `ClassifierError` (N22). Occurrence 1: actual table cell (`_classify_table` → `acell.get("value")`) — caught by Atchim /implement round-1, fixed commit `921e270`. Occurrence 2: actual prompt cell (`_classify_prompt` → `acell.get("answer")`) — caught by /test Scenario B, fixed commit `1d50e978`. | `test_actual_prompt_cell_non_mapping_raises_malformed_actual` | tests/classifier/test_validation.py:235 | S-01.1 | covered | Atchim /test TDD gate 2026-09-18 (PIN ruling); test authored by /test, turned GREEN by /implement 1d50e978 |
+| REG-02 | Golden-side prompt malformation (`_validate_golden` prompts path) had no direct coverage — a regression in golden-prompt validation could pass silently. | Golden-side prompt malformation pins: non-mapping `golden.prompts`, non-mapping prompt spec, missing `answer`, non-bool `critical` | tests/classifier/test_validation.py:195, :203, :211, :219 | S-01.1 | covered | Atchim /test TDD gate 2026-09-18 (PIN ruling); tests authored by /test gap-fill |

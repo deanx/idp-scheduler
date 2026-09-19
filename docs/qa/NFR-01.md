@@ -1,0 +1,87 @@
+# NFR-01 — Non-functional requirements checklist — UC-01 baseline regression
+
+**Use case:** UC-01 (Run a baseline regression over a golden set)
+**Rigor profile:** standard (mechanical floor always applies; assumptions gate ON)
+**Date:** 2026-09-17
+**Architect:** Soneca
+
+> Header note (honest): all rows addressed = everything the architect thought to require is decided with a target + how-to-measure. This is **not** the claim that every NFR that could matter is listed — Pass C (absence audit) completed by Atchim at top-level; 4 gap rows added.
+
+**Marker lines:**
+- `Containment: REQUIRED — verified by /harden (docs/qa/HARDEN-01.md) before Done.` UC-01 has a failure-prone external integration (IDP timeout, auth failure, hard failure); ADR-0004 § Containment is the load-bearing design and must be red-teamed by Branca before the orchestrator is trusted to gate CI. **Branca co-design ran** — the guardrails in ADR-0004 § Containment (two distinct timeouts, monotonic clock, no-retry-on-poll-timeout, backoff spec, fail-closed on ambiguous status, `write_scores` idempotency-or-no-retry, empty-set vs fetch-failure split, `normalize()` untrusted-input contract, token redaction, `flush()` bounded retry, `run_status=aborted` marker) are mirrored as NFR rows below and as invariants INV-06/INV-07/INV-08.
+- `LLM-Evals: N/A — the app consumes IDP's model-generated extraction output but does not compose prompts or call an LLM, and the golden-set comparison IS a deterministic rule-based classifier (not an LLM-judged eval); there is no model output the app produces that needs an eval rubric.`
+- `Observability: REQUIRED — telemetry per the observability contract, verified firing at /qa (QA report line 'Observability: ✅ VERIFIED') before Done.` UC-01 has a runtime surface: CLI run + external IDP integration + platform writes; the abort-on-failure path must be observable.
+
+**Pass C (absence audit): completed by Atchim at top-level — 4 gap rows added (N25–N28 below).**
+
+Scope legend: `feature` = Zangado checks at `/qa`; `system` = deferred to `/signoff`.
+
+> **/qa S-01.1 markup (2026-09-18, Zangado opus):** S-01.1 is the pure classifier — it owns exactly two feature-scope rows: **N2** and **N22**, both ✅ PASS. The remaining feature rows (N1/N3/N6/N7/N8/N10/N14/N15/N16/N21/N26/N28) are owned by later stories (S-01.2/S-01.3/S-01.4) and remain ⬜ PENDING until those stories' `/qa`. All `system` rows are ⚠️ WAIVED → `/signoff` (verified at the system gate, not here). For S-01.1 specifically: **Containment N/A** (pure module, no failure-cascade surface — the REQUIRED gate binds S-01.4 via HARDEN-01.md), **LLM-Evals N/A**, **UI N/A** (no UI), **Observability N/A** (pure module emits nothing by design, INV-02; the `Observability: ✅ VERIFIED` line is owed by S-01.4/N10). Full row-by-row evidence in `docs/qa/QA-01-baseline-regression.md`.
+
+## Pass A — mandatory coverage core
+
+| # | Category | Requirement (target) | How measured | Scope | Status |
+|---|----------|----------------------|-------------|-------|--------|
+| N1 | Performance — per-document extraction latency | **Two distinct timeouts (Branca):** (a) submit-call HTTP timeout `IDP_SUBMIT_TIMEOUT_SECONDS` (default ≤ 30s) on `POST .../executions`; (b) poll-wall-clock timeout `IDP_EXECUTION_TIMEOUT_SECONDS` (default 120s placeholder, pinned by /spike) covering submit + all polls cumulatively. Budget is absolute from the first attempt (retries do not extend it). Each completes within its budget for ≥ 99% of golden documents on a single sequential run. /harden injects a hung POST and asserts abort-not-hang. | Timing metric emitted per document in the run log (monotonic clock, INV-07); /qa asserts the metric is emitted; /harden asserts a hung POST aborts (not hangs). | feature | ⬜ PENDING (S-01.4) |
+| N2 | Performance — classifier throughput | `classify()` + `overall_gate()` for a single document (≤ 50 fields, ≤ 500 line-item rows) completes in < 100 ms p95 on M1. | pytest benchmark on the classifier unit suite (no network). | feature | ✅ PASS (S-01.1) |
+| N3 | Performance — CLI exit latency | `run_eval` exits within 2 s of the last `flush()` (no hung exit). | End-to-end orchestration test against a mock IDP + mock platform. | feature | ⬜ PENDING (S-01.4) |
+| N4 | Security — credentials from env/secrets only | No credential literal in code or committed config; `load_dotenv()` runs before any SDK client. | gitleaks scan + INV-05 construction-order test. | system | ⚠️ WAIVED → /signoff |
+| N5 | Security — no plaintext sensitive logging | Golden field values, IDP client secret, and platform API key never appear in stdout/stderr/logs. **Structured (non-f-string) logging (Branca):** a value containing `\n` or `"` must not break a log line or inject a fake telemetry field. | INV-02 redaction unit test + gitleaks; structured-logging unit test feeds a value with `\n`/`"` and asserts the log line is not split or field-injected. | system | ⚠️ WAIVED → /signoff |
+| N6 | Availability — orchestrator fail-closed on credential absence | If any required credential env var is missing, `run_eval` exits non-zero with a clear message before any network call. | Unit test that unsets each `IDP_*` / platform key and asserts non-zero exit + no outbound call. | feature | ⬜ PENDING (S-01.4) |
+| N7 | Availability — abort-on-failure (ASM-02) | A per-document timeout or hard IDP failure aborts the entire run and exits non-zero; the run is never a partial reference. | INV-06 abort-path tests; /harden red-team of ADR-0004 § Containment. | feature | ⬜ PENDING (S-01.4) |
+| N8 | Scalability — golden-set size at MVP | The MVP golden set is small (≤ ~50 documents, failure-mode-focused per the PRD). Sequential-only processing; no concurrency claim. The classifier scales linearly in (fields × documents). | Documented limit; /qa asserts a 50-doc sequential run completes within the run-timeout budget. | feature | ⬜ PENDING (S-01.4) |
+| N9 | Scalability — score volume per run (cost lever) | Each run emits `N_documents × (N_fields + 1)` scores on the platform. Tracked because Langfuse bills scores as billable units on cloud (mitigated by self-hosting). Target: no unbounded score write — exactly one `field:<name>` per golden field + one `gate` per document. | Contract test (CT-03) asserts the score count formula. | system | ⚠️ WAIVED → /signoff |
+| N10 | Observability — per-run telemetry | Every run emits structured log: run name, action version, golden version, per-document start/end, per-document gate, and on abort: the failing `document_id` + abort reason. **Abort-reason taxonomy (Branca):** `hard_failure` · `unknown_status_timeout` · `auth_failure` · `dataset_fetch_failed` · `empty_set` · `flush_failed` — distinct reasons for observability, all map to non-zero exit (no exit-code namespace fragmentation). | /qa asserts the telemetry lines fire for each reason; QA report line 'Observability: ✅ VERIFIED'. | feature | ⬜ PENDING (S-01.4) |
+| N11 | Observability — exit-code is the CI signal | Exit code is deterministic and documented (ADR-0004): 0 ⟺ all gates PASS and no run error. | CT-04 exit-code contract tests. | system | ⚠️ WAIVED → /signoff |
+| N12 | Data & compliance — document files never leave the app | Only `document_id` + expected fields are stored on the platform; raw document files are read locally for IDP submit and never uploaded. | INV-01 platform-write payload assertion. | system | ⚠️ WAIVED → /signoff |
+| N13 | Data & compliance — golden version recorded for reproducibility | Every zero-exit run records `action_id` + `action_version` + `golden_version` (app-tracked on Langfuse, ADR-0001). | INV-04 run-metadata assertion. | system | ⚠️ WAIVED → /signoff |
+| N14 | Reliability & recovery — transient error retry | Transient IDP transport errors (5xx, 429, connection reset) retried with bounded exponential backoff (max attempts from config, default 3); exhausted budget = hard failure → abort. Auth failure (401/403) is NOT retried (fail-closed). | Unit test for each retry/abort branch with a mock IDP. | feature | ⬜ PENDING (S-01.4) |
+| N15 | Reliability & recovery — empty-set guard | An empty golden set exits non-zero with a clear message; never a silent zero-exit (A4). | Unit test with an empty dataset. | feature | ⬜ PENDING (S-01.4) |
+| N16 | Reliability & recovery — platform-write failure aborts | A `write_scores` or `flush` failure aborts the run and exits non-zero; no run is reported as complete with missing scores. | Unit test with a failing mock platform. | feature | ⬜ PENDING (S-01.4) |
+| N17 | Reliability — reproducibility (pinning) | Dependencies pinned via `pip freeze` to a committed lock file; installs from the lock. | /qa asserts the lock file exists and `pip install` uses it. | system | ⚠️ WAIVED → /signoff |
+
+## Pass B — domain-triggered rows
+
+Triggered by `## Domain`: extracted fields can carry financial data / PII; golden-set storage is a sensitive surface; IDP credentials + platform API keys are sensitive; no payments; no formal compliance regime.
+
+| # | Category | Requirement (target) | How measured | Scope | Status |
+|---|----------|----------------------|-------------|-------|--------|
+| N18 | PII / golden-set handling — access control | Golden-set contents are reachable only behind the platform API key; no anonymous read path. | Config review of platform project settings; /qa asserts the adapter never writes goldens to local disk. | system | ⚠️ WAIVED → /signoff |
+| N19 | PII / golden-set handling — no plaintext at rest outside the platform | Golden values are not persisted in app logs, CI artifacts, or test fixtures beyond captured-scrubbed samples. | Repo grep for known golden-shaped values + /qa review of CI artifact output. | system | ⚠️ WAIVED → /signoff |
+| N20 | PII / golden-set handling — document files stay local | Document files (PII-bearing) are resolved from a local path by `document_id` and never uploaded to the platform. | INV-01 assertion. | system | ⚠️ WAIVED → /signoff |
+| N21 | External untrusted input — IDP output shape validation | `normalize()` validates the raw IDP `pages[]` body shape and raises a typed error on malformed input rather than silently emitting a wrong `NormalizedOutput`. | Unit test feeding malformed raw bodies to `normalize()`. | feature | ⬜ PENDING (S-01.2) |
+| N22 | External untrusted input — classifier validates inputs | `classify()` validates golden + `NormalizedOutput` shapes and raises `ClassifierError` on malformed input (a malformed golden is a loud Curator error, not a silent `match`). | Unit test feeding malformed goldens/actuals. | feature | ✅ PASS (S-01.1) |
+| N23 | Credential hygiene — OAuth token never logged | The cached OAuth `access_token` and the `Authorization` header are redacted in any error/observability output. | Unit test that asserts redaction through the logging path. | system | ⚠️ WAIVED → /signoff |
+| N24 | Swappability — platform SDK confined to one module | All Langfuse SDK imports live in `src/idp_regression/platform/`; no other module imports a platform SDK. | Static grep (ruff/import-linter) asserts the module boundary. | system | ⚠️ WAIVED → /signoff |
+
+## Pass C — adversarial absence check (completed by Atchim at top-level)
+
+Pass C ran at the top level (fresh Atchim instance, read-only). Four genuinely absent categories surfaced and are added as N25–N28. Categories considered but correctly deferred: i18n/accessibility of CLI output (internal CLI; deferred to Epic E UI), run timestamp/timezone (Langfuse timestamps runs natively), test/prod platform separation (tests fully mocked), data migration/backfill (UC-01 establishes the first history — nothing to migrate yet), secret rotation (covered by env/secrets + fail-closed auth + token-cached-for-run).
+
+| # | Category | Requirement (target) | How measured | Scope | Status |
+|---|----------|----------------------|-------------|-------|--------|
+| N25 | Disaster recovery — golden-set backup/restore | The self-hosted Langfuse backing DB is backed up on a defined schedule (e.g., daily snapshot) and a restore is exercised, so the curated golden set — the baseline every future run measures against — is recoverable after DB loss (without it, UC-01 is unrunnable until a human re-curates). | /signoff reviews the backup schedule + a restore-drill record; loss of the golden set is a production-stopping event. | system | ⚠️ WAIVED → /signoff |
+| N26 | Concurrency & run-name idempotency | Two concurrent runs (parallel CI PRs) or a reused `run_name` must not merge or overwrite each other's scores on the platform; run names are unique per invocation, or scores dedupe by `(run_name, document_id, field_name)`. | Contract test (CT-03 extension): two runs under the same `run_name` over the same golden set produce no score collisions or overwrites. | feature | ⬜ PENDING (S-01.3) |
+| N27 | IDP quota / cost ceiling | Each run makes N IDP extraction calls; CI on every prompt-change PR is bounded against the monthly IDP allotment (quota tracking or a per-CI-day run cap) so the gate cannot silently exhaust the org's IDP plan. | /signoff reviews the quota-tracking/cap mechanism (ops concern, outside the plugin's /harden); config hook exists for a per-window cap. | system | ⚠️ WAIVED → /signoff |
+| N28 | Golden-set schema validation at load / pre-run | The entire golden set is schema-validated fail-fast before any IDP call (malformed `match_key`, missing `critical` flag, wrong table shape → exit non-zero with a clear Curator-facing error), not mid-run after quota is spent on a document. | Unit test: a golden set with one malformed item → non-zero exit before any IDP submit call is made. | feature | ⬜ PENDING (S-01.4) |
+
+## /qa S-01.1 verdicts (2026-09-18, Zangado opus)
+
+S-01.1 owns these feature rows (verified this audit):
+- **N2 — ✅ PASS.** Evidence: `tests/classifier/test_performance.py:67` — pytest-benchmark, 50 fields + 500 rows, 200 rounds, p95 ~1.32ms (mean 1.32ms, max 1.49ms) << 100ms target.
+- **N22 — ✅ PASS.** Evidence: `tests/classifier/test_validation.py` — typed `ClassifierError` family at field (36–115), golden table row (118), actual table cell (140), golden prompts (195–224), actual prompts top-level (227) + per-cell (235). Subclass check :160, loud-not-silent-match :166. mypy strict confirms typed surfaces.
+
+Feature rows owned by later stories (remain ⬜ PENDING — not S-01.1's gate): N1, N3, N6, N7, N8, N10, N14, N15, N16 (→ S-01.4); N21 (→ S-01.2); N26 (→ S-01.3); N28 (→ S-01.4).
+
+System rows (⚠️ WAIVED → /signoff): N4, N5, N9, N11, N12, N13, N17, N18, N19, N20, N23, N24, N25, N27.
+- Note for the signoff record: N5/N17 — the classifier path emits **no logging** (pure, INV-02), so N5's plaintext-logging concern is satisfied-by-design for this module; the system-level N5 gate applies to S-01.2/S-01.3/S-01.4. N17 lock file `uv.lock` is committed (pytest-benchmark pin) — verified present.
+
+Story-scoped gates for S-01.1:
+- **Containment: N/A** for S-01.1 (pure module, no failure-cascade surface; the UC-level `Containment: REQUIRED` binds S-01.4 via `docs/qa/HARDEN-01.md`).
+- **UI conformance: N/A** (no UI; no reference design).
+- **LLM-Evals: N/A** (deterministic classifier; no LLM calls).
+- **Observability: N/A** for S-01.1 (pure module emits nothing by design, INV-02; the UC-level `Observability: ✅ VERIFIED` line is owed by S-01.4/N10).
+
+## /qa S-01.1 --rigor=full re-audit (2026-09-18, Zangado opus)
+
+Re-audited at **full rigor** (user override of the project's `standard` profile). Verdict upgraded **⚠️ → ✅ Pass**. N2 and N22 re-verified with measurement: N2 p95 ~1.36 ms (200 rounds, 50 fields + 500 rows) << 100 ms; N22 typed-`ClassifierError` at field+table+prompt (21 tests). Every gate run and recorded — none silently skipped: Containment N/A for this story (REQUIRED marker binds S-01.4); UI N/A; LLM-Evals N/A; Observability N/A (owed by S-01.4/N10); SCA + secret-scan PASS (pip-audit clean; gitleaks absent → grep fallback clean → DEBT-12); Composition PASS (CT-02 12 passed, INV-02 purity verified); Cleanliness PASS (`check_clean.py` exit 0). Prior ⚠️ follow-ups: F-1 closed, F-3 closed, F-2 open as DEBT-12 by design. No new findings. Full report: `docs/qa/QA-01-baseline-regression.md`. **S-01.1 is Done at full rigor.**

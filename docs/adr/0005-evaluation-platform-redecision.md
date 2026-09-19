@@ -1,0 +1,200 @@
+# ADR-0005: Evaluation platform re-decision after SPIKE-01
+
+**Status:** Accepted (Atchim APPROVED (R1–R4 closed, re-checked 2026-09-19)) — **supersedes ADR-0001's decision rationale** (ADR-0001 → Superseded by ADR-0005)
+**Date:** 2026-09-19
+**Context (use case):** UC-01 (Run a baseline regression over a golden set); UC-C1 / EX-C1-1, EX-C1-2 (Curator edits a nested golden); S-01.5 close-out
+**Risk:** High — the platform becomes the durable store for golden sets. Moving goldens off it after the first real load is a migration, and the Curator-UX consequence below changes what Epic E must deliver. **Atchim review: APPROVED (R1–R4 closed, re-checked 2026-09-19)**.
+**Evidence:** `docs/spikes/SPIKE-2026-09-19-langfuse-form-mode.md` (Langfuse 4.38.0 OSS tested live, plus a source-level addendum on Opik 2.2.x); `docs/spikes/SPIKE-01-langfuse-form-mode-nested-json.md` (§Result, §Fallback decision).
+
+## Context
+
+ADR-0001 chose Langfuse **PROVISIONALLY**. Its deciding factor was an assumed capability: that Langfuse "form mode" renders a nested golden (`fields` + `tables[].rows[]` + `prompts`) as schema-validated, editable form fields, so the non-engineer **Golden Set Curator** could edit goldens without code. SPIKE-01 made that claim the one assumption that could flip the platform choice (ASM-05).
+
+**What SPIKE-01 found:**
+
+| Claim | Langfuse 4.38.0 OSS (live) | Opik 2.2.x OSS (source only) |
+|---|---|---|
+| Schema-generated, editable form fields for nested values (the ADR-0001 deciding factor) | ❌ **Refuted.** The whole item is edited as raw JSON in CodeMirror. | ❌ None. Top-level keys appear as accordion sections, but each nested value is still raw JSON in CodeMirror. |
+| Server-side type/shape enforcement of goldens | ✅ `expectedOutputSchema` is enforced on API **and** UI writes. Invalid writes are rejected with 400 and the stored value stays unchanged. A schema cannot be added over items that don't conform to it. | ❌ None. Opik only checks that the input is valid JSON. |
+| Editor error feedback | ❌ Save is blocked with no message. Item-level API errors carry no JSON path, and Ajv reports only the first error (`allErrors:false`). | ✅ Inline message, but only for JSON syntax errors |
+| Versioning | Point-in-time read of an item plus UI history. No per-user author column. `createdAt` resets on upsert. | ✅ Dataset-level versions with diff, restore, and a change description |
+| Idempotent score writes | ✅ Upsert keyed by a client-supplied score `id` (live-verified) | ⚠️ Upsert keyed by the natural key `(entity, author, name)`. No client id. |
+| Footprint | web, worker, postgres, redis, clickhouse, minio (**already running locally**) | Java backend, Python backend, nginx, mysql, redis, clickhouse, zookeeper, minio (not stood up) |
+
+**The honest reading:** the differentiator ADR-0001 relied on **does not exist on either platform**. Neither gives a non-engineer a no-code nested editor. The re-decision therefore cannot rest on Curator UX; that is a wash that we build ourselves (Epic E) whichever platform we pick. It must rest on what actually differs:
+
+1. **Golden integrity at write time.** A golden is the reference every future run is judged against. A wrong type in a golden (for example `"twelve fifty"` in a `number` field) does not raise a malformed-golden error in our classifier. N22 checks structure, not value patterns, so the bad value turns into `wrong_value` verdicts and a **false FAIL on another team's prompt-change PR**. Rejecting the bad value at save time is worth more than catching it at run time.
+2. **Retry-safe score writes (ADR-0004 #12, DEBT-03).** A client-supplied score id turns "no retry on 5xx" into "retry safely".
+3. **Operational reality.** A Langfuse instance is already running and its integration facts are known. This is a tie-breaker, not a decider.
+
+What Opik genuinely does better (inline syntax feedback, and version diff/restore that works as an undo) is real, and the options below weigh it.
+
+### Forces unchanged from ADR-0001
+- Swappability through the `PlatformAdapter` Protocol (ADR-0001 §API contract, NFR N24) keeps the *integration* reversible. The *data* is locked only by the first real golden load, and none has happened yet. That makes reversal cheap **now**.
+- Golden versioning stays **app-tracked**: a single-fetch content hash (`golden_version = hash_dataset(dataset)`, INV-04). This holds on either platform. Opik's automatic versions would not replace it, because the run must record the exact content it classified. ASM-03 is unaffected.
+- Compliance: document files never enter the platform (BR4, INV-01). Golden contents are sensitive (`## Domain`).
+
+## Threat model (deltas vs ADR-0001)
+
+ADR-0001's STRIDE still applies: the platform API key is the only auth, TLS, BR5/BR6, and INV-01/02. The deltas come from the Curator write path, which the spike showed is a raw-JSON write into the golden store:
+
+- **Tampering / integrity (Curator UI → golden store).** A Curator typo is a *well-formed but wrong* golden.
+  - **Mitigation (chosen):** a server-side `expectedOutputSchema` on every golden dataset (see §Decision, value typing). It enforces shape on the whole golden, and per-type value patterns on **`fields.<name>.value` only**, on API and UI writes.
+  - **Residual (scope, R1):** table cells and prompt answers are **string-only** — any string passes — until per-column table types land (DEBT-04); prompt answers are free text by nature. A `"twelve fifty"` in a `qty` cell is therefore *not* rejected at write time.
+  - **Residual:** a semantically wrong but schema-valid value (for example `1250.00` typed as `1205.00`) still passes. The schema is a guard-rail, not a review.
+- **Repudiation (who changed a golden?).** Langfuse item history has **no per-user author column**, so it is not an audit trail.
+  - **Mitigation:** every run records `golden_version` (content hash, INV-04), so a change between runs is always *detectable*, though not *attributable*.
+  - **Residual:** attribution is deferred to Epic E. The Epic E form writes through our API layer and records the actor. Until then, access to Langfuse projects is restricted to named Curators via Langfuse project roles. **To confirm (owner: Mestre):** that Langfuse OSS 4.38.0 project roles are available and sufficient without an enterprise licence; if not, the interim control is instance-level access only. Logged in Consequences.
+- **Information disclosure (platform error bodies).** Langfuse 400 validation errors may echo parts of the offending value. S-01.3's existing DoD already requires platform error messages to be redacted at the logging boundary (INV-02, N5). This ADR makes that line apply explicitly to schema-validation 400s.
+- **Denial of service / integrity (schema evolution).** Langfuse rejects a schema change if *any* item fails to conform to it (all-or-nothing). Dropping the schema to migrate would open an unguarded window. **Mitigation:** the expand/contract migration rule below (policy), backed by a **run-start schema-drift check** (control, Decision #8): a run against a dataset whose schema was removed or changed aborts with `schema_drift`.
+- **New trust boundary, deferred to Epic E:** browser → Curator UI → Langfuse API. The Langfuse **secret** key must never reach the browser. Epic E's ADR owns this boundary (STRIDE there, not here).
+
+## Options considered (symmetric)
+
+### Option A — Langfuse. Curator edits JSON with server-side schema guard-rails for MVP; schema-driven Curator form in Epic E.
+**Pros:**
+- **Golden shape is enforced by the platform on every write path**, including the platform's own UI. A Curator cannot save a mis-shaped golden, or a pattern-invalid `fields` value, through any door. Table cells and prompt answers are string-only until DEBT-04 (R1 scope, §Threat model).
+- Client-id idempotent score upsert (live-verified). This closes DEBT-03 and makes the ADR-0004 #12 retry safe.
+- The instance is already running. Spike findings (v4 `events_only`, `/v3/scores`, schema cap) are known, so S-01.3 can proceed now.
+- The JSON Schema we write for the platform guard-rail is **the same artifact the Epic E form renders**, for example rjsf over `expectedOutputSchema`. One schema, two uses, and no throwaway work.
+- Smaller self-hosted footprint (no Java/zookeeper tier).
+
+**Cons:**
+- MVP Curator UX is poor: the raw JSON editor **blocks Save silently** and gives no path-level error. A non-engineer will get stuck. This is a known gap that Epic E must fix (see Consequences).
+- No per-user author on golden changes (repudiation residual above).
+- Versioning is weaker than Opik's: no dataset-level diff or restore. "Undo" means a manual point-in-time read and re-write.
+- Schema operational constraints: a 10,000-char cap and all-or-nothing evolution.
+
+**Cost:** S-01.3 adapter (already estimated) + a committed golden JSON Schema + a schema-provisioning step (raw REST, because Python SDK schema support is unverified, issue #10688). The Epic E form is new scope on either platform.
+**Risk:** Curators hit the silent-block wall before Epic E ships. Mitigated by the MVP interim below. Reversal before the first real golden load: low.
+
+### Option B — Opik. Curator edits JSON; Curator form in Epic E.
+**Pros:**
+- Better inline editor feedback, though only for JSON *syntax*.
+- Dataset-level version diff and restore with a change description: a real "undo" for Curators and a better change history.
+- Apache-2.0, self-hostable.
+
+**Cons:**
+- **No schema or type enforcement at all.** Any valid JSON is accepted. Golden integrity would have to be enforced by *our* code. Opik's own UI writes bypass it, so a Curator can save `"twelve fifty"` into a `number` field and nobody finds out until the next run produces false `wrong_value` FAILs in CI. The classifier's N22 validation catches structural malformation, not value patterns.
+- No client-supplied score id. The natural-key upsert `(entity, author, name)` is idempotent in effect only if trace/entity ids are made deterministic. That is workable but less direct than Langfuse's model.
+- Heavier stack (Java backend, MySQL, **zookeeper**). Not stood up, so a live spike would be owed before S-01.3, and the spike facts were source-level only.
+- The Epic E form still has to be built. Opik gives it no schema to render, so we would own the schema *and* its enforcement.
+
+**Cost:** stand up and spike Opik (about half a day), an Opik adapter, app-side golden validation on every read, and Epic E. S-01.3 slips.
+**Risk:** golden corruption through the platform's own UI, with no guard. That is exactly the failure a regression gate cannot afford.
+
+### Option C — Defer / custom golden store (for example goldens as JSON files in git + JSON Schema in CI; platform used only for runs/scores)
+**Pros:**
+- Strongest integrity and audit: schema-checked in CI, diffable, author-attributed, reviewable by PR.
+- No platform lock on golden data.
+
+**Cons:**
+- **Breaks the Curator persona outright for MVP.** Git and PRs are further from a non-engineer than a JSON editor with guard-rails.
+- Splits the source of truth: goldens in git, runs and scores on the platform. The remediation UI (Epic E, BR11) then joins across two stores.
+- Deferring the platform choice blocks S-01.3/S-01.4 and buys nothing the adapter doesn't already give us. ADR-0001 rejected this for the same reason.
+
+**Cost:** a new golden-store design plus a CI validator. The Curator surface is unsolved until Epic E.
+**Risk:** low technical risk, high product risk (the persona gets nothing).
+
+## Decision
+
+**Option A: Langfuse.** For MVP the Curator edits goldens as JSON under a server-side JSON Schema guard-rail. The schema-driven Curator form, with path-level errors and actor attribution, moves to Epic E.
+
+**Why, stated honestly:** we are **not** choosing Langfuse for Curator UX. That claim is refuted, and on UX Opik is marginally *better* (inline feedback, restore). We choose Langfuse because it is the only candidate that **enforces golden shape and `fields` value patterns on every write path, including its own UI**, and because it supports **client-id idempotent score writes**. For a tool whose purpose is to be a trustworthy CI gate, an unguarded golden store is the worse defect. A clumsy editor is a UX gap with a planned fix. The already-running instance is a tie-breaker only. Opik's version diff/restore is the thing we give up, and we accept it: app-tracked content hashes make golden changes detectable per run (INV-04), and Epic E can add an undo on top of Langfuse's point-in-time reads.
+
+### Decisions folded in from the spike risks
+
+1. **Golden `value` typing: strings plus JSON Schema `pattern`, not JSON numbers.** DATA-MODEL-01's string typing **stays**.
+   - *Why:* the implemented and full-rigor-QA'd classifier (S-01.1, ADR-0003) canonicalizes `str` values (`canonical.py` `_value_number(value: str)` → `re.sub` on the string). A JSON-number golden would raise inside the classifier, or need a type change across a Done story.
+   - JSON numbers also **lose formatting** (`1150.00` → `1150`). That breaks the value tier (exact string) of the format-vs-value distinction (AC4).
+   - The schema still rejects `"twelve fifty"` through a per-type pattern. The schema dispatches on the field's `type` discriminator (draft-07 `if`/`then`):
+     - `number` → `^-?[0-9]+(\.[0-9]+)?$`
+     - `date` → an ISO `YYYY-MM-DD` **pattern**. Do not rely on `format: date`, because Ajv format support in Langfuse is unverified.
+     - `id` / `text` → `string` with `minLength` as appropriate.
+   - *Verified (SPIKE Addendum 2, 2026-09-19):* string values with per-type patterns via typed `if`/`then` are enforced on writes (`"twelve fifty"` and `"15/01/2026"` → 400). Langfuse's Ajv runs with `strict: true`, so the schema must follow the authoring rules pinned as contract **CT-05** (`docs/design/CONTRACTS.md`).
+   - *Pattern limits (stated so nobody over-reads them):* the `number` pattern forbids currency symbols and thousands separators (`"$1,250.00"` is rejected; a golden stores `"1250.00"`). The `date` pattern is **syntactic only**: `"2024-02-31"` passes.
+   - *Scope (R1):* patterns apply to `fields.<name>.value` only. Table cells and prompt answers are string-only until DEBT-04.
+2. **`prompts` shape: keyed map (DATA-MODEL-01, ADR-0002), not array.** The spike's array was a probe artifact. The schema expresses the map with `additionalProperties: {<prompt schema>}` plus `propertyNames`.
+   - **Prompt key (F10, resolved):** the IDP `prompt` string **verbatim**, 1–200 chars, no control characters: `propertyNames: {"type":"string","pattern":"^[^\\u0000-\\u001F\\u007F]{1,200}$"}`. The `[A-Za-z0-9_\-]` charset applies to field and table names only (ADR-0002 amendment 2026-09-19). The spike live-verified both the length bounds and the control-char pattern on `propertyNames` (newline/tab → 400; spaces + non-ASCII → 200; SPIKE-2026-09-19 "Follow-up probes"); CT-05 pins it as a regression guard.
+   - **Uniqueness is not structural.** JSON object keys are unique only after parsing: the raw JSON editor collapses a duplicate key to one entry (last wins) without warning, so a Curator can silently lose a prompt. Uniqueness is asserted where it matters, at the `normalize()` trust boundary on the actual side (ADR-0002 collision rule); the golden side relies on JSON-object semantics, and the Epic E form fixes the editor path.
+   - **`answer` shape:** the committed schema follows DATA-MODEL-01: `answer` is a plain string (`{"answer": "Acme Corp", "critical": false}`). The spike's `answer.value` object was a probe artifact.
+   - Table rows likewise keep DATA-MODEL-01's flat `{column: "string"}` cells, not the spike's `{column: {value}}`.
+3. **Schema form: generic, not per-field-name.** One compact schema describes shape and per-type patterns (fields/tables/prompts maps with typed cells). It does **not** enumerate every field name. This keeps it well under the **10,000-char cap** (`jsonSchemaValidation.ts:42`) independent of how many fields an action has: the fields+prompts part measured **954 chars minified** (SPIKE Addendum 2); the tables block is still to be measured (F2). Tightening with per-action `required` lists is optional, and each such schema must be measured against the cap before it is applied. Per-column table types (DEBT-04) can ride the same mechanism later.
+4. **Schema evolution: expand/contract, never drop.** Because Langfuse rejects a schema change when any item fails it, a golden-shape migration is:
+   - (a) apply an *expanded* schema that accepts old ∪ new;
+   - (b) migrate the items;
+   - (c) apply the *contracted* new schema.
+   Removing the schema to migrate is forbidden, because it opens an unguarded window. Schema changes are versioned with the committed schema file. This rule is **policy**; the enforcing **control** is Decision #8.
+5. **Score id: deterministic per invocation.** `score.id = uuid5(NAMESPACE, f"{run_id}|{document_id}|{score_name}")`, where `run_id` is a unique id generated at run start (**not** `run_name` alone).
+   - `NAMESPACE` is a **committed, pinned UUID constant** in `src/idp_regression/platform/`. It is never generated at runtime and never changed; changing it would orphan every existing score id.
+   - Retries within one invocation are idempotent (ADR-0004 #12). This closes DEBT-03 on the design side.
+   - Two invocations that reuse a `run_name` can never overwrite each other's scores (N26).
+   - `write_scores` may now retry on 5xx within ADR-0004's absolute retry deadline.
+6. **v4 `events_only` ingestion reshapes S-01.3.**
+   - Traces and dataset-run linkage go through OTLP / a v4-capable SDK.
+   - `/api/public/ingestion` accepts only score events.
+   - Scores are read via `/v3/scores` (`GET /v2/scores` returns 404).
+   - Public reads can lag. CT-03 / N26 integration assertions must poll with a bounded wait rather than read-after-write.
+7. **`golden_version` stays app-tracked** (content hash, INV-04). Langfuse `createdAt` resets on upsert and item history has no author, so neither can serve as the version. This is unchanged from ADR-0001 and holds on any platform.
+8. **Run-start schema-drift check (R2; the control behind #4).** At run start, after `get_dataset` and before any IDP call, the orchestrator compares `sha256(canonical JSON of the dataset's expectedOutputSchema)` against the same hash of the committed schema file (canonical = sorted keys, no whitespace). On mismatch, including an absent schema, the run aborts non-zero with reason **`schema_drift`** (ADR-0004 taxonomy, CT-04). No scores are written.
+   - *Alternative considered:* validating every golden on fetch against the committed schema in Python. Rejected: it adds a second validator (Python `jsonschema`) whose dialect behaviour differs from Langfuse's Ajv `strict`, so the two could disagree. It costs a pass over every item on every run. And it would not notice a weakened or removed schema on the platform, which is the exact gap #4 leaves open. The hash check is one comparison, and it makes a removed or edited schema impossible to run against. Items stay guaranteed conformant because Langfuse refuses to (re)apply a schema over non-conforming items.
+   - *Interface note:* `get_dataset`'s return value carries the dataset's `expectedOutputSchema`. This is a widening of the returned value, not a new `PlatformAdapter` method. Confirmed by the spike: `GET /api/public/v2/datasets/{name}` returns `expectedOutputSchema` verbatim (SPIKE-2026-09-19 "Follow-up probes").
+   - Becomes an S-01.3 (adapter exposes schema) / S-01.4 (orchestrator abort) DoD item for Dunga.
+
+### MVP Curator interim (until Epic E)
+Golden edits in MVP are low-volume. The Curator edits JSON in the Langfuse UI. Guard-rails:
+- The server-side schema, which blocks invalid saves.
+- A short Curator runbook: where the schema hover card is, what "Save does nothing" means, and the value patterns per type.
+- Escalation to a Prompt Engineer when a save is blocked.
+
+A local `validate-golden` helper (the same schema, `allErrors`, path-level messages) is a *candidate* for Epic C. That scope is Dunga's call, not decided here.
+
+## Design patterns
+- **Adapter (GoF)**: unchanged from ADR-0001. `PlatformAdapter` Protocol plus a `LangfuseAdapter` class; the SDK and raw REST stay confined to `src/idp_regression/platform/` (N24). The v4 ingestion split (OTLP for traces, REST for scores) is hidden behind the adapter.
+- **Specification (schema as data)**: the golden JSON Schema is a committed, versioned data artifact. Langfuse enforces it at write time and the Epic E form renders it. Stack-idiomatic form: a JSON file plus a small provisioning function that upserts it via REST. It is **not** a Python class hierarchy.
+- **Deterministic identity (ad-hoc, a pure function)**: `score_id(run_id, document_id, score_name) -> UUID` is a plain function. No GoF pattern fits better, and wrapping it would be over-application.
+
+## API contract (deltas)
+- `PlatformAdapter` interface: **unchanged** (`get_dataset` / `write_scores` / `flush`, and no `get_golden_version`).
+- New observable behaviours we commit to (Hyrum's Law):
+  - Score ids are deterministic in `(run_id, document_id, score_name)`. Consumers may rely on "re-writing a score within a run replaces it".
+  - Every golden dataset carries an `expectedOutputSchema`. Consumers (Epic E form, Epic C tooling) may assume stored goldens conform to the committed schema version. A run never proceeds against a drifted schema (Decision #8, abort `schema_drift`).
+- Versioning: the golden schema file is versioned. Changes follow expand/contract (Decision #4). Score keys (`field:<name>`, `gate`) remain immutable (BR11).
+
+## Consequences
+
+- **Positive:**
+  - Golden shape and `fields` value patterns are guarded on every write path (API and platform UI) from day one. Table cells and prompt answers are string-only until DEBT-04 (R1).
+  - Score writes become retry-safe.
+  - S-01.3 is unblocked on known integration facts.
+  - The schema artifact is reused by Epic E, so there is no throwaway.
+  - The classifier (S-01.1, Done at full rigor) is untouched: string typing stays.
+- **Negative:**
+  - **Curator UX consequence (explicit):** in MVP the non-engineer Curator edits **raw nested JSON** with schema guard-rails. Saves of invalid data are **blocked silently** (no inline message, no JSON path, first error only). This is a known UX gap. **Epic E must fix it** with a schema-driven form (rendering `expectedOutputSchema`), path-level `allErrors` validation messages, an actor-attributed write path, and an undo built on point-in-time reads. The EX-C1-1 / EX-C1-2 "no-code Curator" expectation is **not met in MVP**. Feliz should reflect this in UC-C1 when it is discovered.
+  - No per-user audit trail of golden edits until Epic E. Change *detection* is via INV-04 content hash only.
+  - We give up Opik's dataset diff/restore.
+  - Self-hosting obligations from ADR-0001 (encryption at rest, DB access control, backup/restore; N25) carry over unchanged and still **block any real-golden load** (Mestre).
+- **Open design follow-ups (owners):**
+
+| # | Follow-up | Owner | Blocks |
+|---|---|---|---|
+| F1 | **RESOLVED 2026-09-19** (SPIKE Addendum 2): `fields` + `prompts` with string values and per-type patterns via typed `if`/`then` are enforced; `propertyNames` length bounds enforced; generic schema is ~954 chars minified. Ajv `strict: true` authoring rules captured as CT-05. Still open and moved to F2: measure the tables block and the full-schema length. | — | — |
+| F2 | Commit the golden JSON Schema (versioned) and a REST provisioning step (raw REST; the Python SDK schema support, #10688, is unverified). Measure the tables block and the full minified schema against the 10k cap. Schema passes CT-05. | Dengoso (S-01.3) / Soneca reviews schema | golden load |
+| F3 | S-01.3 adapter reshaped for v4 `events_only`: OTLP/v4 SDK for traces and dataset-run linkage, scores via `/api/public/scores` with deterministic `id` (Decision #5), reads via `/v3/scores`, bounded-poll integration assertions. Pin the SDK version. **SPEC-01 wording:** the S-01.3 DoD line (~114) still says idempotency key `(run_name, document_id, field_name)` / "else NO retry"; replace it with the Decision #5 deterministic `score.id` (`run_id`, not `run_name`) and retry-within-deadline. | Dunga (re-scope S-01.3 tasks/estimate) → Dengoso | S-01.3 |
+| F4 | ADR-0004 #12 text: the retry-on-5xx branch is now "retry with deterministic score id". Close DEBT-03. | Soneca (ADR-0004 amendment after Atchim gate) / Dunga (DEBT-03) | S-01.4 |
+| F5 | DATA-MODEL-01 §1/§4: "Pending ADR-0005 follow-up" notes added. Fold the schema reference and score-id rule in properly once F1 confirms. | Soneca | — |
+| F6 | Expand/contract golden-schema migration procedure documented for Epic C. | Soneca (Epic C design) | first schema change |
+| F7 | Curator runbook for the MVP JSON editor (schema hover card, silent-block meaning, per-type patterns, escalation). | Dunga to card (Epic C) | Curator onboarding |
+| F8 | Epic E ADR: schema-driven Curator form, path-level errors, actor attribution, undo, browser trust boundary (secret key never client-side). | Soneca (at Epic E `/design`) | Curator no-code editing |
+| F9 | Candidate NFR-01 row: "a schema-invalid golden write is rejected on API and UI paths", verified at S-01.3 integration. | Soneca (next NFR pass) / Atchim confirms | — |
+| F10 | **RESOLVED 2026-09-19** (R4): prompt key = IDP `prompt` string verbatim (1–200 chars, no control chars, matches `propertyNames`); `[A-Za-z0-9_\-]` applies to field/table names only; prompt-derived score names use a charset-safe derived id (INV-03). ADR-0002 amended; DATA-MODEL-01 example fixed. | — | — |
+
+## Reversal cost
+
+**Low now, High after the first real golden load.** Nothing real is loaded. The spike datasets are synthetic, and N25 obligations block real data anyway. The adapter confines the integration. Switching to Opik today costs an Opik spike, an adapter, and app-side golden validation. After real goldens and run history live on Langfuse, reversal is a migration of curated data plus history, which effectively locks the choice.
+
+The part of this decision most likely to be revisited is **not** the platform. It is the MVP Curator interim, which Epic E replaces. If Epic E builds its own form and validation layer, the platform's UI stops being the Curator's surface, and golden storage rests purely on API-level properties. On those properties Langfuse's schema enforcement and client-id scores remain the deciding advantages.
+
+Atchim review: **APPROVED (R1–R4 closed, re-checked 2026-09-19)**. Original verdict: APPROVE WITH NOTES (top-level gate, 2026-09-19). Decision A approved; 4 Required amendments (R1 integrity-claim scope, R2 run-start schema-drift check, R3 F1 resolved + Ajv strict authoring rules as contract, R4 F10 resolution) must land before S-01.3 schema provisioning (T-01.3.0 / F2), not before Dunga re-scopes.
+
+Amendments applied (Soneca, 2026-09-19): R1 integrity claim narrowed to `fields` (§Threat model, Option A, Decision, Consequences); R2 run-start schema-drift abort (Decision #8); R3 F1 resolved, Ajv strict authoring rules as contract CT-05; R4 F10 resolved (ADR-0002 amendment). Suggestions folded: `answer` shape, duplicate-key collapse, pattern limits, pinned `NAMESPACE`, SPEC-01 idempotency wording (F3), project-roles assumption (to confirm, Mestre). Atchim confirmation: APPROVED (R1–R4 closed, re-checked 2026-09-19).
