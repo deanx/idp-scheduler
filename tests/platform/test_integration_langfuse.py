@@ -202,6 +202,157 @@ def test_get_dataset_missing_dataset_raises_typed_error(client: UrllibHttpClient
         adapter.get_dataset(f"does-not-exist-{uuid.uuid4().hex}")
 
 
+def _build_record_for_item(item: Any, *, run_id: str) -> DocumentRecord:
+    total_value = item["golden"]["fields"]["total"]["value"]
+    return {
+        "item_id": item["item_id"],
+        "document_id": item["document_id"],
+        "actual": {"status": "SUCCEEDED", "fields": {"total": {"value": total_value}}},
+        "scores": build_score_inputs(
+            golden=item["golden"],
+            verdicts={
+                "total": {
+                    "verdict": "match",
+                    "expected": total_value,
+                    "actual": total_value,
+                    "confidence": 0.9,
+                    "critical": True,
+                    "type": "number",
+                }
+            },
+            gate="PASS",
+            run_id=run_id,
+            document_id=item["document_id"],
+        ),
+    }
+
+
+def _gate_score_value(client: UrllibHttpClient, gate_score_id: str) -> str | None:
+    status, body = client.request("GET", "/api/public/v3/scores?fields=details")
+    if status != 200 or not isinstance(body, dict):
+        return None
+    for score in body.get("data", []):
+        if score.get("id") == gate_score_id:
+            return cast(str | None, score.get("value"))
+    return None
+
+
+def _experiments_named(client: UrllibHttpClient, run_name: str) -> list[dict[str, Any]]:
+    one_hour_ago = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=1)
+    from_ts = one_hour_ago.strftime("%Y-%m-%dT%H:%M:%SZ")
+    status, body = client.request(
+        "GET", f"/api/public/experiments?limit=50&fromStartTime={from_ts}"
+    )
+    if status != 200 or not isinstance(body, dict):
+        return []
+    return [e for e in body.get("data", []) if e.get("name") == run_name]
+
+
+# --- TP-37 (N26): two record_run invocations, no score collision -----------
+
+
+def test_n26_distinct_run_names_no_score_collision_two_separate_experiments(
+    client: UrllibHttpClient, sdk_client: Any
+) -> None:
+    """Two record_run calls over the same golden set, different run_id AND
+    different run_name (the realistic case — S-01.4 generates a fresh
+    run_name per invocation): no score collision, and two independent
+    experiments."""
+    from idp_regression.platform.tracing import ExperimentRunner
+
+    dataset_name, _ = _create_dataset_with_items(client, n_items=1)
+    adapter = LangfuseAdapter(client=client, tracing_client=cast(ExperimentRunner, sdk_client))
+    dataset = adapter.get_dataset(dataset_name)
+    item = dataset["items"][0]
+
+    run_names = []
+    gate_ids = []
+    for run_id in ("run-a", "run-b"):
+        run_name = f"test-s013-run-{uuid.uuid4().hex[:8]}"
+        run_names.append(run_name)
+        record = _build_record_for_item(item, run_id=run_id)
+        adapter.record_run(
+            dataset_name=dataset_name,
+            run_name=run_name,
+            run_id=run_id,
+            records=[record],
+            metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+        )
+        gate_ids.append(
+            score_id(run_id=run_id, document_id=item["document_id"], score_name="gate")
+        )
+
+    assert gate_ids[0] != gate_ids[1]  # N26: distinct run_id -> distinct score ids
+    assert _bounded_poll(lambda: _gate_score_value(client, gate_ids[0]) == "PASS")
+    assert _bounded_poll(lambda: _gate_score_value(client, gate_ids[1]) == "PASS")
+
+    assert _bounded_poll(lambda: len(_experiments_named(client, run_names[0])) == 1)
+    assert _bounded_poll(lambda: len(_experiments_named(client, run_names[1])) == 1)
+    assert run_names[0] != run_names[1]
+
+
+def test_tp37_same_run_name_different_run_ids_finding(
+    client: UrllibHttpClient, sdk_client: Any
+) -> None:
+    """TP-37 (Atchim's suspicion, 2026-09-19): does Langfuse key dataset
+    runs/experiments by run_name, merging two record_run invocations
+    under the SAME run_name into one experiment even though run_id (and
+    therefore every score_id) differs?
+
+    OBSERVED (live, 4.38.0, verbatim from the probe that produced this
+    test): YES — two record_run calls with the same run_name and
+    different run_id merge into a SINGLE experiment entry
+    (`itemCount` sums across invocations: 1 item recorded twice ->
+    itemCount == 2 on one experiment, not two experiments of itemCount
+    1 each). Scores do NOT collide (score_id is run_id-scoped, so both
+    scores exist independently and are both readable at their expected
+    value) — N26's score-safety guarantee holds regardless. This is
+    purely an Experiments-tab/observability merge, not a data-safety
+    issue. Per the coordinator: this finding is recorded here for
+    Soneca to route (a run_name -> run_id suffix policy decision), NOT
+    designed around in this commit.
+    """
+    from idp_regression.platform.tracing import ExperimentRunner
+
+    dataset_name, _ = _create_dataset_with_items(client, n_items=1)
+    adapter = LangfuseAdapter(client=client, tracing_client=cast(ExperimentRunner, sdk_client))
+    dataset = adapter.get_dataset(dataset_name)
+    item = dataset["items"][0]
+
+    same_run_name = f"test-s013-run-{uuid.uuid4().hex[:8]}"
+    gate_ids = []
+    for run_id in ("run-a", "run-b"):
+        record = _build_record_for_item(item, run_id=run_id)
+        adapter.record_run(
+            dataset_name=dataset_name,
+            run_name=same_run_name,
+            run_id=run_id,
+            records=[record],
+            metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+        )
+        gate_ids.append(
+            score_id(run_id=run_id, document_id=item["document_id"], score_name="gate")
+        )
+
+    # No score collision regardless of the merge below (N26 holds).
+    assert gate_ids[0] != gate_ids[1]
+    assert _bounded_poll(lambda: _gate_score_value(client, gate_ids[0]) == "PASS")
+    assert _bounded_poll(lambda: _gate_score_value(client, gate_ids[1]) == "PASS")
+
+    def _merged_experiment() -> dict[str, Any] | None:
+        matches = _experiments_named(client, same_run_name)
+        return matches[0] if len(matches) == 1 else None
+
+    assert _bounded_poll(lambda: _merged_experiment() is not None)
+    merged = _merged_experiment()
+    assert merged is not None
+    # OBSERVED FINDING: the two invocations merged into ONE experiment
+    # whose itemCount is the SUM across both record_run calls (2), not
+    # two separate itemCount==1 experiments. This confirms run_name is
+    # the platform's merge key for dataset runs/experiments.
+    assert merged["itemCount"] == 2
+
+
 # --- T-01.3.10a / ADR-0005 #9: record_run -----------------------------------
 
 
@@ -339,3 +490,38 @@ def test_flush_raises_flush_failed_on_a_real_export_failure() -> None:
             items=items,
             task=task,
         )
+
+
+def test_record_run_never_logs_the_auth_header_on_the_otlp_path(
+    client: UrllibHttpClient, sdk_client: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R4: the Basic auth header (and the secret key) must never appear
+    in a log line on the record_run/OTLP path -- captures every log
+    record emitted by a real record_run call (REST scores + the SDK's
+    own OTLP export + dataset-run-item creation)."""
+    from idp_regression.platform.tracing import ExperimentRunner
+
+    caplog.set_level(logging.DEBUG)
+    secret_key = _require_env("LANGFUSE_SECRET_KEY")
+    public_key = _require_env("LANGFUSE_PUBLIC_KEY")
+
+    dataset_name, _ = _create_dataset_with_items(client, n_items=1)
+    adapter = LangfuseAdapter(client=client, tracing_client=cast(ExperimentRunner, sdk_client))
+    dataset = adapter.get_dataset(dataset_name)
+    item = dataset["items"][0]
+    record = _build_record_for_item(item, run_id="run-otlp-redaction")
+
+    adapter.record_run(
+        dataset_name=dataset_name,
+        run_name=f"test-s013-run-{uuid.uuid4().hex[:8]}",
+        run_id="run-otlp-redaction",
+        records=[record],
+        metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+    )
+
+    assert secret_key not in caplog.text
+    assert f"Basic {public_key}" not in caplog.text
+    import base64
+
+    basic_value = base64.b64encode(f"{public_key}:{secret_key}".encode()).decode()
+    assert basic_value not in caplog.text
