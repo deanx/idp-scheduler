@@ -12,6 +12,12 @@ Format:
 
 ## Handoffs (newest first)
 
+### HANDOFF Zangado → (top-level)  (2026-09-19, /qa S-01.3 re-check)
+- Done: re-check of the fix round → docs/qa/QA-01-baseline-regression-S-01.3.md, ✅ Pass. Independently re-ran 220 unit + 232 live tests, all passing. Static checks and SCA are clean. Contracts and invariants are green. DEBT-18 option B holds.
+- Contract: S-01.3 is Done. F-1 is closed: Soneca's conditional APPROVED is met, and C1–C3 landed exactly as specified and are CT-05-pinned. F-2 (REG-03), F-3 (REG-04), F-4 and F-5 (REG-05) are closed.
+- Open: F-6 (the compose web image is still `:4`; user/Mestre). F-7, new Minor: DATA-MODEL-01.md:46 records the F2 minified length as 1,641 but it is now 1,898 (Soneca, one line). DEBT-20 (record-phase deadline) and DEBT-12 (gitleaks) must close before S-01.4 /qa. /harden should red-team the new adapter retry.
+- Next: Dunga marks S-01.3 Done in docs/state. Soneca fixes F-7. The user handles the .swp file and spikes/.
+
 ### HANDOFF Zangado → (top-level)  (2026-09-19, /qa S-01.3)
 - Done: DoD audit of S-01.3 → docs/qa/QA-01-baseline-regression-S-01.3.md, ⚠️ Pass with follow-ups. Unit 188 passed, live 200 passed; mypy + ruff clean; pip-audit clean; CT-03/CT-05/INV-01 green; DEBT-18 option B holds in code.
 - Contract: code, tests and scans are all acceptable. Containment is deferred to the S-01.4 /harden per the SPEC (the epic's Done, not the story's). Observability ✅ VERIFIED at S-01.3 scope; the N10 telemetry lines are owed by S-01.4.

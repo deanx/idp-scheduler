@@ -1,6 +1,7 @@
 # QA-01 (S-01.3): audit of SPEC-01 / Story S-01.3, the Langfuse platform adapter (Epic D)
 
-**Verdict:** ⚠️ Pass with follow-ups. Every code, test and scan gate passes. **Done has one precondition:** F-1 (Soneca's schema review, a DoD line) must be recorded. It needs no code rework.
+**Verdict (re-check 2026-09-19, current):** ✅ Pass. S-01.3 is **Done**. One Minor doc follow-up remains (F-7). See the re-check section at the end.
+**Verdict (initial audit, superseded):** ⚠️ Pass with follow-ups. F-1 was a Done precondition.
 **Rigor:** standard (CLAUDE.md ## Rigor). SPEC Risk: high.
 **Author:** alex@divinocosta.com.br (solo mode). Auditor: Zangado.
 **Date:** 2026-09-19. **Branch:** feat/S-01.3-langfuse-adapter @ c3ed448.
@@ -129,3 +130,43 @@ None.
 - OPS (user/Mestre): pin the web and worker images to 4.38.0 (F-6). Install gitleaks (DEBT-12) before S-01.4 /qa.
 - Hygiene (user): delete the .swp (and gitignore `*.swp`); keep `spikes/` out of the commits.
 - Debt to record via `/debt add`: F-3, and F-2 if it is deferred rather than fixed. DEBT-17/DEBT-19 remain open.
+
+## Re-check after the fix round (2026-09-19, Zangado)
+
+**Entry gates:**
+- Stamp `TEST-S-01.3`: ✅ PASSED. Source `/test gap-fill (Atchim TDD gate)`. Commit 71e5e6a (stamp commit a7d9081).
+- Rigor gate: Risk high, /test-sourced. PASS.
+- Freshness: `git log 71e5e6a..HEAD -- src tests` is empty. PASS.
+- Branch: feat/S-01.3-langfuse-adapter.
+
+**Re-run (independent):**
+- Unit: 220 passed, 12 skipped (the by-design integration gate).
+- Live, `RUN_INTEGRATION_TESTS=1` against Langfuse 4.38.0 with synthetic data: **232 passed**. This includes the provisioning round-trip of the tightened schema under Ajv strict.
+- mypy strict and ruff: clean.
+- No test files deleted. No unlinked skip or xfail.
+
+**Gates:**
+- **SCA:** pip-audit reports no known vulnerabilities.
+- **Secrets:** gitleaks is still absent (DEBT-12). The grep fallback over src/tests/docs is clean. The real `.env` values appear in 0 of the commits c3ed448..HEAD.
+- **Composition:** CT-03, CT-05, INV-01, INV-04 hashing and N24: 53 passed. INV-01 and INV-03 still hold.
+- **DEBT-18 option B holds:**
+  - score `comment` is still `None` (scoring.py:97,109,118);
+  - the span allowlist is unchanged;
+  - the new retry logs carry the document_id, the score name, the attempt count, and either a redacted transport message or the body shape. No values.
+- **Cleanliness:** `check_clean.py` reports clean, exit 0. The `.swp` file and `spikes/` are still untracked and user-owned. The handling from the initial audit stands: delete the `.swp` and gitignore `*.swp`; keep `spikes/` out of commits.
+
+| Finding | Status | Evidence |
+|---|---|---|
+| F-1 Soneca schema review | **CLOSED** | DATA-MODEL-01.md "Schema review (Soneca, 2026-09-19)": CHANGES REQUIRED, and "**APPROVED** once exactly C1–C3 land with the CT-05 assertions … needs no further review". I verified the 17a4f64 schema diff is exactly C1 (`propertyNames` `^[A-Za-z0-9_-]{1,128}$` on fields and tables), C2 (`additionalProperties:false` on the field, table and prompt entries, with `rows` items left open) and C3 (`fields.minProperties:1`, `match_key.minLength:1`). Nothing else changed. CT-05 pins all three (test_golden_schema_contract.py:209-321). The approval condition is met, so DoD line 4's review clause is satisfied. |
+| F-2 score-write retry (REG-03) | **CLOSED** | c779a51 `_write_score_with_retry` (langfuse_adapter.py). It retries 5xx and `TransportError` only, with 3 attempts, full-jitter backoff (base 1 s, cap 8 s), the same deterministic payload (an upsert), and no retry on 4xx. The errors.py docstring is corrected. Tests: test_langfuse_adapter.py:613,634 and the edce8eb/5795993 set. The missing whole-record-phase deadline is tracked as DEBT-20 (→ S-01.4). |
+| F-3 pagination hardening (REG-04) | **CLOSED** | 1340a13. `data` that is not a list, a missing `meta`, and a non-int, bool or negative `totalPages` now raise `DatasetFetchFailedError`. The loop is capped at 500 pages. `totalPages: 0` (an empty dataset) is accepted. Tests: test_langfuse_adapter.py:762,801,816. |
+| F-4 doc drift | **CLOSED** | fc0c02e/d64aeed. The INV-01 status is amended to the verdict map only, with no `actual`. ADR-0005 #9 has an amendment noting `DocumentRecord` has no `actual`; the original line 177 is kept for history, which is acceptable. DEBT-13's status is corrected. |
+| F-5 prompt key in exception (REG-05) | **CLOSED** | 747cf80. `_require_verdict(report_key=prompt_score_name(key))`. Test: test_score_contract.py:164 (a sentinel prompt key is absent from `str(exc)`). |
+| F-6 compose web image `:4` | **OPEN**, carry-over | User/Mestre-owned. Not an S-01.3 code item. |
+| **F-7 (new, Minor)** stale F2 measurement | **OPEN** | DATA-MODEL-01.md:46 still records the minified length as **1,641** chars. After C1–C3 the committed schema minifies to **1,898** chars (re-measured by this audit). Soneca's review explicitly asked to "re-measure the F2 length". The bound itself (< 10k) is enforced by CT-05, so there is no functional risk. It is a one-line doc correction. Owner: Soneca. This is a doc omission from the fix round, not a code defect; **escaped-atchim: no** (the number is outside a code diff and nothing mechanical checks it). |
+
+**NFR-01:** unchanged. N26 ✅ PASS. The rest are as in the initial audit.
+**Observability:** ✅ VERIFIED at S-01.3 scope. The new `score_write_failed … attempts=` lines are structured and json-escaped.
+**Containment:** still deferred to S-01.4's `/harden`. The retry is now in the adapter, so /harden should red-team it (upsert safety, 4xx not retried).
+
+**Re-check verdict: ✅ Pass. S-01.3 is Done.** F-7 is a one-line doc fix for Soneca, and F-6 stays user-owned. Neither gates the story.
