@@ -42,7 +42,7 @@
 | 18 | Observability (typed errors → abort reasons) | met | errors.py taxonomy. Tests listed under Gates |
 | 19 | Containment via S-01.4 /harden | deferred, as the SPEC allows | The SPEC wording is "before the **epic** is Done" |
 | 20 | N26 | met | test_score_contract.py. Live :310,:350. The experiment merge is DEBT-19 (open, S-01.4) |
-| 21 | Integration vs pinned 4.38.0 | met, with a deviation (F-6) | The running version is 4.38.0, but the compose web image is still `:4` |
+| 21 | Integration vs pinned 4.38.0 | **met** (F-6 closed 2026-09-19) | All 6 compose images pinned to exact tag + manifest digest; web/worker at `4.38.0`; 6/6 pinned digests match the running container image IDs |
 | 22 | Docs updated | met, with drift (F-4) | DATA-MODEL-01 §1/§4 and CT-05 show ✅ |
 | 23 | Atchim review | met | Stamp. Structural independence |
 | 24 | Zangado /qa | this report | |
@@ -120,6 +120,7 @@ None.
 - **F-5: scoring.py:123 `_require_verdict` puts the verbatim prompt key (Curator-authored golden content) into the `ValueError` message.** If S-01.4 logs that exception, golden content reaches the logs (INV-02). This is the same class as the T-01.4.5 risk. Fix: report the score name (`prompt:<hex>`), not the key.
   - **escaped-atchim: yes** (security axis, INV-02).
 - **F-6: Carry-over F-1 image pin is incomplete.** `../langfuse/docker-compose.yml:109` is `langfuse:4` (floating) and the worker is `:4.38`. The live instance is 4.38.0 today. Owner: user/Mestre. Not an S-01.3 code defect; no tag.
+  - **CLOSED 2026-09-19.** Pinned all 6 images (web, worker, clickhouse, minio, redis, postgres) to exact tag + manifest-list digest; web/worker resolve to `4.38.0` (revision `4ecaabed`). `docker compose config` parses and every pin matches the currently-running container image ID. Compose path + pin recorded in CLAUDE.md. See QA-S-01.5 F-1 for the digest list and the two carried-forward caveats (postgres `${POSTGRES_VERSION}` override dropped; Chainguard minio digest may be GC'd).
 
 ## Hand-off to Dunga
 - TASK (Soneca): record the golden_schema_v1 review (F-1). S-01.3 → Done once recorded.
@@ -127,7 +128,7 @@ None.
 - BUG (Minor): harden `get_dataset` pagination parsing (F-3). DoD: typed error on malformed data/meta, page cap, unit tests for all three shapes.
 - BUG (Minor): value-free `_require_verdict` message (F-5). Fold into T-01.4.5 or a small S-01.3 follow-up.
 - DOCS (Soneca): INV-01 status, ADR-0005 #9 `DocumentRecord`, DEBT-13 status (F-4).
-- OPS (user/Mestre): pin the web and worker images to 4.38.0 (F-6). Install gitleaks (DEBT-12) before S-01.4 /qa.
+- OPS (user/Mestre): ~~pin the web and worker images to 4.38.0 (F-6)~~ **done 2026-09-19** — all 6 images pinned to tag+digest. Install gitleaks (DEBT-12) before S-01.4 /qa.
 - Hygiene (user): delete the .swp (and gitignore `*.swp`); keep `spikes/` out of the commits.
 - Debt to record via `/debt add`: F-3, and F-2 if it is deferred rather than fixed. DEBT-17/DEBT-19 remain open.
 

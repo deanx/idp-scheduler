@@ -47,7 +47,7 @@ Profile: standard
 | Service | Purpose | Credential | Status |
 |---|---|---|---|
 | MuleSoft Anypoint IDP | Source of extraction output under test (Epic A adapter) | OAuth client secret | configured locally — IDP_CLIENT_ID + IDP_CLIENT_SECRET in gitignored `.env` (never in repo); S-01.6 spike still needed to pin timeouts/status-allowlists against a live org |
-| Evaluation platform — Langfuse (self-hosted; confirmed by ADR-0005 after SPIKE-01) | Golden-set storage, run tracking, regression gate (Epic D) | API key (LANGFUSE_SECRET_KEY / LANGFUSE_PUBLIC_KEY) + LANGFUSE_HOST | self-hosted instance running locally; API keys + host in gitignored `.env`; self-hosting obligations (encryption-at-rest, DB access control, backup per ADR-0001/N25) still required before production golden data; pin the images to 4.38.0 (S-01.5 QA F-1); platform decision final per ADR-0005 |
+| Evaluation platform — Langfuse (self-hosted; confirmed by ADR-0005 after SPIKE-01) | Golden-set storage, run tracking, regression gate (Epic D) | API key (LANGFUSE_SECRET_KEY / LANGFUSE_PUBLIC_KEY) + LANGFUSE_HOST | self-hosted instance running locally; API keys + host in gitignored `.env`; self-hosting obligations (encryption-at-rest, DB access control, backup per ADR-0001/N25) still required before production golden data; **compose file: `../langfuse/docker-compose.yml`** (sibling checkout, outside this repo) — all 6 images pinned to exact tag + manifest digest on 2026-09-19, web/worker at `4.38.0` (S-01.5 QA F-1 / S-01.3 F-6 **closed**); re-probe CT-05 before any version bump; platform decision final per ADR-0005 |
 
 > Solo mode: no owner assignment per credential. Escalate a missing credential to Mestre when it starts blocking a story.
 

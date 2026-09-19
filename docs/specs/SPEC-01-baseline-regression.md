@@ -40,7 +40,7 @@ S-01.1 (Classifier & gate)  ────────────┘ (no deps; st
 - **S-01.1** has no dependencies and no external credentials for its unit tests — start here (the spike already has 11 tests).
 - **S-01.5** is **Done** (QA-S-01.5 ⚠️ Pass with follow-ups; ADR-0005 supersedes ADR-0001). **S-01.6** is the remaining prerequisite spike; it ungates S-01.2/S-01.4 live work.
 - **S-01.2** unit tests can use a placeholder terminal-status allowlist (`["SUCCEEDED"]`); the spike S-01.6 pins the live-org values before integration.
-- **S-01.3** — S-01.5 dependency **resolved** (ADR-0005, platform final); Langfuse credentials **configured** (gitignored `.env`, Mestre handoff 2026-09-19). Integration tests gated on F-1 (Langfuse images pinned to 4.38.0 — user/Mestre). Real-golden load (not build) gated on N25 self-hosting obligations (Mestre).
+- **S-01.3** — S-01.5 dependency **resolved** (ADR-0005, platform final); Langfuse credentials **configured** (gitignored `.env`, Mestre handoff 2026-09-19). Integration tests **ungated 2026-09-19** — F-1 closed (all 6 Langfuse compose images pinned to exact tag + manifest digest; web/worker at 4.38.0). Real-golden load (not build) gated on N25 self-hosting obligations (Mestre).
 - **S-01.4** depends on S-01.1, S-01.2, S-01.3 (incl. `get_dataset` exposing `expectedOutputSchema` for the Decision #8 drift check), and a passing `/harden` (HARDEN-01.md) before Done.
 
 ## Stories
@@ -202,7 +202,7 @@ S-01.1 (Classifier & gate)  ────────────┘ (no deps; st
 - **As a** Soneca/Dengoso pair, **I want** to confirm or refute on a live self-hosted Langfuse that form mode renders a representative nested golden as schema-validated editable form fields **so that** ADR-0001's PROVISIONAL platform decision is resolved (Langfuse confirmed, or the decision re-opens Langfuse vs Opik) before any golden is loaded.
 - **Acceptance criteria (from SPIKE-01):** stand up a live self-hosted Langfuse (Docker); load a representative nested golden (`fields` of mixed types + `tables[].rows[]` + `prompts[]`); enable form mode; perform the EX-C1-1/EX-C1-2 Curator interactions (edit a nested value, edit a table-cell, type an invalid value and confirm schema rejection, add a row); record Langfuse version + UI mechanism + verdict.
 - **Definition of Done:**
-  - [x] Live self-hosted Langfuse stood up (Docker); version pinned and recorded in the spike result — ⚠️ met with deviation: 4.38.0 recorded, image not pinned (QA-S-01.5 #1, F-1)
+  - [x] Live self-hosted Langfuse stood up (Docker); version pinned and recorded in the spike result — **met** (deviation cleared 2026-09-19: all 6 images pinned to tag + manifest digest, web/worker `4.38.0`; QA-S-01.5 F-1 closed)
   - [x] Representative nested golden loaded as a dataset item `expected_output` covering `fields` (number/date/id/text), `tables` (≥2 rows, column-keyed dict shape), `prompts` (≥1 entry) — using **synthetic/scrubbed values only** (no real invoice/ID/PII/financial data; `## Domain` marks golden-set contents sensitive, NFR N19 forbids golden values outside the platform beyond scrubbed samples) — ⚠️ met with deviation: probe shape diverged; fields+prompts re-probed in Addendum 2, tables block → ADR-0005 F2 (QA-S-01.5 #2)
   - [x] Form mode enabled; the exact UI mechanism (schema upload vs inference) recorded — ✅ (QA-S-01.5 #3)
   - [x] EX-C1-1/EX-C1-2 interactions performed (interaction ids sourced from `docs/init/use-cases-seed.md` UC-C1, which is out of scope for UC-01 but defines the Curator edit/invalid-value/new-row interactions reused here): nested-field edit + save + read-back; table-cell edit; invalid-value schema rejection; new-row add — ⚠️ met with deviation: edits via API, invalid-value rejection via live UI (QA-S-01.5 #4)
@@ -254,7 +254,7 @@ S-01.1 (Classifier & gate)  ────────────┘ (no deps; st
 |---|---|---|
 | S-01.1 | n/a — ✅ DONE | Full-rigor QA ✅ Pass (QA-01) |
 | S-01.2 | **Ready for unit build**; **not Ready for live/integration** | Unit + CT-01 work runs on mocks/fixtures (placeholder allowlist). Live work needs a real IDP action id + published version, and CT-01 fixtures come from S-01.6 |
-| S-01.3 | **Ready for build** (unit, CT-03, CT-05, T-01.3.0 schema authoring) — **not Ready for integration** | S-01.5 dependency resolved; creds configured. Integration (T-01.3.8, TP-33/34/37/38) needs F-1 (Langfuse images pinned to 4.38.0 — user/Mestre). N25 blocks real-golden load only, not build. New/changed tasks need Dengoso estimates first |
+| S-01.3 | **Ready for build** (unit, CT-03, CT-05, T-01.3.0 schema authoring) — **not Ready for integration** | S-01.5 dependency resolved; creds configured. Integration (T-01.3.8, TP-33/34/37/38) **F-1 satisfied 2026-09-19** (images pinned to tag+digest). N25 blocks real-golden load only, not build. New/changed tasks need Dengoso estimates first |
 | S-01.4 | **Not Ready** | Depends on S-01.2 + S-01.3; live e2e needs a real IDP action id + published version; `/harden` before Done; new/changed tasks unestimated |
 | S-01.5 | n/a — ✅ DONE | QA-S-01.5 ⚠️ Pass with follow-ups; ADR-0005 |
 | S-01.6 | **Not Ready** | IDP creds configured, but needs a real IDP action id + published version to observe executions |
@@ -316,14 +316,14 @@ One row per AC, plus a row per EX-n tagged with its EX id. Integration/e2e rows 
 
 **Credentials required for integration/e2e (MISSING at original planning time; both sets configured locally in gitignored `.env` as of 2026-09-19 — Mestre handoff):**
 - IDP: `IDP_CLIENT_ID`, `IDP_CLIENT_SECRET`, `IDP_REGION`, `IDP_ORG_ID` (plus a real action ID + published version, passed per run as `--action`/`--version`) — creds configured; the real action id + published version is what still blocks S-01.2 / S-01.4 / S-01.6 live work.
-- Langfuse: `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_HOST` + a self-hosted instance — configured and running (4.38.0); images must be pinned to 4.38.0 (F-1) before S-01.3/S-01.4 integration tests.
+- Langfuse: `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_HOST` + a self-hosted instance — configured and running (4.38.0); **images pinned 2026-09-19** — all 6 in `../langfuse/docker-compose.yml` carry an exact tag + manifest digest (F-1 closed), so S-01.3/S-01.4 integration is unblocked.
 
 ## Risks / open questions
 
 - ~~Atchim re-review of ADR-0001/0002/0004 PENDING~~ — resolved (approved; ADR-0005 APPROVED R1–R4 2026-09-19).
 - ~~ADR-0001 PROVISIONAL on SPIKE-01~~ — resolved: SPIKE-01 refuted the no-code form-mode premise; ADR-0005 (Langfuse, write-time golden integrity + client-id scores) supersedes ADR-0001.
 - **Credentials:** IDP + Langfuse creds configured locally (2026-09-19). Remaining live-work blocker: a real IDP action id + published version (S-01.2/S-01.4/S-01.6).
-- **Langfuse image unpinned (QA-S-01.5 F-1, Major):** `../langfuse/docker-compose.yml` uses floating `:4`; ADR-0005 relies on 4.38.0-specific behaviour (Ajv strict, 10k cap, `events_only`, `/v3/scores`). Pin before S-01.3 integration — user/Mestre.
+- ~~**Langfuse image unpinned (QA-S-01.5 F-1, Major)**~~ — **RESOLVED 2026-09-19.** All 6 images in `../langfuse/docker-compose.yml` pinned to exact tag + manifest-list digest (web/worker `4.38.0`, revision `4ecaabed`); 6/6 pins verified against the running containers. Re-probe CT-05 before any version bump.
 - **N25 self-hosting obligations** (encryption at rest, DB access control, tested backup/restore) block any **real** golden load — not S-01.3 build/tests with synthetic data (Mestre).
 - **MVP Curator UX gap (ADR-0005 Consequences):** raw-JSON editor blocks invalid saves silently; Epic E fixes; Curator runbook F7 to be carded under Epic C.
 - **ASM-04 (shape variance) open, Low for UC-01 / Med for Epic F** — does not block UC-01 (single baseline action); spike before Epic F routing.
@@ -364,7 +364,7 @@ Dengoso batch estimate, 2026-09-18. Story-points on the Fibonacci scale (1/2/3/5
 | T-01.3.5 † | 3 | CT-03 grows by the `prompt:<16-hex>` family (UTF-8 pinned via a non-ASCII key; raw prompt never in a name); N26 rests on distinct `run_id` |
 | T-01.3.6 | 1 | INV-01 payload assertion on `write_scores` (the OTLP-span half is counted in T-01.3.10a) |
 | T-01.3.7 | 1 | Module-boundary grep/ruff config asserting Langfuse SDK imports stay in platform/ |
-| T-01.3.8 † | 5 | Up from 3: bounded `/v3/scores` poll helper (30 s / 1 s), live TP-33/34/35/37/38. Blocked on F-1 (images pinned to 4.38.0) |
+| T-01.3.8 † | 5 | Up from 3: bounded `/v3/scores` poll helper (30 s / 1 s), live TP-33/34/35/37/38. ~~Blocked on F-1~~ — F-1 closed 2026-09-19 |
 | T-01.3.9 | 3 | NEW, CT-05: recursive schema walker (typed if/then, required ⊆ properties), minified length < 10k, exact propertyNames pattern, accept/reject on DATA-MODEL-01 §1 example vs "twelve fifty" |
 | T-01.3.10a | 5 | NEW, split per Dengoso: OTLP / v4 SDK traces + dataset-run linkage; own exporter wrapper so export failure surfaces at `flush()` → `flush_failed` (TP-43; BatchSpanProcessor swallows errors by default); INV-01 on spans (TP-45); OTLP auth redaction. Least-known piece: the v4-capable SDK is unconfirmed |
 | T-01.3.10b | 3 | NEW: scores via `/api/public/scores` with the deterministic id, `/v3/scores` reads, SDK version pinned in the lock |
