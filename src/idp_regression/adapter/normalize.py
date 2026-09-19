@@ -18,8 +18,11 @@ import re
 from idp_regression.adapter.errors import MalformedIDPOutputError
 from idp_regression.adapter.types import FieldValue, NormalizedOutput, PromptValue
 
-#: Field/table-name trust boundary charset (ADR-0002 §Field-name sanitization).
-_SAFE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+#: Field/table-name trust boundary charset (ADR-0002 §Field-name
+#: sanitization) — matches the golden schema's `^[A-Za-z0-9_-]{1,128}$`
+#: (\A/\Z, not ^/$: `$` matches before a trailing newline in Python re,
+#: which would silently accept a name like "total\n" — Atchim R1).
+_SAFE_NAME_PATTERN = re.compile(r"\A[A-Za-z0-9_-]{1,128}\Z")
 
 #: Prompt-key rule (ADR-0002 amendment 2026-09-19, ADR-0005 F10): verbatim,
 #: 1-200 chars, no control characters — matches the golden schema's

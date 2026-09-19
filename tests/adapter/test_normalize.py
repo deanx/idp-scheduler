@@ -93,7 +93,9 @@ def test_duplicate_prompt_string_raises_typed_error() -> None:
 # ---- field/table name sanitization (trust boundary) ------------------
 
 
-@pytest.mark.parametrize("bad_name", ["total\ngate", "a:b", "", "has space"])
+@pytest.mark.parametrize(
+    "bad_name", ["total\ngate", "a:b", "", "has space", "total\n", "x" * 129]
+)
 def test_unsafe_field_name_raises_typed_error(bad_name: str) -> None:
     raw = {
         "status": "SUCCEEDED",
@@ -102,6 +104,13 @@ def test_unsafe_field_name_raises_typed_error(bad_name: str) -> None:
     with pytest.raises(MalformedIDPOutputError) as excinfo:
         normalize(raw, success_statuses={"SUCCEEDED"})
     assert excinfo.value.reason == "unsafe_field_name"
+
+
+def test_field_name_at_the_128_char_cap_is_accepted() -> None:
+    name = "x" * 128
+    raw = {"status": "SUCCEEDED", "pages": [{"fields": {name: {"value": "v", "confidence": None}}}]}
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert name in out["fields"]
 
 
 def test_unsafe_table_name_raises_typed_error() -> None:
