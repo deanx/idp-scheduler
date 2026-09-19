@@ -299,6 +299,21 @@ def test_missing_status_raises_typed_error() -> None:
         normalize({"pages": []}, success_statuses={"SUCCEEDED"})
 
 
+def test_status_outside_success_statuses_raises_typed_error() -> None:
+    # ADR-0002:125 — normalize() itself enforces success_statuses, not just
+    # the adapter's poll loop (Atchim R7).
+    raw = {"status": "FAILED", "pages": []}
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "status_not_success"
+
+
+def test_status_within_success_statuses_is_accepted() -> None:
+    raw = {"status": "DONE", "pages": []}
+    out = normalize(raw, success_statuses={"DONE", "SUCCEEDED"})
+    assert out["status"] == "DONE"
+
+
 def test_non_dict_page_raises_typed_error() -> None:
     with pytest.raises(MalformedIDPOutputError):
         normalize({"status": "SUCCEEDED", "pages": ["not a dict"]}, success_statuses={"SUCCEEDED"})

@@ -45,6 +45,14 @@ def normalize(raw: object, success_statuses: set[str]) -> NormalizedOutput:
         raise MalformedIDPOutputError(
             "invalid_status", "raw IDP response is missing a non-empty 'status' string"
         )
+    if status not in success_statuses:
+        # ADR-0002:125 — normalize() only ever emits a NormalizedOutput for
+        # a status in the caller's success set; the adapter's poll loop
+        # already filters this, but normalize() is the single seam and
+        # must not trust a caller to have done so (Atchim R7).
+        raise MalformedIDPOutputError(
+            "status_not_success", "raw IDP response 'status' is not in success_statuses"
+        )
 
     pages = raw.get("pages", [])
     if not isinstance(pages, list):
