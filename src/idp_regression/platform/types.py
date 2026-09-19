@@ -1,18 +1,26 @@
-"""PlatformAdapter Protocol + wire-level shapes (ADR-0001 interface, unchanged
-by ADR-0005 except widening ``get_dataset``'s return value)."""
+"""PlatformAdapter Protocol + wire-level shapes.
+
+ADR-0005 Decision #9 (record-after experiment linkage, closes Atchim
+S-01.3 R6): the interface is a *recorder*, invoked once after every
+per-document gate is already known. ``write_scores``, ``flush`` and
+``run_dataset_experiment`` are no longer part of the public Protocol —
+they are adapter-private internals behind ``record_run``.
+"""
 
 from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, Protocol, TypedDict
 
-from idp_regression.classifier.types import Golden
+from idp_regression.classifier.types import Golden, NormalizedOutput
 
 RunStatus = Literal["aborted", "complete"]
 
 
 class DatasetItem(TypedDict):
-    """One golden dataset item — ``document_id`` + the curated ``Golden``."""
+    """One golden dataset item — the platform's opaque ``item_id`` plus
+    the ``document_id`` + curated ``Golden`` (ADR-0005 #9)."""
 
+    item_id: str
     document_id: str
     golden: Golden
 
@@ -38,8 +46,28 @@ class ScoreInput(TypedDict):
     comment: NotRequired[str | None]
 
 
+class DocumentRecord(TypedDict):
+    """One document's complete, already-gated result (ADR-0005 #9) — built
+    by the orchestrator's in-process loop, with no platform write until
+    ``record_run`` is called once after the loop."""
+
+    item_id: str
+    document_id: str
+    actual: NormalizedOutput
+    scores: list[ScoreInput]
+
+
+class RunMetadata(TypedDict):
+    """Run-level metadata recorded with every completed run (INV-04)."""
+
+    action_id: str
+    action_version: str
+    golden_version: str
+
+
 class PlatformAdapter(Protocol):
-    """The interface of record (ADR-0001), swappable per NFR N24."""
+    """The interface of record (ADR-0001, reshaped by ADR-0005 #9),
+    swappable per NFR N24."""
 
     def get_dataset(self, name: str) -> Dataset:
         """Fetch the golden dataset. Raises ``DatasetFetchFailedError`` on
@@ -48,17 +76,20 @@ class PlatformAdapter(Protocol):
         """
         ...
 
-    def write_scores(self, run_id: str, document_id: str, scores: list[ScoreInput]) -> None:
-        """Write scores for one document. Deterministic ids make this
-        idempotent — the orchestrator may retry on 5xx within its budget.
-        Raises ``ScoreWriteFailedError`` on failure.
-        """
-        ...
-
-    def flush(self) -> None:
-        """Flush any buffered platform writes (trace export). Never
-        best-effort — raises ``FlushFailedError`` on failure so the
-        orchestrator can map it to abort reason ``flush_failed``.
+    def record_run(
+        self,
+        *,
+        dataset_name: str,
+        run_name: str,
+        run_id: str,
+        records: list[DocumentRecord],
+        metadata: RunMetadata,
+    ) -> None:
+        """Record a complete run once, after every gate is already known:
+        an experiment visible in the Experiments tab, plus per-document
+        scores on each item's real trace id. Raises
+        ``ExperimentRecordFailedError`` | ``ScoreWriteFailedError`` |
+        ``FlushFailedError``. Never retried by the adapter (ADR-0005 #9).
         """
         ...
 

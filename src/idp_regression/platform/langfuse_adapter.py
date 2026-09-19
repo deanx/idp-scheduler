@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import urllib.parse
 from typing import Any, Literal, cast
 
 from idp_regression.platform.errors import (
@@ -25,6 +26,7 @@ from idp_regression.platform.errors import (
     RunStatusWriteFailedError,
     ScoreWriteFailedError,
     TracingNotConfiguredError,
+    TransportError,
 )
 from idp_regression.platform.tracing import TracingClient, flush_or_raise, run_dataset_experiment
 from idp_regression.platform.transport import HttpClient, UrllibHttpClient
@@ -51,9 +53,19 @@ class LangfuseAdapter:
     def __init__(self, client: HttpClient, tracing_client: TracingClient | None = None) -> None:
         self._client = client
         self._tracing_client = tracing_client
+        #: item_id -> (dataset_id, golden) from the most recent get_dataset
+        #: call — record_run() reads this instead of re-fetching (INV-04,
+        #: ADR-0005 #9 "no second fetch").
+        self._item_cache: dict[str, tuple[str, dict[str, Any]]] = {}
 
     def get_dataset(self, name: str) -> Dataset:
-        status, body = self._client.request("GET", f"/api/public/v2/datasets/{name}")
+        encoded_name = urllib.parse.quote(name, safe="")
+        try:
+            status, body = self._client.request(
+                "GET", f"/api/public/v2/datasets/{encoded_name}"
+            )
+        except TransportError as exc:
+            raise DatasetFetchFailedError(f"get_dataset transport failure: {exc}") from exc
         if status >= 400:
             logger.error(
                 "dataset_fetch_failed status=%s dataset=%s detail=%s",
@@ -64,17 +76,60 @@ class LangfuseAdapter:
             raise DatasetFetchFailedError(f"get_dataset failed with HTTP {status}")
         if not isinstance(body, dict):
             raise DatasetFetchFailedError("get_dataset returned an unexpected body shape")
-
-        raw_items = body.get("items", [])
-        items: list[DatasetItem] = [
-            {
-                "document_id": raw_item["input"]["document_id"],
-                "golden": raw_item["expectedOutput"],
-            }
-            for raw_item in raw_items
-        ]
+        dataset_id = body.get("id")
         schema = body.get("expectedOutputSchema")
+
+        items = self._fetch_all_dataset_items(name, encoded_name, dataset_id)
         return {"items": items, "expected_output_schema": schema}
+
+    def _fetch_all_dataset_items(
+        self, name: str, encoded_name: str, dataset_id: Any
+    ) -> list[DatasetItem]:
+        """R1 (Atchim, critical): items come from the separate, paginated
+        ``GET /api/public/dataset-items?datasetName=`` endpoint — the
+        ``GET /api/public/v2/datasets/{name}`` response carries NO ``items``
+        key on Langfuse 4.38.0 (live-probed 2026-09-19)."""
+        items: list[DatasetItem] = []
+        self._item_cache = {}
+        page = 1
+        total_pages = 1
+        while page <= total_pages:
+            path = f"/api/public/dataset-items?datasetName={encoded_name}&page={page}"
+            try:
+                status, body = self._client.request("GET", path)
+            except TransportError as exc:
+                raise DatasetFetchFailedError(
+                    f"dataset-items fetch transport failure: {exc}"
+                ) from exc
+            if status >= 400:
+                logger.error(
+                    "dataset_fetch_failed status=%s dataset=%s detail=%s",
+                    status,
+                    name,
+                    _body_snippet_for_error(body),
+                )
+                raise DatasetFetchFailedError(f"dataset-items fetch failed with HTTP {status}")
+            if not isinstance(body, dict):
+                raise DatasetFetchFailedError("dataset-items returned an unexpected body shape")
+
+            for raw_item in body.get("data", []):
+                try:
+                    item_id = raw_item["id"]
+                    document_id = raw_item["input"]["document_id"]
+                    golden = raw_item["expectedOutput"]
+                except (KeyError, TypeError) as exc:
+                    raise DatasetFetchFailedError(
+                        f"malformed dataset item (missing {exc})"
+                    ) from exc
+                items.append(
+                    {"item_id": item_id, "document_id": document_id, "golden": golden}
+                )
+                self._item_cache[item_id] = (dataset_id, golden)
+
+            meta = body.get("meta", {})
+            total_pages = meta.get("totalPages", 1) if isinstance(meta, dict) else 1
+            page += 1
+        return items
 
     def write_scores(self, run_id: str, document_id: str, scores: list[ScoreInput]) -> None:
         from idp_regression.platform.scoring import trace_id

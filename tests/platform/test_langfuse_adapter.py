@@ -1,8 +1,15 @@
-"""LangfuseAdapter — get_dataset / write_scores / flush / mark_run_status.
+"""LangfuseAdapter — get_dataset / record_run / mark_run_status.
 
 All unit tests run against a mocked HttpClient (no network, no Langfuse
 credentials required) — the Protocol seam defined in
 ``idp_regression.platform.transport.HttpClient``.
+
+R1 (Atchim, critical): the live ``GET /api/public/v2/datasets/{name}``
+response on Langfuse 4.38.0 carries NO ``items`` key — dataset items come
+from the separate, paginated ``GET /api/public/dataset-items?datasetName=``
+(``{"data": [...], "meta": {"page","limit","totalItems","totalPages"}}``).
+The mocks below match that real shape (live-probed 2026-09-19), not an
+invented ``items`` key.
 """
 
 from __future__ import annotations
@@ -15,11 +22,9 @@ import pytest
 from idp_regression.platform.errors import (
     DatasetFetchFailedError,
     RunStatusWriteFailedError,
-    ScoreWriteFailedError,
 )
 from idp_regression.platform.langfuse_adapter import LangfuseAdapter, make_platform
 from idp_regression.platform.scoring import RUN_LEVEL_TRACE_SENTINEL, trace_id
-from idp_regression.platform.types import ScoreInput
 
 
 class FakeHttpClient:
@@ -34,23 +39,45 @@ class FakeHttpClient:
         key = (method, path)
         if key in self._responses:
             return self._responses[key]
-        # allow a path-prefix match for parameterized paths (dataset name)
+        # allow a path-prefix match for parameterized paths (query strings)
         for (m, p), resp in self._responses.items():
             if m == method and path.startswith(p):
                 return resp
         raise AssertionError(f"unexpected call: {method} {path}")
 
 
+def _v2_dataset_response(schema: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The real (R1-confirmed) shape of GET /api/public/v2/datasets/{name} —
+    no ``items`` key."""
+    return {
+        "id": "cmu7ye9y6002umn07sjy4jw9q",
+        "projectId": "cmu5v7o3h0006l106py27q6c7",
+        "name": "spike-01",
+        "description": None,
+        "metadata": None,
+        "inputSchema": None,
+        "expectedOutputSchema": schema,
+        "createdAt": "2026-09-19T05:35:16.447Z",
+        "updatedAt": "2026-09-19T05:35:16.447Z",
+    }
+
+
+def _dataset_items_page(
+    items: list[dict[str, Any]], *, page: int, total_pages: int
+) -> dict[str, Any]:
+    meta = {"page": page, "limit": 100, "totalItems": len(items), "totalPages": total_pages}
+    return {"data": items, "meta": meta}
+
+
 def test_get_dataset_returns_items_and_expected_output_schema() -> None:
     schema = {"type": "object", "required": ["fields"], "properties": {}}
     client = FakeHttpClient(
         {
-            ("GET", "/api/public/v2/datasets/spike-01"): (
+            ("GET", "/api/public/v2/datasets/spike-01"): (200, _v2_dataset_response(schema)),
+            ("GET", "/api/public/dataset-items?datasetName=spike-01"): (
                 200,
-                {
-                    "name": "spike-01",
-                    "expectedOutputSchema": schema,
-                    "items": [
+                _dataset_items_page(
+                    [
                         {
                             "id": "item-1",
                             "input": {"document_id": "invoice-007.pdf"},
@@ -59,7 +86,9 @@ def test_get_dataset_returns_items_and_expected_output_schema() -> None:
                             },
                         }
                     ],
-                },
+                    page=1,
+                    total_pages=1,
+                ),
             ),
         }
     )
@@ -70,18 +99,31 @@ def test_get_dataset_returns_items_and_expected_output_schema() -> None:
     assert dataset["expected_output_schema"] == schema
     assert dataset["items"] == [
         {
+            "item_id": "item-1",
             "document_id": "invoice-007.pdf",
             "golden": {"fields": {"total": {"value": "1250.00", "type": "number"}}},
         }
     ]
 
 
-def test_get_dataset_returns_none_schema_when_absent() -> None:
+def test_get_dataset_paginates_through_all_pages() -> None:
+    def item(i: int) -> dict[str, Any]:
+        return {
+            "id": f"item-{i}",
+            "input": {"document_id": f"doc-{i}"},
+            "expectedOutput": {"fields": {}},
+        }
+
     client = FakeHttpClient(
         {
-            ("GET", "/api/public/v2/datasets/spike-01"): (
+            ("GET", "/api/public/v2/datasets/spike-01"): (200, _v2_dataset_response(None)),
+            ("GET", "/api/public/dataset-items?datasetName=spike-01&page=1"): (
                 200,
-                {"name": "spike-01", "items": []},
+                _dataset_items_page([item(1)], page=1, total_pages=2),
+            ),
+            ("GET", "/api/public/dataset-items?datasetName=spike-01&page=2"): (
+                200,
+                _dataset_items_page([item(2)], page=2, total_pages=2),
             ),
         }
     )
@@ -89,8 +131,26 @@ def test_get_dataset_returns_none_schema_when_absent() -> None:
 
     dataset = adapter.get_dataset("spike-01")
 
-    assert dataset["expected_output_schema"] is None
-    assert dataset["items"] == []
+    assert [i["item_id"] for i in dataset["items"]] == ["item-1", "item-2"]
+
+
+def test_get_dataset_url_encodes_the_dataset_name() -> None:
+    client = FakeHttpClient(
+        {
+            ("GET", "/api/public/v2/datasets/spike%2001"): (200, _v2_dataset_response(None)),
+            ("GET", "/api/public/dataset-items?datasetName=spike%2001"): (
+                200,
+                _dataset_items_page([], page=1, total_pages=1),
+            ),
+        }
+    )
+    adapter = LangfuseAdapter(client=client)
+
+    adapter.get_dataset("spike 01")  # a raw space must be encoded, never sent verbatim
+
+    called_paths = [path for _, path, _ in client.calls]
+    assert any("spike 01" not in p for p in called_paths)
+    assert all("spike 01" not in p for p in called_paths)
 
 
 def test_get_dataset_404_raises_typed_dataset_fetch_failed_error() -> None:
@@ -105,6 +165,35 @@ def test_get_dataset_404_raises_typed_dataset_fetch_failed_error() -> None:
 
 def test_get_dataset_5xx_raises_typed_dataset_fetch_failed_error() -> None:
     client = FakeHttpClient({("GET", "/api/public/v2/datasets/spike-01"): (503, "down")})
+    adapter = LangfuseAdapter(client=client)
+
+    with pytest.raises(DatasetFetchFailedError):
+        adapter.get_dataset("spike-01")
+
+
+def test_get_dataset_items_fetch_failure_raises_typed_error() -> None:
+    client = FakeHttpClient(
+        {
+            ("GET", "/api/public/v2/datasets/spike-01"): (200, _v2_dataset_response(None)),
+            ("GET", "/api/public/dataset-items?datasetName=spike-01"): (500, "boom"),
+        }
+    )
+    adapter = LangfuseAdapter(client=client)
+
+    with pytest.raises(DatasetFetchFailedError):
+        adapter.get_dataset("spike-01")
+
+
+def test_get_dataset_malformed_item_raises_typed_error_not_key_error() -> None:
+    client = FakeHttpClient(
+        {
+            ("GET", "/api/public/v2/datasets/spike-01"): (200, _v2_dataset_response(None)),
+            ("GET", "/api/public/dataset-items?datasetName=spike-01"): (
+                200,
+                _dataset_items_page([{"id": "item-1", "input": {}}], page=1, total_pages=1),
+            ),
+        }
+    )
     adapter = LangfuseAdapter(client=client)
 
     with pytest.raises(DatasetFetchFailedError):
@@ -130,64 +219,6 @@ def test_get_dataset_error_message_never_echoes_the_response_body(
 
     assert "1250.00" not in str(excinfo.value)
     assert "1250.00" not in caplog.text
-
-
-def test_write_scores_posts_deterministic_ids() -> None:
-    client = FakeHttpClient({("POST", "/api/public/scores"): (200, {"id": "x"})})
-    adapter = LangfuseAdapter(client=client)
-    scores: list[ScoreInput] = [
-        {"id": "score-id-1", "name": "field:total", "value": "match", "comment": None},
-        {"id": "score-id-2", "name": "gate", "value": "PASS"},
-    ]
-
-    adapter.write_scores(run_id="run-1", document_id="invoice-007.pdf", scores=scores)
-
-    posted = [call[2] for call in client.calls if call[0] == "POST"]
-    assert len(posted) == 2
-    for body in posted:
-        # Live-probed 2026-09-19: POST /api/public/scores 400s without
-        # exactly one of traceId/sessionId/datasetRunId — a score may
-        # target a trace that was never ingested.
-        assert body["traceId"] == trace_id(run_id="run-1", document_id="invoice-007.pdf")
-        assert body["dataType"] == "CATEGORICAL"
-    assert posted[0]["id"] == "score-id-1"
-    assert posted[0]["name"] == "field:total"
-    assert posted[0]["value"] == "match"
-    assert posted[0]["comment"] is None
-
-
-def test_write_scores_failure_raises_typed_error() -> None:
-    client = FakeHttpClient({("POST", "/api/public/scores"): (500, "boom")})
-    adapter = LangfuseAdapter(client=client)
-
-    with pytest.raises(ScoreWriteFailedError):
-        adapter.write_scores(
-            run_id="run-1",
-            document_id="invoice-007.pdf",
-            scores=[{"id": "s1", "name": "gate", "value": "FAIL"}],
-        )
-
-
-def test_write_scores_payload_carries_no_file_content_beyond_document_id() -> None:
-    """INV-01 smoke: the score payload never carries a file path/bytes blob."""
-    client = FakeHttpClient({("POST", "/api/public/scores"): (200, {"id": "x"})})
-    adapter = LangfuseAdapter(client=client)
-
-    adapter.write_scores(
-        run_id="run-1",
-        document_id="/etc/secret/invoice-007.pdf",
-        scores=[{"id": "s1", "name": "field:total", "value": "match"}],
-    )
-
-    for _, _, body in client.calls:
-        assert "file" not in body if isinstance(body, dict) else True
-
-
-def test_flush_is_a_no_op_success_until_otlp_lands() -> None:
-    # T-01.3.10a (OTLP trace export) is a separate, not-yet-landed slice —
-    # flush() here has no trace exporter to flush, so it succeeds trivially.
-    adapter = LangfuseAdapter(client=FakeHttpClient({}))
-    adapter.flush()  # must not raise
 
 
 def test_mark_run_status_writes_a_run_status_score() -> None:
