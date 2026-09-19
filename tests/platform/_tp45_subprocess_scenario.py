@@ -13,8 +13,14 @@ process-wide log watcher can observe a DIFFERENT client's export
 errors. A fresh subprocess has no such prior registration, so this
 scenario is deterministic regardless of suite/test order.
 
+DEBT-18 (user decision, option B): distinctive sentinels are planted as
+the golden field value and as the classifier's expected/actual verdict
+values, to prove empirically (not just by code inspection) that neither
+reaches a span attribute or a score payload.
+
 Usage: ``python _tp45_subprocess_scenario.py {happy|failure}``
-Prints one JSON line to stdout: ``{"error_type": str|null, "spans": [...]}``.
+Prints one JSON line to stdout:
+``{"error_type": str|null, "spans": [...], "score_bodies": [...]}``.
 """
 
 from __future__ import annotations
@@ -29,17 +35,27 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from idp_regression.platform.errors import ExperimentRecordFailedError, FlushFailedError
 from idp_regression.platform.langfuse_adapter import LangfuseAdapter
+from idp_regression.platform.scoring import build_score_inputs
 from idp_regression.platform.types import RunMetadata
 
 PATH_SENTINEL = "/IDP_DOCUMENT_DIR/invoice-007.pdf"
+GOLDEN_SENTINEL = "SENTINEL-GOLDEN-VALUE-a91cf3"
+EXPECTED_SENTINEL = "SENTINEL-EXPECTED-4f8c1e"
+ACTUAL_SENTINEL = "SENTINEL-ACTUAL-9b2d7a"
 
 
 class _RecordingHttpClient:
+    def __init__(self) -> None:
+        self.bodies: list[Any] = []
+
     def request(self, method: str, path: str, body: Any = None) -> tuple[int, Any]:
+        self.bodies.append(body)
         return 200, {"id": "x"}
 
 
-def _build_isolated_adapter(exporter: InMemorySpanExporter) -> LangfuseAdapter:
+def _build_isolated_adapter(
+    exporter: InMemorySpanExporter, http_client: _RecordingHttpClient
+) -> LangfuseAdapter:
     from langfuse import Langfuse
 
     provider = TracerProvider()
@@ -50,8 +66,11 @@ def _build_isolated_adapter(exporter: InMemorySpanExporter) -> LangfuseAdapter:
         secret_key="sk-test",
         tracer_provider=provider,
     )
-    adapter = LangfuseAdapter(client=_RecordingHttpClient(), tracing_client=sdk)  # type: ignore[arg-type]
-    adapter._item_cache = {"item-1": ("ds-1", {"fields": {}})}  # noqa: SLF001
+    adapter = LangfuseAdapter(client=http_client, tracing_client=sdk)  # type: ignore[arg-type]
+    golden = {
+        "fields": {"total": {"value": GOLDEN_SENTINEL, "type": "number", "critical": True}}
+    }
+    adapter._item_cache = {"item-1": ("ds-1", golden)}  # noqa: SLF001
     adapter._cached_dataset_name = "ds"  # noqa: SLF001
     return adapter
 
@@ -59,20 +78,36 @@ def _build_isolated_adapter(exporter: InMemorySpanExporter) -> LangfuseAdapter:
 def main() -> None:
     scenario = sys.argv[1]
     exporter = InMemorySpanExporter()
-    adapter = _build_isolated_adapter(exporter)
+    http_client = _RecordingHttpClient()
+    adapter = _build_isolated_adapter(exporter, http_client)
     metadata: RunMetadata = {"action_id": "a", "action_version": "v", "golden_version": "g"}
 
     if scenario == "happy":
+        scores = build_score_inputs(
+            golden={
+                "fields": {
+                    "total": {"value": GOLDEN_SENTINEL, "type": "number", "critical": True}
+                }
+            },
+            verdicts={
+                "total": {
+                    "verdict": "wrong_value",
+                    "expected": EXPECTED_SENTINEL,
+                    "actual": ACTUAL_SENTINEL,
+                    "confidence": 0.42,
+                    "critical": True,
+                    "type": "number",
+                }
+            },
+            gate="FAIL",
+            run_id=f"run-{scenario}",
+            document_id=PATH_SENTINEL,
+        )
         records: list[Any] = [
-            {
-                "item_id": "item-1",
-                "document_id": PATH_SENTINEL,
-                "actual": {"status": "SUCCEEDED", "fields": {"total": {"value": "100.00"}}},
-                "scores": [],
-            }
+            {"item_id": "item-1", "document_id": PATH_SENTINEL, "scores": scores}
         ]
     elif scenario == "failure":
-        records = [{"item_id": "item-1", "document_id": "doc-1", "scores": []}]  # no "actual"
+        records = [{"item_id": "item-1", "document_id": "doc-1"}]  # no "scores" -> KeyError
     else:
         raise SystemExit(f"unknown scenario: {scenario!r}")
 
@@ -89,7 +124,11 @@ def main() -> None:
         error_type = type(exc).__name__
 
     spans = [dict(span.attributes or {}) for span in exporter.get_finished_spans()]
-    print(json.dumps({"error_type": error_type, "spans": spans}))
+    print(
+        json.dumps(
+            {"error_type": error_type, "spans": spans, "score_bodies": http_client.bodies}
+        )
+    )
 
 
 if __name__ == "__main__":

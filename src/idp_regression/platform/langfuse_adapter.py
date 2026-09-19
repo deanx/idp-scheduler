@@ -212,13 +212,17 @@ class LangfuseAdapter:
         records_by_item_id = {record["item_id"]: record for record in records}
         task_failed = False
 
-        def task(*, item: ExperimentItem, **kwargs: Any) -> dict[str, Any]:
+        def task(*, item: ExperimentItem, **kwargs: Any) -> dict[str, str]:
             # A total function that cannot raise (ADR-0005 #9 defense in
             # depth): str(exception) must never reach a span attribute.
+            # DEBT-18 (user decision, option B): the output is the verdict
+            # map only (score name -> score value, e.g. "match"/"PASS") --
+            # never an extracted/expected value or a confidence number.
+            # The golden lives only in its Langfuse dataset item.
             nonlocal task_failed
             try:
                 record = records_by_item_id[item.id]
-                return {"actual": record["actual"]}
+                return {score["name"]: score["value"] for score in record["scores"]}
             except Exception:  # noqa: BLE001 - intentional total catch, no exception text kept
                 task_failed = True
                 return {"record_error": "task_failed"}
@@ -228,7 +232,10 @@ class LangfuseAdapter:
                 id=item_id,
                 dataset_id=self._item_cache[item_id][0],
                 input={"document_id": records_by_item_id[item_id]["document_id"]},
-                expected_output=self._item_cache[item_id][1],
+                # DEBT-18 option B: never copy the golden into a span --
+                # spans reference the item by id; the golden lives only in
+                # its Langfuse dataset item.
+                expected_output={},
             )
             for item_id in record_item_ids
         ]

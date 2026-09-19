@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, Protocol, TypedDict
 
-from idp_regression.classifier.types import Golden, NormalizedOutput
+from idp_regression.classifier.types import Golden
 
 RunStatus = Literal["aborted", "complete"]
 
@@ -49,11 +49,20 @@ class ScoreInput(TypedDict):
 class DocumentRecord(TypedDict):
     """One document's complete, already-gated result (ADR-0005 #9) — built
     by the orchestrator's in-process loop, with no platform write until
-    ``record_run`` is called once after the loop."""
+    ``record_run`` is called once after the loop.
+
+    DEBT-18 (user decision, option B): no extracted (actual), expected, or
+    confidence value is ever written by the adapter — the golden lives
+    only in its Langfuse dataset item, which is where it must be.
+    ``actual`` (the ``NormalizedOutput`` the classifier compared against
+    the golden) is deliberately NOT carried here: nothing on the platform
+    side reads it any more, so it's never even constructed as sensitive
+    dead weight. ``scores`` (built by ``build_score_inputs``, verdict
+    literals + no comment) is the only per-document platform-bound data.
+    """
 
     item_id: str
     document_id: str
-    actual: NormalizedOutput
     scores: list[ScoreInput]
 
 

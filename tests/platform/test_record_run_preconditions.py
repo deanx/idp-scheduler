@@ -74,7 +74,6 @@ def _record(item_id: str, document_id: str) -> DocumentRecord:
     return {
         "item_id": item_id,
         "document_id": document_id,
-        "actual": {"status": "SUCCEEDED", "fields": {}},
         "scores": [],
     }
 
@@ -152,9 +151,10 @@ def test_task_failed_raises_experiment_record_failed_and_skips_score_writes() ->
     )
     adapter._item_cache = {"item-1": ("ds-1", {"fields": {}})}  # noqa: SLF001
     adapter._cached_dataset_name = "ds"  # noqa: SLF001
-    # A record missing the required "actual" key — the task's dict
-    # lookup `record["actual"]` will KeyError, triggering task_failed.
-    malformed: Any = {"item_id": "item-1", "document_id": "doc-0", "scores": []}
+    # A record missing the required "scores" key — the task's dict
+    # comprehension over `record["scores"]` will KeyError, triggering
+    # task_failed.
+    malformed: Any = {"item_id": "item-1", "document_id": "doc-0"}
 
     with pytest.raises(ExperimentRecordFailedError, match="task caught an unexpected exception"):
         adapter.record_run(
@@ -176,7 +176,7 @@ def test_task_failed_output_is_the_fixed_constant() -> None:
     adapter = LangfuseAdapter(client=_FakeHttpClient(), tracing_client=tracing_client)
     adapter._item_cache = {"item-1": ("ds-1", {"fields": {}})}  # noqa: SLF001
     adapter._cached_dataset_name = "ds"  # noqa: SLF001
-    malformed: Any = {"item_id": "item-1", "document_id": "doc-0", "scores": []}
+    malformed: Any = {"item_id": "item-1", "document_id": "doc-0"}  # no "scores"
 
     with pytest.raises(ExperimentRecordFailedError):
         adapter.record_run(
@@ -195,21 +195,17 @@ def test_task_failed_output_is_the_fixed_constant() -> None:
 
 def test_task_catch_all_catches_more_than_just_key_error() -> None:
     """The task must catch ANY exception, not just KeyError — simulate a
-    different failure mode (a non-dict "scores" causing a TypeError
-    deeper in a hypothetical future task body) by making the records
-    lookup itself explode with a different exception type."""
+    different failure mode (a poisoned "scores" access raising a
+    RuntimeError deeper in a hypothetical future task body) by making
+    the records lookup itself explode with a different exception type."""
     tracing_client = _RunExperimentTracingClient()
     adapter = LangfuseAdapter(client=_FakeHttpClient(), tracing_client=tracing_client)
-    # item-1 is NOT in the cache used to build records_by_item_id's
-    # companion experiment_items list, but IS a valid record — force a
-    # lookup mismatch by using a record whose "actual" is an object that
-    # raises on any access attempt other than pure identity.
     adapter._item_cache = {"item-1": ("ds-1", {"fields": {}})}  # noqa: SLF001
     adapter._cached_dataset_name = "ds"  # noqa: SLF001
 
     class _ExplodesOnDictAccess(dict):  # type: ignore[type-arg]
         def __getitem__(self, key: str) -> Any:
-            if key == "actual":
+            if key == "scores":
                 raise RuntimeError("simulated non-KeyError failure")
             return super().__getitem__(key)
 

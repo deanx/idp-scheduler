@@ -207,7 +207,6 @@ def _build_record_for_item(item: Any, *, run_id: str) -> DocumentRecord:
     return {
         "item_id": item["item_id"],
         "document_id": item["document_id"],
-        "actual": {"status": "SUCCEEDED", "fields": {"total": {"value": total_value}}},
         "scores": build_score_inputs(
             golden=item["golden"],
             verdicts={
@@ -382,10 +381,6 @@ def test_record_run_writes_readable_scores_and_is_visible_in_experiments(
         {
             "item_id": item["item_id"],
             "document_id": item["document_id"],
-            "actual": {
-                "status": "SUCCEEDED",
-                "fields": {"total": {"value": item["golden"]["fields"]["total"]["value"]}},
-            },
             "scores": build_score_inputs(
                 golden=item["golden"],
                 verdicts={
@@ -455,7 +450,6 @@ def test_record_run_no_retry_and_no_op_flush_when_tracing_not_configured(
                 {
                     "item_id": dataset["items"][0]["item_id"],
                     "document_id": dataset["items"][0]["document_id"],
-                    "actual": {"status": "SUCCEEDED", "fields": {}},
                     "scores": [],
                 }
             ],

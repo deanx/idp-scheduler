@@ -5,9 +5,13 @@ read-only; score writes, the run_status marker, and record_run's
 task-output span are the write paths) must carry only ``document_id`` +
 golden-derived content — never file bytes or a file-path blob.
 
-TP-45 (Atchim R3): the span-attribute allowlist from ADR-0005 #9 —
-``input={"document_id"}``, ``expected_output`` (the stored golden),
-``output`` (``DocumentRecord.actual`` only), ``RunMetadata`` strings, item
+TP-45 / DEBT-18 (user decision, option B — no expected/actual/confidence
+value ever leaves the app): the span-attribute allowlist from ADR-0005
+#9, tightened — ``input={"document_id"}``, ``expected_output={}`` (the
+golden is NEVER copied into a span; it lives only in its Langfuse
+dataset item), ``output`` = the verdict map only (score name -> score
+value, e.g. ``"match"``/``"PASS"`` — never a raw extracted/expected
+value or a confidence number), ``RunMetadata`` strings, item
 ``metadata=None`` — asserted with a fake tracing client that records
 exactly what ``record_run`` hands to ``run_experiment``.
 """
@@ -22,10 +26,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from idp_regression.classifier.types import NormalizedOutput
 from idp_regression.platform.langfuse_adapter import LangfuseAdapter
 from idp_regression.platform.scoring import build_score_inputs
 from idp_regression.platform.tracing import ExperimentItem
+from idp_regression.platform.types import ScoreInput
 
 _FILE_PATH_LIKE = re.compile(r"(/[\w.\-]+){2,}|\.pdf\b|\.png\b|\.jpg\b")
 
@@ -108,7 +112,6 @@ def test_write_scores_payload_never_carries_a_file_path_or_bytes() -> None:
             {
                 "item_id": "item-1",
                 "document_id": "invoice-007.pdf",
-                "actual": {"status": "SUCCEEDED", "fields": {}},
                 "scores": scores,
             }
         ],
@@ -165,7 +168,6 @@ def test_experiment_item_input_contains_only_document_id() -> None:
             {
                 "item_id": "item-1",
                 "document_id": "/etc/secret/invoice-007.pdf",
-                "actual": {"status": "SUCCEEDED", "fields": {}},
                 "scores": [],
             }
         ],
@@ -178,29 +180,57 @@ def test_experiment_item_input_contains_only_document_id() -> None:
     assert item.metadata is None
 
 
-def test_experiment_task_output_is_only_the_normalized_actual_never_exception_text() -> None:
-    """output = DocumentRecord.actual only; on any task failure the
-    output is a fixed constant, never str(exception) (ADR-0005 #9
-    defense in depth)."""
+def test_experiment_item_expected_output_is_never_the_golden() -> None:
+    """DEBT-18 option B: expected_output is ALWAYS {} — the golden lives
+    only in its Langfuse dataset item, spans reference the item by id,
+    never a copy of the golden's field values."""
     client = RecordingHttpClient()
     tracing_client = RecordingTracingClient()
     adapter = LangfuseAdapter(client=client, tracing_client=tracing_client)
-    adapter._item_cache = {"item-1": ("ds-1", {"fields": {}})}  # noqa: SLF001
-    adapter._cached_dataset_name = "ds"  # noqa: SLF001
-    actual: NormalizedOutput = {
-        "status": "SUCCEEDED",
-        "fields": {"total": {"value": "1250.00", "confidence": 0.9}},
+    golden_sentinel = "SENTINEL-GOLDEN-VALUE-7f3a"
+    adapter._item_cache = {  # noqa: SLF001
+        "item-1": ("ds-1", {"fields": {"total": {"value": golden_sentinel, "type": "number"}}})
     }
+    adapter._cached_dataset_name = "ds"  # noqa: SLF001
 
     adapter.record_run(
         dataset_name="ds",
         run_name="run-1",
         run_id="run-1",
-        records=[{"item_id": "item-1", "document_id": "doc-1", "actual": actual, "scores": []}],
+        records=[{"item_id": "item-1", "document_id": "doc-1", "scores": []}],
         metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
     )
 
-    assert tracing_client.task_outputs == [{"actual": actual}]
+    item = tracing_client.run_experiment_calls[0]["data"][0]
+    assert item.expected_output == {}
+    assert golden_sentinel not in json.dumps(item.expected_output)
+
+
+def test_experiment_task_output_is_the_verdict_map_never_a_raw_value() -> None:
+    """DEBT-18 option B: output = {score_name: score_value} derived from
+    record["scores"] — score values are verdict literals ("match",
+    "wrong_value", "PASS"/"FAIL"), never a raw extracted/expected value
+    or a confidence number. On any task failure the output is the fixed
+    constant, never str(exception) (ADR-0005 #9 defense in depth)."""
+    client = RecordingHttpClient()
+    tracing_client = RecordingTracingClient()
+    adapter = LangfuseAdapter(client=client, tracing_client=tracing_client)
+    adapter._item_cache = {"item-1": ("ds-1", {"fields": {}})}  # noqa: SLF001
+    adapter._cached_dataset_name = "ds"  # noqa: SLF001
+    scores: list[ScoreInput] = [
+        {"id": "s1", "name": "field:total", "value": "wrong_value", "comment": None},
+        {"id": "s2", "name": "gate", "value": "FAIL", "comment": None},
+    ]
+
+    adapter.record_run(
+        dataset_name="ds",
+        run_name="run-1",
+        run_id="run-1",
+        records=[{"item_id": "item-1", "document_id": "doc-1", "scores": scores}],
+        metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+    )
+
+    assert tracing_client.task_outputs == [{"field:total": "wrong_value", "gate": "FAIL"}]
 
 
 def test_run_metadata_forwarded_as_experiment_metadata() -> None:
@@ -220,7 +250,6 @@ def test_run_metadata_forwarded_as_experiment_metadata() -> None:
             {
                 "item_id": "item-1",
                 "document_id": "doc-1",
-                "actual": {"status": "SUCCEEDED", "fields": {}},
                 "scores": [],
             }
         ],
@@ -251,6 +280,9 @@ def test_run_metadata_forwarded_as_experiment_metadata() -> None:
 # `_tp45_subprocess_scenario.py` is deterministic regardless of order.
 
 _PATH_SENTINEL = "/IDP_DOCUMENT_DIR/invoice-007.pdf"
+_GOLDEN_SENTINEL = "SENTINEL-GOLDEN-VALUE-a91cf3"
+_EXPECTED_SENTINEL = "SENTINEL-EXPECTED-4f8c1e"
+_ACTUAL_SENTINEL = "SENTINEL-ACTUAL-9b2d7a"
 
 # The only span-attribute keys the SDK's run_experiment is known to set
 # (live/local-probed 2026-09-19) — none of them may carry raw exception
@@ -308,13 +340,19 @@ def _run_tp45_subprocess_scenario(scenario: str) -> dict[str, Any]:
     return json.loads(last_line)  # type: ignore[no-any-return]
 
 
-def test_real_sdk_span_allowlist_and_path_sentinel_via_isolated_subprocess() -> None:
-    """R3: the full ADR-0005 #9 allowlist, asserted over EVERY attribute of
-    a REAL span from the REAL langfuse SDK + a REAL InMemorySpanExporter,
-    run in an isolated subprocess (see the module note above). A
-    path-sentinel is planted as ``document_id`` (the one place a
-    path-shaped string is allowed to appear, INV-01) and must never
-    appear anywhere else on any span."""
+def test_real_sdk_span_allowlist_and_no_golden_or_actual_sentinel_via_isolated_subprocess() -> (
+    None
+):
+    """R3 / DEBT-18 option B: the full ADR-0005 #9 allowlist, asserted
+    over EVERY attribute of a REAL span from the REAL langfuse SDK + a
+    REAL InMemorySpanExporter, run in an isolated subprocess (see the
+    module note above). A path-sentinel is planted as ``document_id``
+    (the one place a path-shaped string is allowed to appear, INV-01);
+    distinctive golden/expected/actual/confidence sentinels are planted
+    too (`_tp45_subprocess_scenario.py`'s "happy" scenario) — none of
+    the golden/expected/actual/confidence sentinels may appear ANYWHERE,
+    including inside ``langfuse.observation.input``, and NOT in any
+    score payload the adapter posted either."""
     result = _run_tp45_subprocess_scenario("happy")
 
     assert result["error_type"] == "FlushFailedError"
@@ -332,12 +370,24 @@ def test_real_sdk_span_allowlist_and_path_sentinel_via_isolated_subprocess() -> 
                 assert json.loads(text) == {"document_id": _PATH_SENTINEL}
             else:
                 assert _PATH_SENTINEL not in text, f"sentinel leaked into {key!r}: {text!r}"
+            assert _GOLDEN_SENTINEL not in text, f"golden sentinel leaked into {key!r}: {text!r}"
+            assert _EXPECTED_SENTINEL not in text, f"expected sentinel leaked into {key!r}"
+            assert _ACTUAL_SENTINEL not in text, f"actual sentinel leaked into {key!r}"
+            assert "0.42" not in text  # the confidence sentinel
             assert "Traceback" not in text
+
+    score_bodies = result["score_bodies"]
+    for body in score_bodies:
+        text = json.dumps(body)
+        assert _GOLDEN_SENTINEL not in text
+        assert _EXPECTED_SENTINEL not in text
+        assert _ACTUAL_SENTINEL not in text
+        assert "0.42" not in text
 
 
 def test_real_sdk_span_output_is_the_task_failed_constant_via_isolated_subprocess() -> None:
     """R3: exercises the REAL failure branch (a malformed record missing
-    the required "actual" key raises a genuine KeyError inside the total
+    the required "scores" key raises a genuine KeyError inside the total
     task, in an isolated subprocess) — the span's output must be the
     fixed constant, never str(KeyError(...))."""
     result = _run_tp45_subprocess_scenario("failure")
@@ -351,4 +401,4 @@ def test_real_sdk_span_output_is_the_task_failed_constant_via_isolated_subproces
         output = str(raw_output)
         assert json.loads(output) == {"record_error": "task_failed"}
         assert "KeyError" not in output
-        assert "actual" not in output  # the missing-key name never leaks either
+        assert "scores" not in output  # the missing-key name never leaks either
