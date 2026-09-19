@@ -32,3 +32,17 @@ class RunStatusWriteFailedError(PlatformError):
 class TracingNotConfiguredError(PlatformError):
     """A tracing-dependent operation (T-01.3.10a) was called without a
     configured ``tracing_client`` (OTLP/v4 SDK)."""
+
+
+class ExperimentRecordFailedError(PlatformError):
+    """``record_run`` (ADR-0005 Decision #9) failed: the ``langfuse``
+    logger recorded an ERROR (item/run-item-create failure), the task
+    itself failed (defense-in-depth path), or the post-call structural
+    check (item count / trace_id / dataset_run_id) didn't hold. Never
+    retried — see ADR-0005 #9 flow step 4."""
+
+
+class TransportError(PlatformError):
+    """The raw-REST transport failed before an HTTP status was even
+    returned (timeout, connection error) — R7. Callers map this to their
+    own typed error (``DatasetFetchFailedError``, etc.)."""
