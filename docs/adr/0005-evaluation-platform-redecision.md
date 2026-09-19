@@ -141,6 +141,85 @@ ADR-0001's STRIDE still applies: the platform API key is the only auth, TLS, BR5
    - *Interface note:* `get_dataset`'s return value carries the dataset's `expectedOutputSchema`. This is a widening of the returned value, not a new `PlatformAdapter` method. Confirmed by the spike: `GET /api/public/v2/datasets/{name}` returns `expectedOutputSchema` verbatim (SPIKE-2026-09-19 "Follow-up probes").
    - Becomes an S-01.3 (adapter exposes schema) / S-01.4 (orchestrator abort) DoD item for Dunga.
 
+9. **Experiment linkage is recorded after the run (amended 2026-09-19, Soneca; closes Atchim S-01.3 R6 and specifies the R5 fix).**
+   *Forces:* live on Langfuse 4.38.0 (`events_only`), a run shows up under the dataset's Experiments tab **only** when it was created by `Langfuse.run_experiment(data=…, task=…)` (langfuse==4.15.4). REST `dataset-run-items` plus hand-built OTel spans did not surface a run, even after 80 s. `run_experiment` runs items through `asyncio.gather(return_exceptions=True)`, so it logs and swallows task exceptions. It also logs and swallows a failed `dataset_run_items.create` (`client.py` ~L3036), calls `flush()` internally, and writes `EXPECTED_OUTPUT`, `input`, `output`, item `metadata` and `str(exception)` into span attributes. It reads items by duck typing: `id`, `dataset_id`, `input`, `expected_output` and `metadata`. `ExperimentItemResult` carries `trace_id` and `dataset_run_id`, and `run_experiment` accepts `metadata: Dict[str, str]`.
+   - **Options.**
+     - **(a) Record-after (chosen).** The orchestrator runs its own loop exactly as ADR-0004 describes. After the loop completes, it replays the precomputed results through `run_experiment` with a pure, total `task`.
+     - **(b) Orchestrator loop inside `task`, with a re-raise sentinel.** Rejected:
+       - the SDK owns iteration, so items after a failure still execute (INV-06 says no document is processed after an abort);
+       - the span holding `output` is exported before our gate and write decision (INV-08);
+       - per-document deadlines and token refresh end up inside an SDK-managed event loop.
+     - **(c) Drop Experiments-tab visibility for MVP.** Viable, but it abandons #6/F3 for the Curator and Prompt Engineer personas. It stays as the **fallback** if the (a) live test fails (see S-01.3 below).
+   - **Decision: (a).** The platform is a *recorder* invoked once, after every gate is already known. ADR-0004 containment runs unchanged in-process.
+   - **Changed flow (amends ADR-0004 Flow §5e/§6, Containment #11/#13/#15 and the "scores written incrementally" API bullet):**
+     1. Pre-run is unchanged: `get_dataset`, `empty_set`/`dataset_fetch_failed`, `schema_drift`, malformed-golden, `golden_version`.
+     2. Loop, sequentially per item: `extract` → `classify` → `overall_gate` → `build_score_inputs` → append a `DocumentRecord`. **There is no platform write inside the loop.**
+     3. On any abort inside the loop:
+        - call `mark_run_status("aborted", …)` (best-effort, DEBT-01);
+        - exit non-zero;
+        - **no experiment and no per-document scores are written.** Partial-run evidence moves to the local structured log (document_id and abort reason, INV-02-clean). This is stricter than ADR-0004 #15: nothing partial exists that someone could mistake for a baseline.
+     4. After the loop, call `platform.record_run(...)` once. If it raises:
+        - call `mark_run_status("aborted")` best-effort;
+        - exit non-zero with `FlushFailedError` → `flush_failed`, and any other platform error → `hard_failure`;
+        - **do not retry.** `run_experiment` is not idempotent per `run_name` (duplicate run items). A failed OTLP export batch has already been retried by the exporter and then dropped, so re-calling `flush()` cannot resend it. This supersedes ADR-0004 #13's "bounded flush retry".
+     5. `mark_run_status("complete", …)`, then exit from the **in-process** gates (INV-08 holds trivially because no write precedes any gate).
+     - The record phase sits outside the per-document poll budget (ADR-0004 #3). It is bounded by the OTel `force_flush` timeout (30 s default) plus the REST transport timeout (R7).
+   - **Interface (`platform/types.py`, the `PlatformAdapter` Protocol):**
+     ```python
+     class DatasetItem(TypedDict):
+         item_id: str            # NEW: opaque platform item id, kept from get_dataset
+         document_id: str
+         golden: Golden
+
+     class DocumentRecord(TypedDict):
+         item_id: str
+         document_id: str
+         actual: NormalizedOutput          # CT-01 shape only
+         scores: list[ScoreInput]          # built after the gate (INV-08)
+
+     class RunMetadata(TypedDict):
+         action_id: str
+         action_version: str
+         golden_version: str
+
+     class PlatformAdapter(Protocol):
+         def get_dataset(self, name: str) -> Dataset: ...
+         def record_run(self, *, dataset_name: str, run_name: str, run_id: str,
+                        records: list[DocumentRecord], metadata: RunMetadata) -> None:
+             """Record a complete run: an experiment visible in the Experiments tab,
+             plus per-document scores on each item's trace. Raises
+             ExperimentRecordFailedError | ScoreWriteFailedError | FlushFailedError."""
+         def mark_run_status(...) -> None: ...   # unchanged
+     ```
+     - `write_scores`, `flush` and `run_dataset_experiment` **leave the Protocol**. They become private adapter internals (`_write_scores(trace_id, scores)`, and the watcher inside `record_run`).
+     - No SDK type crosses the Protocol, so N24 holds.
+   - **Item mapping (INV-04: no second fetch).**
+     - `get_dataset` fetches the schema via `GET /v2/datasets/{name}` and the items via paginated `GET /api/public/dataset-items?datasetName=` (R1). It keeps a private `item_id → (dataset_id, expectedOutput)` map from that same response.
+     - `record_run` builds adapter-private frozen `_ExperimentItem(id, dataset_id, input={"document_id": …}, expected_output=<stored golden>, metadata=None)` duck-typed objects. It does not construct `DatasetItemClient` objects and does not re-fetch.
+     - Precondition, checked before any SDK call: the `records` item_ids equal the fetched item_ids exactly (same set, no duplicates). Otherwise `record_run` raises `ExperimentRecordFailedError`.
+   - **Span-attribute allowlist (INV-01/INV-02).** Spans may contain only:
+     - `input = {"document_id"}`;
+     - `expected_output` = the golden already stored in Langfuse;
+     - `output = DocumentRecord.actual` (the normalized actual, CT-01; never the raw IDP body, a path or file bytes);
+     - trace metadata = the three `RunMetadata` strings;
+     - item metadata = `None`.
+
+     The `task` is a total dictionary lookup that cannot raise. As defense in depth, it catches everything, returns the constant `{"record_error": "task_failed"}` (no exception text), and sets a flag that makes `record_run` raise. As a result, `str(exception)` never reaches a span.
+   - **Failure detection (R5).**
+     - **Log watch.** One watcher is installed for the **whole** `run_experiment` call plus a trailing explicit `flush()`. It sits on `opentelemetry.exporter.otlp.proto.http.trace_exporter` and on `langfuse`, at ERROR. Handlers are process-wide, so this covers (a) the internal flush and (b) batches exported by the background thread. An exporter ERROR raises `FlushFailedError`; a `langfuse` ERROR (item failure, run-item create failure, case c) raises `ExperimentRecordFailedError`. The watcher records only the logger name and level, never the message, because messages may carry API error bodies.
+     - **Structural check (positive, in-band).** `len(item_results) == len(records)`, every `trace_id` is set, and every `dataset_run_id` is non-null and identical. Any miss raises `ExperimentRecordFailedError`.
+     - **Scores.** Written only after both checks pass, per record, against that item's returned `trace_id`, with the deterministic `score_id` (#5, unchanged). A score write is retried within the transport budget because it is idempotent.
+   - **Fallback.** If the S-01.3 live test shows `run_experiment` does not return usable `trace_id`/`dataset_run_id` on 4.38.0, fall back to (c): scores go on deterministic `trace_id()` values, experiment linkage is deferred to Epic E, and Soneca is told. Do not improvise a third path.
+   - **Split:**
+     - **S-01.3 (Dengoso, now):** `types.py` Protocol + TypedDicts; `get_dataset` (R1, item_id + private map); `record_run` (precondition, private items, total task, watcher, structural check, scores on returned trace ids, `metadata=RunMetadata`); new `ExperimentRecordFailedError`; remove the public `run_dataset_experiment`/`flush`/`write_scores` from the Protocol. Tests:
+       - TP-45: in-memory span exporter asserting the allowlist above, and that no `IDP_DOCUMENT_DIR`/path sentinel appears in any attribute;
+       - R5 unit tests: exporter ERROR raised from a background thread mid-run; `langfuse` ERROR; missing `dataset_run_id`; short `item_results`;
+       - live opt-in: 2 synthetic items → the run is visible in `GET /api/public/experiments` (bounded poll), and scores are readable on the returned trace ids.
+
+       R2/R3/R4/R7 remain his.
+     - **S-01.4 (orchestrator):** in-loop `DocumentRecord` accumulation; a single `record_run` after the loop; the abort path writes only the marker; the error → abort-reason mapping above; no flush retry. Tests: INV-06 (no `record_run` call after any abort), INV-08 (every gate computed before `record_run`), and INV-04 (`RunMetadata` passed on every zero-exit run).
+   - **Accepted coupling:** duck-typed items and `ExperimentItemResult` fields depend on langfuse==4.15.4 internals (DEBT-17). The pinned version and the live test are the guard.
+
 ### MVP Curator interim (until Epic E)
 Golden edits in MVP are low-volume. The Curator edits JSON in the Langfuse UI. Guard-rails:
 - The server-side schema, which blocks invalid saves.
@@ -198,3 +277,5 @@ The part of this decision most likely to be revisited is **not** the platform. I
 Atchim review: **APPROVED (R1–R4 closed, re-checked 2026-09-19)**. Original verdict: APPROVE WITH NOTES (top-level gate, 2026-09-19). Decision A approved; 4 Required amendments (R1 integrity-claim scope, R2 run-start schema-drift check, R3 F1 resolved + Ajv strict authoring rules as contract, R4 F10 resolution) must land before S-01.3 schema provisioning (T-01.3.0 / F2), not before Dunga re-scopes.
 
 Amendments applied (Soneca, 2026-09-19): R1 integrity claim narrowed to `fields` (§Threat model, Option A, Decision, Consequences); R2 run-start schema-drift abort (Decision #8); R3 F1 resolved, Ajv strict authoring rules as contract CT-05; R4 F10 resolved (ADR-0002 amendment). Suggestions folded: `answer` shape, duplicate-key collapse, pattern limits, pinned `NAMESPACE`, SPEC-01 idempotency wording (F3), project-roles assumption (to confirm, Mestre). Atchim confirmation: APPROVED (R1–R4 closed, re-checked 2026-09-19).
+
+Amendment 2026-09-19 (Soneca): Decision #9 added (record-after experiment linkage; `PlatformAdapter.record_run`), in answer to Atchim S-01.3 R6 and specifying the R5 fix. Pending Atchim confirmation.

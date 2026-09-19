@@ -5,6 +5,8 @@
 **Context (use case):** UC-01 (Run a baseline regression over a golden set)
 **Risk:** High — the orchestrator owns the failure-containment contract (ASM-02: abort the entire run on timeout or hard IDP failure). A wrong containment decision makes the CI gate silently pass on a broken run — a Definition-of-Done concern. **Atchim review: APPROVED (top-level gate, 2026-09-18 — opus; reviewer-independent, all five axes PASS).**
 
+> **Amended 2026-09-19 by ADR-0005 Decision #9 (record-after).** No platform write happens inside the per-document loop. Scores, the experiment and the flush all happen in a single `platform.record_run(...)` call after the loop. On abort, only the `run_status=aborted` marker is written; no partial scores. The bounded flush retry in #13 is dropped (a flush that failed cannot be re-sent). Flow §5e/§6, #11, #13, #15 and the "scores written incrementally" API bullet are to be read through Decision #9.
+
 ## Context
 
 The orchestrator is the top-level component: it reads env via `load_dotenv()`, iterates the golden set, calls the IDP adapter (ADR-0002), classifies (ADR-0003), writes scores + gate to the platform (ADR-0001), records action version + golden version, and exits with a code that becomes the CI gate (F18).
