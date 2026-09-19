@@ -12,6 +12,12 @@ Format:
 
 ## Handoffs (newest first)
 
+### HANDOFF Zangado → (top-level)  (2026-09-19, /qa S-01.2 re-check)
+- Done: re-check of the fix round → docs/qa/QA-01-baseline-regression-S-01.2.md (re-check section), ✅ Pass. 459 unit passed. Live: 472 passed on 50 of 52 full-suite runs. mypy, ruff, pip-audit and the grep secret scan are clean. CT-01, INV-02 and INV-07 are green. check_clean exit 0. No document was submitted to the live IDP.
+- Contract: S-01.2 is Done. F-1 is closed (REG-06): I re-probed nan, inf, negative, 0, non-numeric, 1e400 and above-cap values, and all raise typed errors. F-2 is closed (REG-07): no-redirect opener, with the two-server test. F-3 is closed (ADR-0002:82). F-5 is closed and routed to DEBT-21. Containment remains with S-01.4 /harden, and the real CT-01 fixture with S-01.6.
+- Open: F-4 is docs only. The stamp says all the deliberate type: ignore are in test_idp_client.py, but test_transport.py:364,442,452 has three more; fix it at the next re-stamp. F-6 is a new Minor: the live test_tp37_same_run_name_different_run_ids_finding flaked 2 times in 52 full-suite runs and 0 in 15 isolated runs; it is S-01.3 scope, S-01.2 didn't touch platform/, and there is no traceback yet. Nit: the stale comment at test_normalize_contract.py:94-96. DEBT-26 is the platform redirect.
+- Next: Dunga marks S-01.2 Done in docs/state and cards F-6 against S-01.3/DEBT-19. Rule on F-6's regression-worthiness once its root cause is known. Branca's HARDEN-01 keeps F-1, F-2, DEBT-21 and DEBT-24 in scope.
+
 ### HANDOFF Zangado → (top-level)  (2026-09-19, /qa S-01.2)
 - Done: DoD audit of S-01.2 → docs/qa/QA-01-baseline-regression-S-01.2.md, ⚠️ Pass with follow-ups. Unit: 387 passed. Live: 400 passed, 1 skip (submit/poll pending S-01.6; nothing submitted to the live IDP). mypy, ruff and pip-audit are clean, and the grep secret scan is clean. CT-01 (incl. classifier parity and the real classify() call), INV-02 and INV-07 are green. check_clean exit 0.
 - Contract: every DoD line is met or deferred as the SPEC allows. Containment goes to S-01.4 /harden (epic-scoped), and the real CT-01 fixture to S-01.6 (DEBT-22). N21 ✅ PASS. N1's S-01.2 leg passes (the row stays PENDING for S-01.4). Observability ✅ VERIFIED at S-01.2 scope; the timing line has no document_id, so S-01.4 must correlate it and log elapsed time on abort.

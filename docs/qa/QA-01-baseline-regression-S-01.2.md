@@ -1,6 +1,7 @@
 # QA-01 (S-01.2): audit of SPEC-01 / Story S-01.2, the IDP adapter + normalize() (Epic A)
 
-**Verdict:** ⚠️ Pass with follow-ups. No Critical findings. One Major (F-1) and four Minor (F-2..F-5).
+**Verdict (re-check 2026-09-19, current):** ✅ Pass. S-01.2 is **Done**. See the re-check section at the end.
+**Verdict (initial audit, superseded):** ⚠️ Pass with follow-ups. No Critical findings. One Major (F-1) and four Minor (F-2..F-5).
 **Rigor:** standard (CLAUDE.md ## Rigor). SPEC Risk: high.
 **Author:** alex@divinocosta.com.br (solo mode). Auditor: Zangado.
 **Date:** 2026-09-19. **Branch:** feat/S-01.2-idp-adapter @ d44797f.
@@ -140,3 +141,46 @@ Under standard rigor, S-01.2 **is Done-eligible**. Every DoD line is met or legi
 - Live/CT-01-real deferral: covered by the DoR and T-01.2.6.
 
 F-1 is the one to fix now, not later: it's a five-line fix sitting in the Containment path Branca is about to red-team.
+
+## Re-check after the fix round (2026-09-19, Zangado)
+
+**Verdict:** ✅ Pass. **S-01.2 is Done.** F-1, F-2, F-3 and F-5 are closed. F-4 has a docs-only residual. F-6 is new: a live flake in S-01.3's test file, not caused by S-01.2.
+
+### Entry gates
+- Stamp: ✅ PASSED. Source `/test gap-fill (Atchim TDD gate)`. Commit 2ae8617. 68918f2 is the stamp's docs commit. PASS.
+- Rigor: the spec is Risk high and the stamp is /test-sourced. PASS.
+- Freshness: `git log 2ae8617..HEAD -- src tests` returns nothing. PASS.
+- Branch: feat/S-01.2-idp-adapter @ 68918f2.
+
+### Re-verification
+- Unit: **459 passed, 14 skipped**, all of them env-gated integration skips.
+- Live: `RUN_INTEGRATION_TESTS=1`, **472 passed, 1 skipped** on 50 of 52 full-suite runs. The skip is IDP submit/poll pending S-01.6, and no document was submitted to the live IDP. The other 2 runs had one failure each: see F-6.
+- mypy: 57 files clean. ruff: clean. No deleted files since d44797f, and no new skips or xfails.
+- pip-audit: no known vulnerabilities.
+- Secret grep fallback over src/, tests/ and pyproject.toml, plus the real `.env` values checked against the repo: 0 hits. gitleaks is still absent (DEBT-12).
+- CT-01, CT-02 and the module-boundary tests: 29 passed.
+- INV-07: the monotonic tests are green. INV-02 and compliance: redirect, secret, redaction and "never appear" tests all pass (87 selected). The adapter still has exactly three log calls, all `%s` + `sanitize_for_log`.
+- Config error messages are static. The only echo is the parameter name, never a secret or an extracted value.
+- `check_clean.py`: exit 0.
+
+### Per-finding status
+- **F-1: CLOSED (REG-06).** `_validate_timing` (idp_client.py) plus the typed `IDPConfigurationError`.
+  - My original probe now fails closed: nan, inf and -5 are rejected when the adapter is built.
+  - Per env var (submit timeout, execution timeout, refresh margin), each of these gets a typed error: nan, inf, -1, `banana`, 1e400 and 3601. So does 0, except for the margin, where 0 is allowed.
+  - Passing `10**400` directly raises a typed error. Its `__context__` holds only the float-conversion `OverflowError`, which carries no secret.
+  - Cap-boundary tests are present.
+- **F-2: CLOSED (REG-07).** transport.py uses a `_NoRedirectHandler` opener, and nothing in the adapter calls `urllib.request.urlopen` anymore.
+  - A 3xx closes the response and raises a typed error through the deferred raise.
+  - test_transport.py:419 uses two real local servers and asserts that the Bearer token never reaches the target, and never appears in the message, `__cause__` or `__context__`.
+  - The platform sibling is tracked as DEBT-26 (S-01.3).
+- **F-3: CLOSED.** ADR-0002:82 has the typing amendment. Residual nit, no card: the comment at test_normalize_contract.py:94-96 still says "the adapter's is always-present".
+- **F-4: OPEN (Minor, docs only).** The stamp now admits the ignores but says they are all "15 deliberate ones in tests/adapter/test_idp_client.py". That count is right for that file, but the F-2 fix added three more in tests/adapter/test_transport.py:364,442,452. Fix the stamp text at the next re-stamp. It doesn't block Done.
+- **F-5: CLOSED (routed).** Appended to DEBT-21. Atchim ruled SKIP on a regression pin because it only changes a label.
+
+### New finding
+- **F-6 (Minor, S-01.3 scope): the live test `tests/platform/test_integration_langfuse.py::test_tp37_same_run_name_different_run_ids_finding` is flaky.**
+  - It failed 2 times in 52 full-suite runs with `RUN_INTEGRATION_TESTS=1`, and 0 times in 15 isolated runs.
+  - The failing runs finished in normal time (about 19 s), so the failure isn't the 30 s bounded poll running out. The likely suspects are the `record_run` structural check on the same-run_name merge (DEBT-19) or cross-test interference in the full suite. No traceback was captured: the loop reproductions all passed.
+  - S-01.2 didn't touch `platform/` or `tests/platform/` (the `git diff 8306d61..HEAD` stat for those paths is empty), so this isn't a fix-round regression.
+  - Fix: Dunga cards it against S-01.3 / DEBT-19. Reproduce it with `--tb=long` in a loop, find the failing assertion or exception, and either deflake it or fix `record_run`.
+  - Defect tag: `escaped-atchim: yes`. The test was deflaked in an Atchim round and still flakes.
