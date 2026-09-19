@@ -17,6 +17,10 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from typing import Literal
+
+from idp_regression.classifier.types import Golden
+from idp_regression.platform.types import ScoreInput
 
 # Pinned committed constant (ADR-0005 #5). NEVER regenerate or change this
 # value — doing so would silently change every score id already written.
@@ -38,3 +42,70 @@ def prompt_score_name(prompt_key: str) -> str:
 def field_score_name(field_name: str) -> str:
     """``field:<name>`` — the stable score-key contract (BR11, INV-03)."""
     return f"field:{field_name}"
+
+
+def build_score_inputs(
+    *,
+    golden: Golden,
+    verdicts: object,
+    gate: Literal["PASS", "FAIL"],
+    run_id: str,
+    document_id: str,
+) -> list[ScoreInput]:
+    """CT-03: one ``field:<name>`` per golden field, one ``prompt:<16-hex>``
+    per golden prompt, and exactly one ``gate`` per document (NFR N9 — no
+    unbounded score write). Table-block verdicts are not individually
+    scored under this contract (documented limitation, see DEBT.md).
+    """
+    verdict_map = verdicts if isinstance(verdicts, dict) else {}
+    scores: list[ScoreInput] = []
+
+    for field_name in golden.get("fields", {}):
+        verdict = verdict_map.get(field_name)
+        name = field_score_name(field_name)
+        scores.append(
+            {
+                "id": score_id(run_id=run_id, document_id=document_id, score_name=name),
+                "name": name,
+                "value": _verdict_value(verdict),
+                "comment": _verdict_comment(verdict),
+            }
+        )
+
+    for prompt_key in golden.get("prompts", {}):
+        verdict = verdict_map.get(prompt_key)
+        name = prompt_score_name(prompt_key)
+        scores.append(
+            {
+                "id": score_id(run_id=run_id, document_id=document_id, score_name=name),
+                "name": name,
+                "value": _verdict_value(verdict),
+                "comment": _verdict_comment(verdict),
+            }
+        )
+
+    scores.append(
+        {
+            "id": score_id(run_id=run_id, document_id=document_id, score_name="gate"),
+            "name": "gate",
+            "value": gate,
+            "comment": None,
+        }
+    )
+    return scores
+
+
+def _verdict_value(verdict: object) -> str:
+    if isinstance(verdict, dict) and "verdict" in verdict:
+        value = verdict["verdict"]
+        return str(value)
+    return "missing"
+
+
+def _verdict_comment(verdict: object) -> str | None:
+    if not isinstance(verdict, dict):
+        return None
+    expected = verdict.get("expected")
+    actual = verdict.get("actual")
+    confidence = verdict.get("confidence")
+    return f"expected={expected!r} actual={actual!r} confidence={confidence!r}"
