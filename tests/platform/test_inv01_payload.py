@@ -15,17 +15,17 @@ exactly what ``record_run`` hands to ``run_experiment``.
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any
 
-import pytest
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-
 from idp_regression.classifier.types import NormalizedOutput
-from idp_regression.platform.errors import ExperimentRecordFailedError
 from idp_regression.platform.langfuse_adapter import LangfuseAdapter
 from idp_regression.platform.scoring import build_score_inputs
-from idp_regression.platform.tracing import ExperimentItem, ExperimentRunner
+from idp_regression.platform.tracing import ExperimentItem
 
 _FILE_PATH_LIKE = re.compile(r"(/[\w.\-]+){2,}|\.pdf\b|\.png\b|\.jpg\b")
 
@@ -235,14 +235,20 @@ def test_run_metadata_forwarded_as_experiment_metadata() -> None:
     }
 
 
-# --- TP-45 (Atchim R3, re-review): the REAL langfuse SDK + a REAL OTel
-# InMemorySpanExporter (Langfuse's own `span_exporter=` constructor param),
-# no fake client. Points at an unreachable host so no live credentials or
-# network are needed — record_run always raises ExperimentRecordFailedError
-# here (the dataset-run-item REST call fails, logged on the `langfuse`
-# logger, R5c), but the OTel spans are recorded locally regardless of that
-# network outcome (empirically confirmed 2026-09-19), so we inspect them
-# from the `pytest.raises` block.
+# --- TP-45 (Atchim R3, round 3): a SUBPROCESS running the REAL langfuse
+# SDK + a REAL OTel InMemorySpanExporter — no fake client, and no
+# reliance on process-shared OTel global state. OTel registers its
+# TracerProvider process-globally on first use, and (confirmed
+# empirically 2026-09-19) the langfuse SDK's run_experiment
+# task-execution path resolves its tracer through that global
+# registration rather than strictly through the `tracer_provider=`
+# instance passed to a given client — so even an explicit, private
+# TracerProvider is NOT sufficient once earlier tests in the SAME
+# process have already claimed the global slot (this test flipped
+# between getting 0 spans / a different client's export errors
+# depending on suite/test order before this fix). A fresh subprocess
+# has no such prior registration, so the scenario script in
+# `_tp45_subprocess_scenario.py` is deterministic regardless of order.
 
 _PATH_SENTINEL = "/IDP_DOCUMENT_DIR/invoice-007.pdf"
 
@@ -278,72 +284,43 @@ _KNOWN_SPAN_ATTRIBUTE_KEYS = {
 }
 
 
-def _real_tracing_client_with_unreachable_host(exporter: InMemorySpanExporter) -> ExperimentRunner:
-    from langfuse import Langfuse
-
-    client = Langfuse(
-        host="http://localhost:1",
-        public_key="pk-test",
-        secret_key="sk-test",
-        span_exporter=exporter,
+def _run_tp45_subprocess_scenario(scenario: str) -> dict[str, Any]:
+    script = Path(__file__).parent / "_tp45_subprocess_scenario.py"
+    # Strip LANGFUSE_* env vars: with them set, the SDK's OTLP exporter
+    # target gets redirected to the real host regardless of the explicit
+    # `host=` constructor arg (confirmed empirically) — stripping them
+    # makes the subprocess deterministically hit the unreachable
+    # "http://localhost:1" host instead.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LANGFUSE_")}
+    result = subprocess.run(
+        [sys.executable, str(script), scenario],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+        check=False,
     )
-    return client  # type: ignore[return-value]  # duck-typed against ExperimentRunner
-
-
-@pytest.fixture
-def real_sdk_adapter_and_exporter() -> tuple[LangfuseAdapter, InMemorySpanExporter]:
-    """One shared Langfuse SDK client (+ exporter) for both scenarios in
-    this section — OTel only honours the FIRST TracerProvider registered
-    per process, so a second ``Langfuse(span_exporter=...)`` instance
-    silently doesn't get its own exporter wired up (confirmed empirically
-    2026-09-19). Both tests below must reuse the same client."""
-    exporter = InMemorySpanExporter()
-    adapter = LangfuseAdapter(
-        client=RecordingHttpClient(),
-        tracing_client=_real_tracing_client_with_unreachable_host(exporter),
+    assert result.returncode == 0, (
+        f"subprocess scenario {scenario!r} failed: "
+        f"stdout={result.stdout!r} stderr={result.stderr[-2000:]!r}"
     )
-    return adapter, exporter
+    last_line = result.stdout.strip().splitlines()[-1]
+    return json.loads(last_line)  # type: ignore[no-any-return]
 
 
-def test_real_sdk_spans_allowlist_path_sentinel_and_task_failed_constant(
-    real_sdk_adapter_and_exporter: tuple[LangfuseAdapter, InMemorySpanExporter],
-) -> None:
+def test_real_sdk_span_allowlist_and_path_sentinel_via_isolated_subprocess() -> None:
     """R3: the full ADR-0005 #9 allowlist, asserted over EVERY attribute of
-    a REAL span from the REAL langfuse SDK + a REAL InMemorySpanExporter
-    (Langfuse's own ``span_exporter=`` constructor param) — no fake
-    tracing client. A path-sentinel is planted as ``document_id`` (the
-    one place a path-shaped string is allowed to appear, INV-01) and must
-    never appear anywhere else on any span. A second call with a
-    malformed record (missing the required ``actual`` key) exercises the
-    REAL failure branch inside the total task and asserts the span's
-    output is the fixed constant, never ``str(KeyError(...))``.
-    """
-    adapter, exporter = real_sdk_adapter_and_exporter
-    adapter._item_cache = {"item-1": ("ds-1", {"fields": {}})}  # noqa: SLF001
-    adapter._cached_dataset_name = "ds"  # noqa: SLF001
-    actual: NormalizedOutput = {"status": "SUCCEEDED", "fields": {"total": {"value": "100.00"}}}
+    a REAL span from the REAL langfuse SDK + a REAL InMemorySpanExporter,
+    run in an isolated subprocess (see the module note above). A
+    path-sentinel is planted as ``document_id`` (the one place a
+    path-shaped string is allowed to appear, INV-01) and must never
+    appear anywhere else on any span."""
+    result = _run_tp45_subprocess_scenario("happy")
 
-    # --- scenario 1: happy path + path sentinel -----------------------
-    with pytest.raises(ExperimentRecordFailedError):
-        adapter.record_run(
-            dataset_name="ds",
-            run_name="test-s013-run-1",
-            run_id="run-1",
-            records=[
-                {
-                    "item_id": "item-1",
-                    "document_id": _PATH_SENTINEL,
-                    "actual": actual,
-                    "scores": [],
-                }
-            ],
-            metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
-        )
-
-    spans = exporter.get_finished_spans()
+    assert result["error_type"] == "FlushFailedError"
+    spans = result["spans"]
     assert len(spans) > 0
-    for span in spans:
-        attributes = dict(span.attributes or {})
+    for attributes in spans:
         assert set(attributes.keys()) <= _KNOWN_SPAN_ATTRIBUTE_KEYS, (
             f"unexpected span attribute key(s): "
             f"{set(attributes.keys()) - _KNOWN_SPAN_ATTRIBUTE_KEYS}"
@@ -357,23 +334,19 @@ def test_real_sdk_spans_allowlist_path_sentinel_and_task_failed_constant(
                 assert _PATH_SENTINEL not in text, f"sentinel leaked into {key!r}: {text!r}"
             assert "Traceback" not in text
 
-    # --- scenario 2: the real failure branch, never exception text ----
-    exporter.clear()
-    malformed_record: Any = {"item_id": "item-1", "document_id": "doc-1", "scores": []}
 
-    with pytest.raises(ExperimentRecordFailedError):
-        adapter.record_run(
-            dataset_name="ds",
-            run_name="test-s013-run-2",
-            run_id="run-2",
-            records=[malformed_record],
-            metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
-        )
+def test_real_sdk_span_output_is_the_task_failed_constant_via_isolated_subprocess() -> None:
+    """R3: exercises the REAL failure branch (a malformed record missing
+    the required "actual" key raises a genuine KeyError inside the total
+    task, in an isolated subprocess) — the span's output must be the
+    fixed constant, never str(KeyError(...))."""
+    result = _run_tp45_subprocess_scenario("failure")
 
-    failure_spans = exporter.get_finished_spans()
-    assert len(failure_spans) > 0
-    for span in failure_spans:
-        raw_output = (span.attributes or {}).get("langfuse.observation.output")
+    assert result["error_type"] == "FlushFailedError"
+    spans = result["spans"]
+    assert len(spans) > 0
+    for attributes in spans:
+        raw_output = attributes.get("langfuse.observation.output")
         assert raw_output is not None
         output = str(raw_output)
         assert json.loads(output) == {"record_error": "task_failed"}
