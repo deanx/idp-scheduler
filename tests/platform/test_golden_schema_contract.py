@@ -149,5 +149,128 @@ def test_rejects_a_201_char_prompt_key(schema: dict[str, Any]) -> None:
 
 
 def test_accepts_a_200_char_prompt_key(schema: dict[str, Any]) -> None:
-    ok = {"fields": {}, "prompts": {"x" * 200: {"answer": "x"}}}
+    ok = {
+        "fields": {"total": {"value": "1.00", "type": "number", "critical": True}},
+        "prompts": {"x" * 200: {"answer": "x"}},
+    }
+    jsonschema.validate(ok, schema)  # must not raise
+
+
+# --- Schema review C1-C3 (Soneca, 2026-09-19; closes QA-01-S-01.3 F-1) --
+
+
+def test_rejects_a_field_name_with_a_disallowed_character(schema: dict[str, Any]) -> None:
+    bad = {"fields": {"a:b": {"value": "1", "type": "text", "critical": True}}}
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(bad, schema)
+
+
+def test_rejects_a_129_char_field_name(schema: dict[str, Any]) -> None:
+    bad = {"fields": {"a" * 129: {"value": "1", "type": "text", "critical": True}}}
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(bad, schema)
+
+
+def test_accepts_a_128_char_field_name(schema: dict[str, Any]) -> None:
+    ok = {"fields": {"a" * 128: {"value": "1", "type": "text", "critical": True}}}
+    jsonschema.validate(ok, schema)  # must not raise
+
+
+def test_rejects_a_table_name_with_a_disallowed_character(schema: dict[str, Any]) -> None:
+    bad = {
+        "fields": {"total": {"value": "1.00", "type": "number", "critical": True}},
+        "tables": {
+            "x\ntable": {
+                "match_key": "description",
+                "critical": True,
+                "rows": [{"description": "Widget A"}],
+            }
+        },
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(bad, schema)
+
+
+def test_rejects_a_129_char_table_name(schema: dict[str, Any]) -> None:
+    bad = {
+        "fields": {"total": {"value": "1.00", "type": "number", "critical": True}},
+        "tables": {
+            "t" * 129: {
+                "match_key": "description",
+                "critical": True,
+                "rows": [{"description": "Widget A"}],
+            }
+        },
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(bad, schema)
+
+
+def test_rejects_an_unknown_key_in_a_field_entry(schema: dict[str, Any]) -> None:
+    """A typo like 'critcal' must be rejected, not silently accepted with
+    'critical' defaulting to false (a false PASS on a critical field)."""
+    bad = {"fields": {"total": {"value": "1.00", "type": "number", "critcal": True}}}
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(bad, schema)
+
+
+def test_rejects_an_unknown_key_in_a_table_entry(schema: dict[str, Any]) -> None:
+    bad = {
+        "fields": {"total": {"value": "1.00", "type": "number", "critical": True}},
+        "tables": {
+            "line_items": {
+                "match_key": "description",
+                "critcal": True,
+                "rows": [{"description": "Widget A"}],
+            }
+        },
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(bad, schema)
+
+
+def test_rejects_an_unknown_key_in_a_prompt_entry(schema: dict[str, Any]) -> None:
+    bad = {
+        "fields": {"total": {"value": "1.00", "type": "number", "critical": True}},
+        "prompts": {"What is the vendor name?": {"answer": "Acme Corp", "critcal": False}},
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(bad, schema)
+
+
+def test_rejects_empty_fields(schema: dict[str, Any]) -> None:
+    bad: dict[str, Any] = {"fields": {}}
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(bad, schema)
+
+
+def test_rejects_an_empty_match_key(schema: dict[str, Any]) -> None:
+    bad = {
+        "fields": {"total": {"value": "1.00", "type": "number", "critical": True}},
+        "tables": {
+            "line_items": {
+                "match_key": "",
+                "critical": True,
+                "rows": [{"description": "Widget A"}],
+            }
+        },
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(bad, schema)
+
+
+def test_rows_items_remain_open_to_arbitrary_columns(schema: dict[str, Any]) -> None:
+    """C2 leaves 'rows' items open (they are dynamic column maps, not a
+    fixed entry shape) -- only the field/table/prompt entry objects get
+    additionalProperties: false."""
+    ok = {
+        "fields": {"total": {"value": "1.00", "type": "number", "critical": True}},
+        "tables": {
+            "line_items": {
+                "match_key": "description",
+                "critical": True,
+                "rows": [{"description": "Widget A", "qty": "1", "any_other_column": "x"}],
+            }
+        },
+    }
     jsonschema.validate(ok, schema)  # must not raise

@@ -8,9 +8,12 @@
     "document_id": { "type": "string" },
     "fields": {
       "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" },
       "additionalProperties": {
         "type": "object",
         "required": ["value", "type"],
+        "additionalProperties": false,
         "properties": {
           "value": { "type": "string" },
           "type": { "type": "string", "enum": ["number", "date", "id", "text"] },
@@ -66,11 +69,13 @@
     },
     "tables": {
       "type": "object",
+      "propertyNames": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$" },
       "additionalProperties": {
         "type": "object",
         "required": ["match_key", "rows"],
+        "additionalProperties": false,
         "properties": {
-          "match_key": { "type": "string" },
+          "match_key": { "type": "string", "minLength": 1 },
           "critical": { "type": "boolean" },
           "rows": {
             "type": "array",
@@ -88,6 +93,7 @@
       "additionalProperties": {
         "type": "object",
         "required": ["answer"],
+        "additionalProperties": false,
         "properties": {
           "answer": { "type": "string" },
           "critical": { "type": "boolean" }
