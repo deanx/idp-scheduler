@@ -102,3 +102,22 @@ def test_provision_raises_typed_error_on_failure_without_retrying_a_drop() -> No
     # exactly one call was made — a failed provisioning attempt never
     # falls back to a second call with an empty/null schema.
     assert len(client.calls) == 1
+
+
+def test_provision_error_log_survives_a_newline_in_dataset_name(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """N5 sibling (/test Scenario B follow-up): schema_provisioning_failed
+    logs dataset_name -- caller-controlled. Same fix (sanitize_for_log)."""
+    import logging
+
+    caplog.set_level(logging.ERROR)
+    malicious_name = 'ds\ninjected fake log line status=200'
+    client = RecordingHttpClient(status=400, response={"message": "rejected"})
+
+    with pytest.raises(PlatformError):
+        provision_golden_schema(client, dataset_name=malicious_name)
+
+    for record in caplog.records:
+        rendered = record.getMessage()
+        assert "\n" not in rendered, f"raw newline reached a rendered log line: {rendered!r}"

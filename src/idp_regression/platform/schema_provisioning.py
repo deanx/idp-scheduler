@@ -12,7 +12,7 @@ import logging
 
 from idp_regression.platform.errors import PlatformError, TransportError
 from idp_regression.platform.schema import load_golden_schema
-from idp_regression.platform.transport import HttpClient
+from idp_regression.platform.transport import HttpClient, sanitize_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,6 @@ def provision_golden_schema(client: HttpClient, *, dataset_name: str) -> None:
         logger.error(
             "schema_provisioning_failed status=%s dataset=%s",
             status,
-            dataset_name,
+            sanitize_for_log(dataset_name),
         )
         raise PlatformError(f"provision_golden_schema failed for {dataset_name!r}: HTTP {status}")

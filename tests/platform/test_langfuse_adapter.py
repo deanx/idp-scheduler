@@ -424,19 +424,14 @@ def test_record_run_never_posts_to_the_v4_trace_ingestion_endpoint() -> None:
 def test_get_dataset_error_log_survives_a_newline_in_the_dataset_name(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """SCENARIO-B (/test, gap 9, NFR N5 log injection — S-01.3 AC): a
-    dataset name containing "\\n" or '"' must not be able to forge what
-    looks like a second, independent log line to a naive log
-    tailer/alerting pipeline -- the rendered log message must stay on
-    one line (escaped or JSON-quoted), not contain a raw embedded
-    newline. RED as written: langfuse_adapter.py's %-style logging
-    (`logger.error("dataset_fetch_failed status=%s dataset=%s
-    detail=%s", status, name, ...)`) does not escape `name`, so an
-    embedded "\\n" reaches the rendered message verbatim (confirmed via
-    caplog). Not fixed here per /test rules (tests only, no
-    implementation changes) — this is an NFR N5 gap in S-01.3's own
-    logging helper (`_body_snippet_for_error`'s callers), to be routed
-    as a card, not a pre-existing unrelated bug."""
+    """/test Scenario B, NFR N5 log injection (GREEN, fixed): a dataset
+    name containing "\\n" or '"' must not be able to forge what looks
+    like a second, independent log line to a naive log tailer/alerting
+    pipeline -- the rendered log message must stay on one line. Fixed
+    by wrapping caller-controlled strings in
+    ``transport.sanitize_for_log`` (``repr()``) before they reach a
+    ``%s`` log substitution. Was RED prior to that fix (confirmed via
+    caplog, see the commit that added this test)."""
     caplog.set_level(logging.ERROR)
     malicious_name = 'evil\ninjected fake log line status=200 dataset="ok"'
     client = FakeHttpClient({("GET", "/api/public/v2/datasets/"): (404, {})})
@@ -444,6 +439,86 @@ def test_get_dataset_error_log_survives_a_newline_in_the_dataset_name(
 
     with pytest.raises(DatasetFetchFailedError):
         adapter.get_dataset(malicious_name)
+
+    for record in caplog.records:
+        rendered = record.getMessage()
+        assert "\n" not in rendered, f"raw newline reached a rendered log line: {rendered!r}"
+
+
+def test_write_scores_error_log_survives_a_newline_in_document_id_and_score_name(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """N5 sibling: score_write_failed logs document_id and score_name --
+    both caller-controlled (document_id from the golden dataset;
+    score_name is derived from a field/prompt name). Same fix
+    (sanitize_for_log), same class of bug."""
+    caplog.set_level(logging.ERROR)
+    malicious_document_id = "doc\ninjected fake log line status=200"
+    malicious_score_name = "field:evil\ninjected"
+    client = FakeHttpClient(
+        {
+            ("GET", "/api/public/v2/datasets/ds"): (200, _v2_dataset_response(None)),
+            ("GET", "/api/public/dataset-items?datasetName=ds"): (
+                200,
+                _dataset_items_page(
+                    [
+                        {
+                            "id": "item-1",
+                            "input": {"document_id": malicious_document_id},
+                            "expectedOutput": {"fields": {}},
+                        }
+                    ],
+                    page=1,
+                    total_pages=1,
+                ),
+            ),
+            ("POST", "/api/public/scores"): (500, {"message": "boom"}),
+        }
+    )
+    adapter = LangfuseAdapter(client=client, tracing_client=_CompletingTracingClient())
+    dataset = adapter.get_dataset("ds")
+    records = [
+        {
+            "item_id": dataset["items"][0]["item_id"],
+            "document_id": dataset["items"][0]["document_id"],
+            "scores": [
+                {"id": "s1", "name": malicious_score_name, "value": "FAIL", "comment": None}
+            ],
+        }
+    ]
+
+    with pytest.raises(ScoreWriteFailedError):
+        adapter.record_run(
+            dataset_name="ds",
+            run_name="run-1",
+            run_id="run-1",
+            records=records,  # type: ignore[arg-type]
+            metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+        )
+
+    for record in caplog.records:
+        rendered = record.getMessage()
+        assert "\n" not in rendered, f"raw newline reached a rendered log line: {rendered!r}"
+
+
+def test_mark_run_status_error_log_survives_a_newline_in_run_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """N5 sibling: run_status_write_failed logs run_id -- caller-controlled
+    (S-01.4 generates it). Same fix (sanitize_for_log)."""
+    caplog.set_level(logging.ERROR)
+    malicious_run_id = "run\ninjected fake log line status=200"
+    client = FakeHttpClient({("POST", "/api/public/scores"): (500, {"message": "boom"})})
+    adapter = LangfuseAdapter(client=client)
+
+    with pytest.raises(RunStatusWriteFailedError):
+        adapter.mark_run_status(
+            malicious_run_id,
+            "aborted",
+            action_id="a",
+            action_version="v",
+            golden_version="g",
+        )
 
     for record in caplog.records:
         rendered = record.getMessage()

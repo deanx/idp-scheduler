@@ -29,7 +29,7 @@ from idp_regression.platform.errors import (
     TransportError,
 )
 from idp_regression.platform.tracing import ExperimentItem, ExperimentRunner, record_experiment
-from idp_regression.platform.transport import HttpClient, UrllibHttpClient
+from idp_regression.platform.transport import HttpClient, UrllibHttpClient, sanitize_for_log
 from idp_regression.platform.types import (
     Dataset,
     DatasetItem,
@@ -87,7 +87,7 @@ class LangfuseAdapter:
             logger.error(
                 "dataset_fetch_failed status=%s dataset=%s detail=%s",
                 status,
-                name,
+                sanitize_for_log(name),
                 _body_snippet_for_error(body),
             )
             raise DatasetFetchFailedError(f"get_dataset failed with HTTP {status}")
@@ -123,7 +123,7 @@ class LangfuseAdapter:
                 logger.error(
                     "dataset_fetch_failed status=%s dataset=%s detail=%s",
                     status,
-                    name,
+                    sanitize_for_log(name),
                     _body_snippet_for_error(body),
                 )
                 raise DatasetFetchFailedError(f"dataset-items fetch failed with HTTP {status}")
@@ -171,8 +171,8 @@ class LangfuseAdapter:
                 logger.error(
                     "score_write_failed status=%s document_id=%s score_name=%s detail=%s",
                     status,
-                    document_id,
-                    score["name"],
+                    sanitize_for_log(document_id),
+                    sanitize_for_log(score["name"]),
                     _body_snippet_for_error(body),
                 )
                 raise ScoreWriteFailedError(
@@ -308,7 +308,7 @@ class LangfuseAdapter:
             logger.error(
                 "run_status_write_failed status=%s run_id=%s detail=%s",
                 resp_status,
-                run_id,
+                sanitize_for_log(run_id),
                 _body_snippet_for_error(body),
             )
             raise RunStatusWriteFailedError(f"mark_run_status failed with HTTP {resp_status}")

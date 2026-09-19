@@ -94,3 +94,28 @@ def test_no_source_reference_to_the_v4_trace_ingestion_endpoint() -> None:
         if "/api/public/ingestion" in path.read_text(encoding="utf-8")
     ]
     assert offenders == [], f"unexpected /api/public/ingestion reference(s): {offenders}"
+
+
+def test_transport_failed_error_log_survives_a_newline_in_the_path(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """N5 sibling (/test Scenario B follow-up): transport_failed logs
+    method/path -- path can carry a caller-controlled dataset name when
+    a higher layer builds it unencoded. Same fix (sanitize_for_log)."""
+    caplog.set_level(logging.ERROR)
+    client = UrllibHttpClient("http://localhost:1", "pub", "sec")
+    malicious_path = "/api/public/v2/datasets/ds\ninjected fake log line status=200"
+
+    def _raise_timeout(*args: object, **kwargs: object) -> None:
+        raise TimeoutError("timed out")
+
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "urlopen", _raise_timeout)
+
+    with pytest.raises(TransportError):
+        client.request("GET", malicious_path)
+
+    for record in caplog.records:
+        rendered = record.getMessage()
+        assert "\n" not in rendered, f"raw newline reached a rendered log line: {rendered!r}"

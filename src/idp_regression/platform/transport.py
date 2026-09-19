@@ -38,6 +38,20 @@ def redact(text: str) -> str:
     return _AUTH_HEADER_PATTERN.sub("Basic ***REDACTED***", text)
 
 
+def sanitize_for_log(value: object) -> str:
+    """Render a caller-controlled value (dataset name, document_id, score
+    name, run_id, ...) safe to interpolate into a single log line.
+
+    ``repr()`` both escapes control characters (``\\n``, ``\\r``, tabs,
+    ...) and quotes the value, so an embedded newline or double-quote
+    can never forge what looks like a second, independent log line or a
+    fake field to a naive log tailer/alerting pipeline (NFR N5, /test
+    Scenario B). Shared by every module in ``platform/`` that logs a
+    caller-controlled string.
+    """
+    return repr(value)
+
+
 class HttpClient(Protocol):
     """The seam ``LangfuseAdapter`` depends on — mocked in unit tests."""
 
@@ -76,7 +90,12 @@ class UrllibHttpClient:
             status = exc.code
         except (TimeoutError, urllib.error.URLError) as exc:
             message = redact(f"{method} {path} failed: {exc}")
-            logger.error("transport_failed method=%s path=%s detail=%s", method, path, message)
+            logger.error(
+                "transport_failed method=%s path=%s detail=%s",
+                sanitize_for_log(method),
+                sanitize_for_log(path),
+                sanitize_for_log(message),
+            )
             raise TransportError(message) from exc
         if not raw:
             return status, None
