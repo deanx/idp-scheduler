@@ -146,6 +146,28 @@ def test_extract_logs_a_per_document_timing_metric(
     assert any("idp_extraction_timing" in r.message for r in caplog.records)
 
 
+def test_timing_metric_elapsed_value_equals_the_fake_clock_delta(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # /test Scenario B item 9: the log line existing isn't enough — the
+    # logged elapsed_seconds value must equal clock()-at-end minus
+    # clock()-at-start, not some other number (e.g. wall-clock time.time(),
+    # or a constant, or the poll-only duration).
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    # calls: token.get() now=0.0, token._refresh() expires_at=0.0,
+    # extract() start=2.0, poll iter1 now=2.0 (succeeds immediately),
+    # extract() end (elapsed calc)=9.5 -> elapsed = 9.5 - 2.0 = 7.5.
+    adapter = _adapter(monkeypatch, clock=_clock_from([0.0, 0.0, 2.0, 2.0, 9.5]))
+    with caplog.at_level(logging.INFO):
+        adapter.extract(str(doc), "action-1", "v1")
+    timing_records = [r for r in caplog.records if "idp_extraction_timing" in r.message]
+    assert len(timing_records) == 1
+    match = re.search(r"elapsed_seconds=\"?(\d+\.\d+)\"?", timing_records[0].message)
+    assert match, timing_records[0].message
+    assert float(match.group(1)) == pytest.approx(7.5)
+
+
 def test_auth_failure_at_run_start_is_fail_closed_no_retry(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
