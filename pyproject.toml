@@ -7,7 +7,9 @@ authors = [
     { name = "Alex Costa", email = "alex@divinocosta.com.br" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "langfuse>=4.15.4",
+]
 
 [build-system]
 requires = ["hatchling"]

@@ -13,6 +13,7 @@ is recorded in the test output, not blocked on.
 
 from __future__ import annotations
 
+import datetime
 import os
 import time
 import uuid
@@ -20,7 +21,7 @@ from collections.abc import Callable
 
 import pytest
 
-from idp_regression.platform.errors import DatasetFetchFailedError
+from idp_regression.platform.errors import DatasetFetchFailedError, FlushFailedError
 from idp_regression.platform.langfuse_adapter import LangfuseAdapter
 from idp_regression.platform.schema_provisioning import provision_golden_schema
 from idp_regression.platform.transport import UrllibHttpClient
@@ -133,3 +134,76 @@ def test_get_dataset_missing_dataset_raises_typed_error(client: UrllibHttpClient
 
     with pytest.raises(DatasetFetchFailedError):
         adapter.get_dataset(f"does-not-exist-{uuid.uuid4().hex}")
+
+
+# --- T-01.3.10a: OTLP trace + dataset-run linkage --------------------------
+
+
+def test_flush_raises_flush_failed_on_a_real_export_failure() -> None:
+    """TP-43: flush() must never swallow an OTLP export failure. Points
+    the SDK's tracing client at an unreachable host (never the real
+    LANGFUSE_HOST) so no real credentials or network calls to the live
+    server are involved in this specific assertion."""
+    from langfuse import Langfuse
+
+    unreachable = Langfuse(host="http://localhost:1", public_key="pk-test", secret_key="sk-test")
+    with unreachable.start_as_current_observation(name="test-s013-unreachable", as_type="span"):
+        pass
+    adapter = LangfuseAdapter(
+        client=UrllibHttpClient("http://localhost:1", "x", "x"), tracing_client=unreachable
+    )
+
+    with pytest.raises(FlushFailedError):
+        adapter.flush()
+
+
+def test_run_dataset_experiment_is_visible_in_experiments_listing(
+    client: UrllibHttpClient,
+) -> None:
+    """Empirically-proven linkage path (tracing.py docstring): a manual
+    span + dataset-run-item does NOT show up in Experiments; only
+    ``run_experiment`` does. This is the live confirmation of that path.
+    """
+    from langfuse import Langfuse
+
+    host = _require_env("LANGFUSE_HOST")
+    public_key = _require_env("LANGFUSE_PUBLIC_KEY")
+    secret_key = _require_env("LANGFUSE_SECRET_KEY")
+
+    dataset_name = f"test-s013-{uuid.uuid4().hex[:8]}"
+    provision_golden_schema(client, dataset_name=dataset_name)
+    status, item = client.request(
+        "POST",
+        "/api/public/dataset-items",
+        {
+            "datasetName": dataset_name,
+            "input": {"document_id": "synthetic-doc"},
+            "expectedOutput": {"fields": {}},
+        },
+    )
+    assert status == 200
+
+    sdk_client = Langfuse(host=host, public_key=public_key, secret_key=secret_key)
+    adapter = LangfuseAdapter(client=client, tracing_client=sdk_client)
+    dataset = sdk_client.get_dataset(dataset_name)
+    run_name = f"test-s013-run-{uuid.uuid4().hex[:8]}"
+
+    def task(*, item: object, **kwargs: object) -> dict[str, bool]:
+        return {"ok": True}
+
+    adapter.run_dataset_experiment(run_name=run_name, dataset_items=dataset.items, task=task)
+    adapter.flush()
+
+    one_hour_ago = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=1)
+    from_ts = one_hour_ago.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _experiment_visible() -> bool:
+        status, body = client.request(
+            "GET", f"/api/public/experiments?limit=50&fromStartTime={from_ts}"
+        )
+        if status != 200 or not isinstance(body, dict):
+            return False
+        names = [e.get("name") for e in body.get("data", [])]
+        return run_name in names
+
+    assert _bounded_poll(_experiment_visible, max_wait_s=30.0, interval_s=2.0)

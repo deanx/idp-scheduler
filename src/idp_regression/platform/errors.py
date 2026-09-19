@@ -27,3 +27,8 @@ class FlushFailedError(PlatformError):
 
 class RunStatusWriteFailedError(PlatformError):
     """The run_status marker write failed."""
+
+
+class TracingNotConfiguredError(PlatformError):
+    """A tracing-dependent operation (T-01.3.10a) was called without a
+    configured ``tracing_client`` (OTLP/v4 SDK)."""
