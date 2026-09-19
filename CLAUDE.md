@@ -34,7 +34,7 @@ Profile: standard
 - **Domain/URL:** internal tool — n/a
 - **Personas:** Prompt Engineer (iterates extraction prompts and runs regressions), Golden Set Curator (non-engineer; maintains expected outputs through the platform UI), CI Pipeline (automated gate on prompt-change PRs).
 - **Epics:** A IDP adapter · B Classifier & gate · C Golden-set management · D Run orchestration & platform integration · E Remediation UI · F Document-type routing & structural novelty
-- **Compliance regime:** none formal — but extracted fields (invoices, IDs, totals) can contain financial data / PII. **Design rule: document files never enter the evaluation platform; only `document_id` and expected fields are stored.** Treat golden-set contents as sensitive.
+- **Compliance regime:** none formal — but extracted fields (invoices, IDs, totals) can contain financial data / PII. **Design rule: document files never enter the evaluation platform; only `document_id` and expected fields are stored.** The golden set lives only in its dataset items. No extracted (actual), expected or confidence **value** is written anywhere else on the platform: score comments and trace spans carry only `document_id` and verdicts (user decision 2026-09-19, DEBT-18 option B). Treat golden-set contents as sensitive.
 - **Sensitive surfaces:** golden-set storage (expected values), IDP credentials (OAuth client secret), evaluation-platform API keys.
 - **Canonical source docs:** glob `docs/init/` (discover by role, not by filename).
 

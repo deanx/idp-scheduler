@@ -72,7 +72,7 @@ In-app only; not persisted to the platform as a blob (its *verdicts* are, via sc
 ```
 
 - `status` — the raw IDP terminal status string; one of `IDP_SUCCESS_STATUSES` when `extract()` returns (ADR-0002).
-- `fields.<name>.confidence` — `float | None`; kept available to the classifier's score comment and the remediation UI; the gate ignores it.
+- `fields.<name>.confidence` — `float | None`; used locally by the classifier/orchestrator. Per DEBT-18 option B it is never written to the platform; the gate ignores it.
 - `tables.<name>` — array of rows; each row is a `{column: {value, confidence}}` map. Rows are matched to golden rows by the golden's `match_key`.
 - `prompts.<key>.source` — passthrough from IDP; not compared.
 
@@ -96,7 +96,7 @@ The six verdicts: `match`, `missing`, `wrong_value`, `wrong_format`, `new_field`
 
 The platform persists, per named run:
 
-- One **`field:<name>`** score per field per document (value = verdict string; comment = `expected`/`actual`/`confidence`). These keys are the **stable contract** the remediation UI reads (BR11, INV-03).
+- One **`field:<name>`** score per field per document (value = verdict string; comment carries **no values**: no expected, actual or confidence. It is `None` or value-free metadata only, per DEBT-18 option B, user decision 2026-09-19). These keys are the **stable contract** the remediation UI reads (BR11, INV-03).
 - One **`gate`** score per document (value = `PASS` | `FAIL`).
 - Run **metadata**: `action_id` (the IDP action exercised), `action_version` (the regression variable, BR1) and `golden_version` (app-tracked for Langfuse, ADR-0001 — resolves ASM-03, INV-04).
 

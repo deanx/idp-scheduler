@@ -199,8 +199,8 @@ ADR-0001's STRIDE still applies: the platform API key is the only auth, TLS, BR5
      - Precondition, checked before any SDK call: the `records` item_ids equal the fetched item_ids exactly (same set, no duplicates). Otherwise `record_run` raises `ExperimentRecordFailedError`.
    - **Span-attribute allowlist (INV-01/INV-02).** Spans may contain only:
      - `input = {"document_id"}`;
-     - `expected_output` = the golden already stored in Langfuse;
-     - `output = DocumentRecord.actual` (the normalized actual, CT-01; never the raw IDP body, a path or file bytes);
+     - `expected_output` = `{}` (the SDK types it as a dict). **Amended 2026-09-19 (DEBT-18 option B, user decision):** the golden is not copied into spans; spans reference the dataset item by id.
+     - `output` = the verdict map `{score_name: verdict}` plus `gate` only. **Amended 2026-09-19 (DEBT-18 option B):** the normalized actual is never sent to the platform, and neither are expected or confidence values;
      - trace metadata = the three `RunMetadata` strings;
      - item metadata = `None`.
 
