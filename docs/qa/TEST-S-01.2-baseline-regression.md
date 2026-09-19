@@ -3,12 +3,12 @@
 **Status:** ✅ PASSED
 **Source:** /test gap-fill (Atchim TDD gate)
 **Date:** 2026-09-19
-**Commit:** d84bfa6fe2ffdc28ff2cdf7375569e06f1787637
+**Commit:** 2ae8617d10a0406417260f017d18f7ad3cbf8073
 **Author:** alex@divinocosta.com.br
-**Atchim TDD gate:** PASSED on 2026-09-19. /test gate over b393564..d84bfa6: the independent coverage audit found 13 items, 6 of them Scenario-B defects (fixed test-first) and 7 coverage gaps (now pinned). Atchim's mutation checks killed everything except one equivalent mutant.
+**Atchim TDD gate:** PASSED. /test gate over b393564..d84bfa6 (6 Scenario-B defects fixed, 7 coverage gaps pinned). Then, after QA S-01.2 ⚠️, a /test gate over the fix round cadbb69..2ae8617: F-1 non-finite timing config, F-2 redirect credential leak, and an independent fix-round audit (float-overflow defect plus two gaps fixed in 2ae8617). All mutants killed.
 **Independence:** ✅ structural (different models): Dengoso (sonnet) reviewed by Atchim (opus). SPEC-01 is Risk: high.
-**Static:** ✅ clean: mypy strict (57 files) + ruff. No `# type: ignore` in src/tests.
-**Files:** docs/design/CONTRACTS.md, docs/design/INVARIANTS.md, docs/qa/TEST-S-01.2-baseline-regression.md, pyproject.toml, src/idp_regression/adapter/errors.py, src/idp_regression/adapter/idp_client.py, src/idp_regression/adapter/normalize.py, src/idp_regression/adapter/token_cache.py, src/idp_regression/adapter/transport.py, src/idp_regression/adapter/types.py, tests/adapter/__init__.py, tests/adapter/fixtures/raw_idp_response.json, tests/adapter/test_errors.py, tests/adapter/test_idp_client.py, tests/adapter/test_integration_idp.py, tests/adapter/test_make_idp_adapter.py, tests/adapter/test_module_boundary.py, tests/adapter/test_normalize.py, tests/adapter/test_normalize_contract.py, tests/adapter/test_token_cache.py, tests/adapter/test_transport.py, uv.lock
+**Static:** ✅ clean: mypy strict (57 files) + ruff. `# type: ignore` appears only in tests: 15 deliberate ones in tests/adapter/test_idp_client.py, which feed invalid types or type test helpers (QA S-01.2 F-4 corrected the earlier "none" claim). None in src/.
+**Files:** docs/adr/0002-idp-adapter-and-normalize-contract.md, docs/design/CONTRACTS.md, docs/design/INVARIANTS.md, docs/qa/QA-01-baseline-regression-S-01.2.md, docs/qa/TEST-S-01.2-baseline-regression.md, pyproject.toml, src/idp_regression/adapter/errors.py, src/idp_regression/adapter/idp_client.py, src/idp_regression/adapter/normalize.py, src/idp_regression/adapter/token_cache.py, src/idp_regression/adapter/transport.py, src/idp_regression/adapter/types.py, tests/adapter/__init__.py, tests/adapter/fixtures/raw_idp_response.json, tests/adapter/test_errors.py, tests/adapter/test_idp_client.py, tests/adapter/test_integration_idp.py, tests/adapter/test_make_idp_adapter.py, tests/adapter/test_module_boundary.py, tests/adapter/test_normalize.py, tests/adapter/test_normalize_contract.py, tests/adapter/test_token_cache.py, tests/adapter/test_transport.py, uv.lock
 **Sequence:** test-first per slice:
 - types/errors/TokenCache (6bc5e02)
 - transport (622d7c8)
@@ -22,8 +22,8 @@ Fix rounds: R1 8d84491, R2 7131712, R3 e1742d3, R4/R5/R8 75987a8, R7 320fd7c, R6
 
 | Scope | Passed | Failed |
 |---|---|---|
-| Unit + contract (default run) | 387 | 0 |
-| Full suite incl. live integration (`RUN_INTEGRATION_TESTS=1`; live IDP OAuth token + live Langfuse) | 400 | 0 (1 skip: live submit/poll needs a real IDP action id + version → S-01.6) |
+| Unit + contract (default run) | 459 | 0 |
+| Full suite incl. live integration (`RUN_INTEGRATION_TESTS=1`; live IDP OAuth token + live Langfuse) | 472 | 0 (1 skip: live submit/poll needs a real IDP action id + version → S-01.6) |
 
 ## AC coverage
 
@@ -60,8 +60,15 @@ Fix rounds: R1 8d84491, R2 7131712, R3 e1742d3, R4/R5/R8 75987a8, R7 320fd7c, R6
 | Poll budget includes submit time | test_idp_client.py:589 | ✅ COVERED |
 | N1: timing equals the clock delta | test_idp_client.py:302 | ✅ COVERED |
 | Domain: extracted values never in logs/stdout/stderr | test_idp_client.py:256 | ✅ COVERED |
+| QA F-1 / REG-06: invalid timing config → `IDPConfigurationError` at construction | test_idp_client.py:590-657 | ✅ COVERED |
+| QA F-1: invalid env timing → typed error; margin 0 accepted | test_make_idp_adapter.py:59-95 | ✅ COVERED |
+| QA F-1: timing cap 3600 accepted / 3600.1 rejected (constructor + env) | test_idp_client.py:668,680,685,689; test_make_idp_adapter.py:99,108 | ✅ COVERED |
+| QA F-1: huge int → typed error (no raw OverflowError); bool rejected | test_idp_client.py:706,726 | ✅ COVERED |
+| QA F-1: NaN poll timeout can't loop forever | test_idp_client.py:696 | ✅ COVERED |
+| QA F-2 / REG-07: 3xx → typed error; the token never reaches the redirect target (two real servers); response closed | test_transport.py:400-452 | ✅ COVERED |
 
 **Deferred:**
+- DEBT-26: the platform transport redirect leak (sibling of F-2) → S-01.3 follow-up; REG-07 pending-test there.
 - DEBT-24: 5xx/429 retry (ADR-0004 #6) → S-01.4.
 - DEBT-21: mid-poll 401 refresh; the refresh must live in the adapter poll loop → S-01.4.
 - DEBT-22: CT-01 real fixture + live submit/poll → S-01.6.
@@ -69,6 +76,7 @@ Fix rounds: R1 8d84491, R2 7131712, R3 e1742d3, R4/R5/R8 75987a8, R7 320fd7c, R6
 - Containment → /harden before the epic is Done.
 
 ## History
+- /test gap-fill (Atchim TDD gate) PASSED at d84bfa6fe2ffdc28ff2cdf7375569e06f1787637, before the QA S-01.2 fix round. Superseded.
 - /implement (Atchim TDD gate) PASSED at 481e0db788a94b1ff39bd96879dab5168812322d. Superseded by this /test stamp (the Risk: high rigor gate requires one).
 - /implement (Atchim REQUEST CHANGES) on 2026-09-19: ❌ INVALIDATED. Round-1 R1–R8 and round-2 test gaps, all closed. Round-1 summary: (Atchim, 2026-09-19)  ### Required 1. **Name check too loose** (`normalize.py:22,66`): `$` matches before a trailing newline, so `"total\n"` is accepted; there is also no length cap (DoD line 82). 2. **Raw exceptions escape `normalize()`:** `OverflowError` on a huge-int confidence (`:96`); `UnicodeEncodeError` on a lone surrogate (`:83`), which carries the PII value. 3. **Raw exceptions escape `extract()` through the transport** (`transport.py:108-131`): RemoteDisconnected, ConnectionResetError, IncompleteRead, UnicodeDecodeError and RecursionError. A missing file raises `FileNotFoundError` with the path in the message. 4. **A missing or null status polls to timeout** (`idp_client.py:179-192`), but ADR-0004 #17 says it must abort. `test_idp_client.py:247` pins the wrong behaviour. 5. **The poll ignores non-2xx except 401/403** (`:174-178`): a 404/400 keeps polling (ADR-0004 #5 says hard 
 - Initial stamp
