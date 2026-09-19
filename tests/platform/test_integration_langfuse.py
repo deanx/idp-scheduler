@@ -348,25 +348,32 @@ def test_n26_distinct_run_names_no_score_collision_two_separate_experiments(
 
 
 def test_tp37_same_run_name_different_run_ids_finding(
-    client: UrllibHttpClient, sdk_client: Any
+    client: UrllibHttpClient, sdk_client: Any, record_property: Any
 ) -> None:
     """TP-37 (Atchim's suspicion, 2026-09-19): does Langfuse key dataset
     runs/experiments by run_name, merging two record_run invocations
     under the SAME run_name into one experiment even though run_id (and
     therefore every score_id) differs?
 
-    OBSERVED (live, 4.38.0, verbatim from the probe that produced this
-    test): YES — two record_run calls with the same run_name and
-    different run_id merge into a SINGLE experiment entry
-    (`itemCount` sums across invocations: 1 item recorded twice ->
-    itemCount == 2 on one experiment, not two experiments of itemCount
-    1 each). Scores do NOT collide (score_id is run_id-scoped, so both
-    scores exist independently and are both readable at their expected
-    value) — N26's score-safety guarantee holds regardless. This is
-    purely an Experiments-tab/observability merge, not a data-safety
-    issue. Per the coordinator: this finding is recorded here for
-    Soneca to route (a run_name -> run_id suffix policy decision), NOT
-    designed around in this commit.
+    USUALLY OBSERVED (live, 4.38.0, verbatim from the probe that produced
+    this test): YES — two record_run calls with the same run_name and
+    different run_id merge into a SINGLE experiment entry (`itemCount`
+    sums across invocations: 1 item recorded twice -> itemCount == 2 on
+    one experiment, not two experiments of itemCount 1 each).
+
+    NOT GUARANTEED (QA S-01.2 F-6, flake observed by Zangado 2/52 full
+    live runs, coordinator 0/12): Langfuse is `events_only` and
+    eventually consistent (CLAUDE.md ## External services). The two
+    same-run_name record_run calls can sometimes surface as two
+    experiments instead of one merged experiment, or the merge can lag
+    past a short poll window. Neither shape is a defect here — this test
+    observes platform behavior, it does not assert a merge policy. The
+    only guarantee this test enforces is N26 (score safety): score_id is
+    run_id-scoped, so both scores exist independently and are both
+    readable at their expected value regardless of how the Experiments
+    tab groups them. Per the coordinator: DEBT-19 (a unique experiment
+    name per invocation, S-01.4) removes the question entirely by never
+    reusing a run_name across invocations in the first place.
     """
     from idp_regression.platform.tracing import ExperimentRunner
 
@@ -390,31 +397,49 @@ def test_tp37_same_run_name_different_run_ids_finding(
             score_id(run_id=run_id, document_id=item["document_id"], score_name="gate")
         )
 
-    # No score collision regardless of the merge below (N26 holds).
+    # N26 (strict, unaffected by the merge behavior below): distinct
+    # run_id -> distinct score ids, and both scores are readable at PASS.
     assert gate_ids[0] != gate_ids[1]
     assert _bounded_poll(lambda: _gate_score_value(client, gate_ids[0]) == "PASS")
     assert _bounded_poll(lambda: _gate_score_value(client, gate_ids[1]) == "PASS")
 
-    def _merged_experiment() -> dict[str, Any] | None:
+    # Merge observation only (deliberately not a data-safety assertion):
+    # whether Langfuse merges the two invocations into one experiment or
+    # keeps them separate, the two items recorded must show up SOMEWHERE
+    # under this run_name — total itemCount across every experiment named
+    # same_run_name reaches 2, and there is at least one such experiment.
+    # This condition holds under either shape, so it can't flake on which
+    # shape the platform chose this time.
+    def _total_item_count() -> tuple[int, list[dict[str, Any]]]:
         matches = _experiments_named(client, same_run_name)
-        return matches[0] if len(matches) == 1 else None
+        total = sum(int(e.get("itemCount") or 0) for e in matches)
+        return total, matches
 
-    # Atchim (deflake): poll on the FULL condition (experiment exists AND
-    # itemCount has caught up to 2), not just existence followed by a
-    # single one-shot assertion — itemCount is eventually consistent and
-    # can still read 1 for a moment after the experiment first appears.
-    def _merged_with_both_items() -> bool:
-        experiment = _merged_experiment()
-        return experiment is not None and experiment.get("itemCount") == 2
+    def _reached_two_items_total() -> bool:
+        total, matches = _total_item_count()
+        return len(matches) >= 1 and total == 2
 
-    assert _bounded_poll(_merged_with_both_items)
-    merged = _merged_experiment()
-    assert merged is not None
-    # OBSERVED FINDING: the two invocations merged into ONE experiment
-    # whose itemCount is the SUM across both record_run calls (2), not
-    # two separate itemCount==1 experiments. This confirms run_name is
-    # the platform's merge key for dataset runs/experiments.
-    assert merged["itemCount"] == 2
+    poll_succeeded = _bounded_poll(_reached_two_items_total, max_wait_s=60.0)
+    total, matches = _total_item_count()
+
+    if not poll_succeeded:
+        # Old failure mode: report exactly what the endpoint returned
+        # (names and itemCounts only — no other fields) so it can be
+        # diagnosed from the CI log without a traceback.
+        observed = [{"name": e.get("name"), "itemCount": e.get("itemCount")} for e in matches]
+        pytest.fail(
+            f"same_run_name items never reached a total of 2 within 60s poll budget; "
+            f"observed experiments named {same_run_name!r}: {observed}"
+        )
+
+    behavior = (
+        "merged into 1 experiment"
+        if len(matches) == 1
+        else f"kept as {len(matches)} experiments"
+    )
+    print(f"TP-37 merge observation: {behavior} (total itemCount={total})")
+    record_property("tp37_merge_behavior", behavior)
+    record_property("tp37_experiment_count", len(matches))
 
 
 # --- T-01.3.10a / ADR-0005 #9: record_run -----------------------------------
