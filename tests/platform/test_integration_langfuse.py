@@ -19,6 +19,7 @@ returned 0 items forever, which no prior test would have caught.
 from __future__ import annotations
 
 import datetime
+import json
 import logging
 import os
 import time
@@ -377,6 +378,11 @@ def test_record_run_writes_readable_scores_and_is_visible_in_experiments(
 
     run_id = f"test-s013-run-{uuid.uuid4().hex[:8]}"
     run_name = f"test-s013-run-{uuid.uuid4().hex[:8]}"
+    # DEBT-18 (user decision, option B): distinctive sentinels standing in
+    # for expected/actual/confidence values, to prove live (not just by
+    # code inspection) that none of them reach a written score comment.
+    expected_sentinel = "SENTINEL-EXPECTED-4f8c1e"
+    actual_sentinel = "SENTINEL-ACTUAL-9b2d7a"
     records: list[DocumentRecord] = [
         {
             "item_id": item["item_id"],
@@ -386,9 +392,9 @@ def test_record_run_writes_readable_scores_and_is_visible_in_experiments(
                 verdicts={
                     "total": {
                         "verdict": "match",
-                        "expected": item["golden"]["fields"]["total"]["value"],
-                        "actual": item["golden"]["fields"]["total"]["value"],
-                        "confidence": 0.9,
+                        "expected": expected_sentinel,
+                        "actual": actual_sentinel,
+                        "confidence": 0.42,
                         "critical": True,
                         "type": "number",
                     }
@@ -412,8 +418,36 @@ def test_record_run_writes_readable_scores_and_is_visible_in_experiments(
     gate_score_id = score_id(
         run_id=run_id, document_id=records[0]["document_id"], score_name="gate"
     )
+    field_score_id = score_id(
+        run_id=run_id, document_id=records[0]["document_id"], score_name="field:total"
+    )
 
     assert _bounded_poll(lambda: _gate_score_value(client, gate_score_id) == "PASS")
+
+    # DEBT-18: the live-written score comment (and the whole score
+    # record) must never contain the expected/actual/confidence
+    # sentinels — this is the closest live-readable proxy for "the
+    # experiment span output contains no sentinel value" too, since
+    # Langfuse 4.38.0 events_only mode has no REST read for traces/spans
+    # (GET /api/public/traces 404s; confirmed 2026-09-19) — TP-45's
+    # subprocess test asserts the span content directly instead.
+    def _field_score_body() -> dict[str, Any] | None:
+        status, body = client.request(
+            "GET", f"/api/public/v3/scores?fields=details&id={field_score_id}"
+        )
+        if status != 200 or not isinstance(body, dict):
+            return None
+        data = body.get("data", [])
+        return cast(dict[str, Any], data[0]) if data else None
+
+    assert _bounded_poll(lambda: _field_score_body() is not None)
+    field_score = _field_score_body()
+    assert field_score is not None
+    assert field_score.get("comment") is None
+    score_text = json.dumps(field_score)
+    assert expected_sentinel not in score_text
+    assert actual_sentinel not in score_text
+    assert "0.42" not in score_text
 
     one_hour_ago = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=1)
     from_ts = one_hour_ago.strftime("%Y-%m-%dT%H:%M:%SZ")
