@@ -193,9 +193,10 @@ ADR-0001's STRIDE still applies: the platform API key is the only auth, TLS, BR5
      ```
      - `write_scores`, `flush` and `run_dataset_experiment` **leave the Protocol**. They become private adapter internals (`_write_scores(trace_id, scores)`, and the watcher inside `record_run`).
      - No SDK type crosses the Protocol, so N24 holds.
+     - *Amendment 2026-09-19 (Soneca, QA-01-S-01.3 F-4; DEBT-18 option B):* `DocumentRecord` as built has **no `actual` field**. It is `{item_id, document_id, scores}` only (`platform/types.py`). The `actual: NormalizedOutput` line above is superseded: the normalized actual stays in-process and is never passed to the platform adapter.
    - **Item mapping (INV-04: no second fetch).**
      - `get_dataset` fetches the schema via `GET /v2/datasets/{name}` and the items via paginated `GET /api/public/dataset-items?datasetName=` (R1). It keeps a private `item_id → (dataset_id, expectedOutput)` map from that same response.
-     - `record_run` builds adapter-private frozen `_ExperimentItem(id, dataset_id, input={"document_id": …}, expected_output=<stored golden>, metadata=None)` duck-typed objects. It does not construct `DatasetItemClient` objects and does not re-fetch.
+     - `record_run` builds adapter-private frozen `_ExperimentItem(id, dataset_id, input={"document_id": …}, expected_output=<stored golden>, metadata=None)` duck-typed objects. *(Amended 2026-09-19, DEBT-18 option B: `expected_output={}` as built (`langfuse_adapter.py`); the stored golden is not copied into items or spans. See the allowlist below.)* It does not construct `DatasetItemClient` objects and does not re-fetch.
      - Precondition, checked before any SDK call: the `records` item_ids equal the fetched item_ids exactly (same set, no duplicates). Otherwise `record_run` raises `ExperimentRecordFailedError`.
    - **Span-attribute allowlist (INV-01/INV-02).** Spans may contain only:
      - `input = {"document_id"}`;

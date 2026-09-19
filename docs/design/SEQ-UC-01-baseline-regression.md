@@ -78,6 +78,9 @@ sequenceDiagram
 ```
 
 Key paths this diagram pins:
+- *Amendment 2026-09-19 (Soneca, QA-01-S-01.3 F-4):* two changes supersede the diagram's `write_scores(… verdicts …)` and `flush()` steps.
+  - ADR-0005 #9: gates are computed in the loop, and one `record_run` runs after the loop.
+  - DEBT-18 option B: only verdict literals, the gate and `RunMetadata` cross to the platform. `expected`, `actual` and `confidence` stay in-process, and score comments are `None`.
 - **Happy path:** extract → normalize → classify → gate → write_scores, one score set per field + one `gate` per document, action version + golden version recorded.
 - **ASM-02 abort (A1 timeout, A2 hard failure):** the loop stops at the failing document, the run is aborted, exit non-zero. No partial run is ever produced as a reference.
 - **A3 auth failure:** fail-closed at run start; no retry on 401/403.
