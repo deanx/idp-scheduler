@@ -63,6 +63,36 @@ _TRANSPORT_FAILURE_TYPES: tuple[type[BaseException], ...] = (
 )
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect (QA F-2) — the ``Authorization`` header (a
+    Bearer token) must never be re-sent to a different host, even for a
+    same-origin redirect (defense-in-depth) or an https->http downgrade.
+    Returning ``None`` makes urllib raise ``HTTPError`` for the 3xx status
+    instead of transparently following it, so a redirect becomes an
+    ordinary non-2xx response handled (and redacted) like any other."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        return None
+
+
+#: A module-level opener with redirects disabled — built once, reused for
+#: every request. Exposed as a call-through function (rather than used
+#: directly as ``_opener.open``) so tests can monkeypatch a single seam.
+_opener = urllib.request.build_opener(_NoRedirectHandler)
+
+
+def _urlopen(req: urllib.request.Request, timeout: float) -> Any:
+    return _opener.open(req, timeout=timeout)
+
+
 def redact(text: str) -> str:
     """Strip a Bearer token / ``client_secret`` / ``access_token`` value
     out of arbitrary text before it reaches a log line or an exception
@@ -201,10 +231,9 @@ def _send(req: urllib.request.Request, timeout_seconds: float) -> tuple[int, Any
     # so the raise is deferred to after the try/except exits (same pattern
     # as idp_client.py's _fetch_token/_submit).
     invalid_header_value = False
+    unexpected_redirect = False
     try:
-        with urllib.request.urlopen(  # noqa: S310 - internal MuleSoft IDP host only
-            req, timeout=timeout_seconds
-        ) as resp:
+        with _urlopen(req, timeout_seconds) as resp:  # noqa: S310 - internal MuleSoft IDP host only
             raw_bytes = _read_bounded(resp)
             status = resp.status
     except ValueError:
@@ -212,15 +241,29 @@ def _send(req: urllib.request.Request, timeout_seconds: float) -> tuple[int, Any
         raw_bytes = b""
         status = 0
     except urllib.error.HTTPError as exc:
-        try:
-            raw_bytes = _read_bounded(exc)
-        except _TRANSPORT_FAILURE_TYPES as read_exc:
-            _log_and_raise_transport_error(req, str(read_exc))
-        status = exc.code
+        if 300 <= exc.code < 400:
+            # A 3xx should never happen for IDP's API; the no-redirect
+            # opener (QA F-2) converts an actual redirect attempt into
+            # this HTTPError instead of transparently following it and
+            # re-sending the Authorization header to a different host. A
+            # redirect is a transport-level anomaly here, not an
+            # application response — treat it as a typed transport error
+            # immediately, and never read/return its body.
+            unexpected_redirect = True
+            raw_bytes = b""
+            status = exc.code
+        else:
+            try:
+                raw_bytes = _read_bounded(exc)
+            except _TRANSPORT_FAILURE_TYPES as read_exc:
+                _log_and_raise_transport_error(req, str(read_exc))
+            status = exc.code
     except _TRANSPORT_FAILURE_TYPES as exc:
         _log_and_raise_transport_error(req, str(exc))
     if invalid_header_value:
         _log_and_raise_transport_error_without_detail(req, "request headers were rejected")
+    if unexpected_redirect:
+        _log_and_raise_transport_error_without_detail(req, "unexpected redirect response")
 
     try:
         raw = raw_bytes.decode("utf-8")

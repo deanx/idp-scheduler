@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import email.message
 import http.client
+import http.server
 import io
 import json
 import logging
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -41,7 +43,7 @@ def test_post_json_returns_status_and_decoded_body(monkeypatch: pytest.MonkeyPat
         assert req.get_header("Content-type") == "application/json"
         return _FakeResponse(200, json.dumps({"ok": True}).encode())
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(transport, "_urlopen", fake_urlopen)
     status, body = transport.post_json("https://x/y", {"a": 1}, timeout_seconds=5.0)
     assert status == 200
     assert body == {"ok": True}
@@ -54,7 +56,7 @@ def test_get_json_sends_bearer_header(monkeypatch: pytest.MonkeyPatch) -> None:
         seen["auth"] = req.get_header("Authorization")
         return _FakeResponse(200, json.dumps({"status": "RUNNING"}).encode())
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(transport, "_urlopen", fake_urlopen)
     status, body = transport.get_json(
         "https://x/y", timeout_seconds=5.0, headers={"Authorization": "Bearer tok"}
     )
@@ -75,7 +77,7 @@ def test_post_multipart_file_uploads_bytes(
         captured["content_type"] = req.get_header("Content-type")
         return _FakeResponse(202, json.dumps({"id": "exec-1"}).encode())
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(transport, "_urlopen", fake_urlopen)
     status, body = transport.post_multipart_file(
         "https://x/executions", "file", str(doc), timeout_seconds=5.0
     )
@@ -95,7 +97,7 @@ def test_http_error_is_returned_with_its_status_and_body(monkeypatch: pytest.Mon
             io.BytesIO(b'{"error":"bad creds"}'),
         )
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(transport, "_urlopen", fake_urlopen)
     status, body = transport.get_json("https://x/y", timeout_seconds=5.0)
     assert status == 401
     assert body == {"error": "bad creds"}
@@ -107,7 +109,7 @@ def test_timeout_raises_typed_transport_error_not_a_raw_urllib_exception(
     def fake_urlopen(req: urllib.request.Request, timeout: float) -> _FakeResponse:
         raise TimeoutError("timed out")
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(transport, "_urlopen", fake_urlopen)
     with pytest.raises(IDPTransportError):
         transport.get_json("https://x/y", timeout_seconds=5.0)
 
@@ -116,7 +118,7 @@ def test_url_error_raises_typed_transport_error(monkeypatch: pytest.MonkeyPatch)
     def fake_urlopen(req: urllib.request.Request, timeout: float) -> _FakeResponse:
         raise urllib.error.URLError("connection refused")
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(transport, "_urlopen", fake_urlopen)
     with pytest.raises(IDPTransportError):
         transport.get_json("https://x/y", timeout_seconds=5.0)
 
@@ -135,7 +137,7 @@ def test_crlf_in_header_value_raises_typed_error_without_the_secret(
             "Invalid header value b'Bearer super-secret-token-123\\r\\nX-Evil: 1'"
         )
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(transport, "_urlopen", fake_urlopen)
     with pytest.raises(IDPTransportError) as excinfo:
         transport.get_json(
             "https://x/y", timeout_seconds=5.0, headers={"Authorization": "Bearer x"}
@@ -153,7 +155,7 @@ def test_bearer_token_never_appears_in_a_redacted_transport_error(
             "connection reset while sending Authorization: Bearer super-secret-token-123"
         )
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(transport, "_urlopen", fake_urlopen)
     with pytest.raises(IDPTransportError) as excinfo:
         transport.get_json(
             "https://x/y",
@@ -230,7 +232,7 @@ def test_transport_level_exceptions_map_to_typed_transport_error(
     def fake_urlopen(req: urllib.request.Request, timeout: float) -> _FakeResponse:
         raise exc
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(transport, "_urlopen", fake_urlopen)
     with pytest.raises(IDPTransportError):
         transport.get_json("https://x/y", timeout_seconds=5.0)
 
@@ -241,7 +243,7 @@ def test_non_utf8_response_body_raises_typed_transport_error(
     def fake_urlopen(req: urllib.request.Request, timeout: float) -> _FakeResponse:
         return _FakeResponse(200, b"\xff\xfe not valid utf-8")
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(transport, "_urlopen", fake_urlopen)
     with pytest.raises(IDPTransportError):
         transport.get_json("https://x/y", timeout_seconds=5.0)
 
@@ -256,7 +258,7 @@ def test_deeply_nested_json_body_raises_typed_transport_error(
     def fake_urlopen(req: urllib.request.Request, timeout: float) -> _FakeResponse:
         return _FakeResponse(200, nested.encode())
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(transport, "_urlopen", fake_urlopen)
     with pytest.raises(IDPTransportError):
         transport.get_json("https://x/y", timeout_seconds=5.0)
 
@@ -271,7 +273,7 @@ def test_huge_integer_json_body_raises_typed_transport_error(
     def fake_urlopen(req: urllib.request.Request, timeout: float) -> _FakeResponse:
         return _FakeResponse(200, huge_int_body)
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(transport, "_urlopen", fake_urlopen)
     with pytest.raises(IDPTransportError):
         transport.get_json("https://x/y", timeout_seconds=5.0)
 
@@ -310,7 +312,7 @@ def test_multipart_filename_escapes_quotes(
         captured["data"] = req.data
         return _FakeResponse(202, json.dumps({"id": "exec-1"}).encode())
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(transport, "_urlopen", fake_urlopen)
     transport.post_multipart_file("https://x/executions", "file", str(doc), timeout_seconds=5.0)
     body: bytes = captured["data"]
     assert b'filename="evil\\".pdf"' in body
@@ -336,7 +338,7 @@ def test_transport_error_log_line_is_sanitized_against_injection(
     def fake_urlopen(req: urllib.request.Request, timeout: float) -> _FakeResponse:
         raise urllib.error.URLError('x" injected="1\nforged_field=evil')
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(transport, "_urlopen", fake_urlopen)
     with caplog.at_level(logging.ERROR), pytest.raises(IDPTransportError):
         transport.get_json("https://x/y", timeout_seconds=5.0)
     assert len(caplog.records) == 1
@@ -348,11 +350,84 @@ def test_transport_error_log_line_is_sanitized_against_injection(
     assert '\\" injected=\\"1\\nforged_field=evil' in rendered
 
 
+class _RecordingHandler(http.server.BaseHTTPRequestHandler):
+    """A minimal local HTTP server recording the Authorization header of
+    every request it receives, answering with a fixed status (QA F-2)."""
+
+    received_auth_headers: list[str | None] = []
+    response_status = 200
+
+    def do_GET(self) -> None:  # noqa: N802 - stdlib handler method name
+        self.received_auth_headers.append(self.headers.get("Authorization"))
+        self.send_response(self.response_status)
+        if self.response_status in (301, 302, 303, 307, 308):
+            self.send_header("Location", self.redirect_location)  # type: ignore[attr-defined]
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *args: object) -> None:  # silence stderr noise
+        return
+
+
+def _start_server(
+    *, response_status: int = 200, redirect_location: str = ""
+) -> http.server.HTTPServer:
+    handler_cls = type(
+        "_Handler",
+        (_RecordingHandler,),
+        {
+            "received_auth_headers": [],
+            "response_status": response_status,
+            "redirect_location": redirect_location,
+        },
+    )
+    server = http.server.HTTPServer(("127.0.0.1", 0), handler_cls)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
+def test_redirect_response_raises_typed_error_and_the_token_never_reaches_the_target() -> None:
+    # Two REAL local servers (not mocks) — server B would receive the
+    # Bearer token if the real urllib opener followed the 302 from server
+    # A. QA F-2: it must not.
+    server_b = _start_server(response_status=200)
+    try:
+        port_b = server_b.server_address[1]
+        server_a = _start_server(
+            response_status=302,
+            redirect_location=f"http://127.0.0.1:{port_b}/other",
+        )
+        try:
+            port_a = server_a.server_address[1]
+            with pytest.raises(IDPTransportError) as excinfo:
+                transport.get_json(
+                    f"http://127.0.0.1:{port_a}/x",
+                    timeout_seconds=5.0,
+                    headers={"Authorization": "Bearer redirect-test-secret-xyz"},
+                )
+            assert "redirect-test-secret-xyz" not in str(excinfo.value)
+            assert "redirect-test-secret-xyz" not in repr(excinfo.value.__cause__)
+            assert "redirect-test-secret-xyz" not in repr(excinfo.value.__context__)
+            handler_a_cls = server_a.RequestHandlerClass
+            assert handler_a_cls.received_auth_headers == [  # type: ignore[attr-defined]
+                "Bearer redirect-test-secret-xyz"
+            ]
+        finally:
+            server_a.shutdown()
+            server_a.server_close()
+    finally:
+        server_b.shutdown()
+        server_b.server_close()
+    handler_b_cls = server_b.RequestHandlerClass
+    assert handler_b_cls.received_auth_headers == []  # type: ignore[attr-defined]
+
+
 def test_empty_body_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_urlopen(req: urllib.request.Request, timeout: float) -> _FakeResponse:
         return _FakeResponse(204, b"")
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(transport, "_urlopen", fake_urlopen)
     status, body = transport.post_json("https://x/y", {}, timeout_seconds=5.0)
     assert status == 204
     assert body is None
