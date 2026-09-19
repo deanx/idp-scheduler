@@ -19,7 +19,7 @@ Format:
 - Open: DEBT-17 amended with one line — the process-wide log watcher in `record_experiment` can, in a process running multiple concurrent `Langfuse` clients (a test suite; never the real one-client-per-process CLI), observe a DIFFERENT client's export/logger errors. Harmless for production; noted for anyone building a multi-client-in-one-process use of this adapter later.
 - Next: Atchim final re-review — this closes the last Required item from round 3 per the coordinator.
 
-**Commit:** `<see git log for the SHA of "fix(platform): isolate TP-45's SDK span test in a subprocess">` on `feat/S-01.3-langfuse-adapter`.
+**Commit:** `02380cd` on `feat/S-01.3-langfuse-adapter`.
 
 ### HANDOFF Dengoso → Atchim  (2026-09-19, /implement S-01.3 — re-review REQUEST CHANGES, test gaps only)
 - Done: R1/R5/R6/R7 already CLOSED per your re-review; fixed the remaining test-gap findings, TDD, 5 commits (a003843, 6e20b7d, 1b110e0, 56d1c42, plus this doc commit):
