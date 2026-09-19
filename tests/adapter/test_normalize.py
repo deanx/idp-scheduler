@@ -169,6 +169,23 @@ def test_unsafe_prompt_key_with_control_char_raises() -> None:
     assert excinfo.value.reason == "unsafe_prompt_key"
 
 
+def test_unsafe_prompt_key_lone_surrogate_raises() -> None:
+    # /test Scenario B item 5: a lone surrogate passes the old
+    # control-char-only charset check and would crash later downstream
+    # (the platform's sha256 of the prompt key, UnicodeEncodeError) — the
+    # typed error must not echo the value.
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [
+            {"prompts": [{"prompt": "vendor?\udcff", "answer": {"value": "A", "confidence": None}}]}
+        ],
+    }
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "unsafe_prompt_key"
+    assert "\udcff" not in str(excinfo.value)
+
+
 def test_unsafe_prompt_key_too_long_raises() -> None:
     raw = {
         "status": "SUCCEEDED",

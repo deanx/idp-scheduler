@@ -26,8 +26,13 @@ _SAFE_NAME_PATTERN = re.compile(r"\A[A-Za-z0-9_-]{1,128}\Z")
 
 #: Prompt-key rule (ADR-0002 amendment 2026-09-19, ADR-0005 F10): verbatim,
 #: 1-200 chars, no control characters — matches the golden schema's
-#: ``propertyNames`` pattern (CT-05).
-_SAFE_PROMPT_PATTERN = re.compile(r"\A[^\u0000-\u001F\u007F]{1,200}\Z")
+#: ``propertyNames`` pattern (CT-05). Also excludes lone surrogates
+#: (\uD800-\uDFFF): a raw JSON body can't legally contain one, but Python's
+#: json.loads(surrogatepass-style malformed input) can still hand us a str
+#: with one, and it would otherwise pass this charset check only to crash
+#: later downstream (the platform's sha256 of the prompt key,
+#: UnicodeEncodeError — /test Scenario B item 5).
+_SAFE_PROMPT_PATTERN = re.compile(r"\A[^\u0000-\u001F\u007F\uD800-\uDFFF]{1,200}\Z")
 
 #: A field/table-cell value beyond this many UTF-8 bytes is rejected (ADR-0002).
 MAX_VALUE_BYTES = 64 * 1024
