@@ -1,6 +1,7 @@
 # QA-01 (S-01.3): audit of SPEC-01 / Story S-01.3, the Langfuse platform adapter (Epic D)
 
-**Verdict (re-check 2026-09-19, current):** ✅ Pass. S-01.3 is **Done**. One Minor doc follow-up remains (F-7). See the re-check section at the end.
+**Verdict (re-audit 2026-09-20 after FU-01.3-A, CURRENT):** ⚠️ Pass with follow-ups. **S-01.3 STAYS DONE.** Auditor: Zangado (Fable 5.1). Two Minor findings (F-1, F-2), neither gating. Two rulings recorded (containment deferral upheld; gitleaks gate semantics decided). See the 2026-09-20 section at the end.
+**Verdict (re-check 2026-09-19, superseded):** ✅ Pass. S-01.3 is **Done**. One Minor doc follow-up remains (F-7). See the re-check section at the end.
 **Verdict (initial audit, superseded):** ⚠️ Pass with follow-ups. F-1 was a Done precondition.
 **Rigor:** standard (CLAUDE.md ## Rigor). SPEC Risk: high.
 **Author:** alex@divinocosta.com.br (solo mode). Auditor: Zangado.
@@ -171,3 +172,79 @@ None.
 **Containment:** still deferred to S-01.4's `/harden`. The retry is now in the adapter, so /harden should red-team it (upsert safety, 4xx not retried).
 
 **Re-check verdict: ✅ Pass. S-01.3 is Done.** F-7 is a one-line doc fix for Soneca, and F-6 stays user-owned. Neither gates the story.
+
+
+---
+
+# Re-audit 2026-09-20 — after FU-01.3-A (Zangado, Fable 5.1)
+
+**Verdict: ⚠️ Pass with follow-ups. S-01.3 stays Done.** FU-01.3-A regressed nothing; every gate re-run is green.
+**Independence:** Dengoso (Opus 5) → Atchim (Fable 5.1) → Zangado (Fable 5.1). Structural — reviewer and auditor both differ from the implementer's model, as SPEC-01's `Risk level: high` requires.
+**Branch:** feat/S-01.2-idp-adapter @ cde7b2a. **Rigor:** standard. **Gates skipped by profile:** none — every gate was run and recorded.
+
+## Subject of the re-audit
+- `1187944` — FU-01.3-A, the A3 `run_id` precondition control in `record_run` (+ docstring-only Protocol obligation in `types.py`).
+- `bb58be0` — test-only; positive path parametrized over two `run_id`s, closing a surviving mutant.
+
+## Entry gates (verified, not trusted)
+| Gate | Result |
+|---|---|
+| TDD stamp | ✅ PASSED, `Source: /test gap-fill (Atchim TDD gate)`, `Commit: bb58be0`. SPEC-01 is Risk: high, which requires exactly that Source — rigor gate PASS |
+| Freshness | `bb58be0..HEAD` touches only `docs/` — stamp fresh |
+| Cleanliness (8i) | ✅ `check_clean.py` exit 0, "clean — no stale artifacts" |
+| Containment (8c) | `HARDEN-01.md` still absent, but the deferral is **upheld** — see Rulings |
+
+## Tests (Zangado's own run, matching mine exactly)
+| Scope | Passed | Failed |
+|---|---|---|
+| Unit + contract (default) | 464 | 0 |
+| `tests/platform` | 143 | 0 |
+| Full suite incl. live integration (Langfuse 4.38.0) | 477 | 0 |
+
+`mypy --strict src` clean (23 files); `ruff check src tests` clean. The one live skip is `tests/adapter/test_integration_idp.py:63` (no published IDP action id — S-01.6), by design. No Critical regression.
+
+**TDD spot-check (step 7):** no test files deleted since `71e5e6a`; the only skips are the by-design integration gates; no `.skip`/`xfail`/`.todo` elsewhere; no TODO/FIXME in `src` or `tests`.
+
+## Gate results
+- `Observability: ✅ VERIFIED` (S-01.3 scope). Verified by running the suites with `log_cli` and **reading the lines that actually fired**, not the code: `dataset_fetch_failed`, `score_write_failed` (with `attempts=3`), `run_status_write_failed` — each with a redacted `detail`. Log-injection probes (a newline inside `document_id`) stay one escaped line, so N5 holds. The A3 raise emits no log line by design; it is a precondition abort S-01.4 maps to `hard_failure`.
+- `Containment: deferred → S-01.4 /harden (HARDEN-01.md), upheld` — with a condition, see Rulings.
+- `LLM-Evals: N/A` (NFR-01:12 — deterministic classifier, no LLM call).
+- `UI conformance: N/A` (no UI surface).
+- `SCA: PASS` — `pip-audit`, no known vulnerabilities.
+- `Secrets: PASS` — `gitleaks git .` clean over full history. The two `dir`-scan hits are `.env:2` and `.env:10`, gitignored and not committed (`git check-ignore` confirms).
+- `Composition: PASS` — 80 contract/invariant tests + 2 live N26. INV-01 ✅, INV-02 (adapter leg) ✅, INV-03 ✅, INV-04 (adapter leg) ✅. INV-08-adjacent: the A3 check sits before `records_by_item_id`/`record_experiment`, so a refused run writes nothing — pinned by `run_experiment_calls == 0`.
+
+## NFR-01 walk (8b)
+No feature row **owned by S-01.3** is ❌ or ⬜.
+- **N26 ✅ PASS — strengthened by FU-01.3-A.** Contract: `test_score_contract.py:104`, `test_scoring.py:23`. Boundary: `test_record_run_preconditions.py:280` (foreign `run_id` refused, `run_experiment_calls == 0`, `http_client.calls == []`), `:306`, `:337`, `:378`. DEBT-19's experiment-merge half closed in `293d9fc`.
+- **N10 and N16:** S-01.3 legs ✅ PASS; UC legs ⚠️ WAIVED → S-01.4.
+- **N2, N21, N22:** ✅ PASS, unchanged (S-01.1/S-01.2).
+- **N1, N3, N6, N7, N8, N14, N15, N28:** ⚠️ WAIVED → S-01.4 — these are the rows NFR-01:74 already assigns to S-01.4; none is owned by S-01.3.
+- **System rows** (N4, N5, N9, N11-N13, N17-N20, N23-N25, N27): ⚠️ WAIVED → `/signoff`, with S-01.3 evidence recorded for that gate.
+
+## Findings
+
+### Critical / Major
+None.
+
+### Minor
+- **F-1: the A3 precondition raises raw `KeyError`/`TypeError` on a malformed score dict, escaping `record_run`'s typed-error contract.** `langfuse_adapter.py:341-344` subscripts `score["name"]` and `score["id"]` immediately after the defensive `record.get("scores", [])`. **Independently reproduced** (probe against the adapter with the test fakes): score missing `"id"` → `KeyError: 'id'`; missing `"name"` → `KeyError: 'name'`; `"scores": None` → `TypeError: 'NoneType' object is not iterable`. The Protocol docstring (`types.py:99-101`) promises `ExperimentRecordFailedError | ScoreWriteFailedError | FlushFailedError`.
+  - *Why Minor:* all three escape **before any SDK call**, so the run is fail-closed and nothing reaches the platform; and the input is unreachable from `build_score_inputs` under mypy --strict (`DocumentRecord.scores` is a required typed key).
+  - *The honest trade:* pre-A3 the same malformed input surfaced as a **typed** error, but only *after* `record_experiment` had created the experiment. A3 traded "typed but late" for "untyped but early".
+  - **escaped-atchim: yes** — flagged the `.get` tolerance, not the untyped subscripts beside it.
+- **F-2: three pieces of S-01.3 debt exist only in `HANDOFFS.md` and the TEST stamp — not on any card, not in `DEBT.md`.** (a) the weak `test_make_platform_dispatches_on_platform_env` "routed to FU-01.3-B" — but SPEC-01's FU-01.3-B card does not mention it; (b) the `.get("scores")` tolerance; (c) hoisting the two local `scoring` imports (`langfuse_adapter.py:339, :418`). A baton sentence is not a backlog. Not a code defect; no escape tag. Owner: Dunga.
+
+## Rulings (decisions, not findings)
+- **Containment deferral: UPHELD.** Zangado re-examined it rather than inheriting it. NFR-01:11 binds `Containment: REQUIRED` to UC-01; SPEC L136 binds it to "before the **epic** is Done" via S-01.4 `/harden`; NFR-01:80 scopes it onto S-01.4. S-01.3 has no run loop for a failure to cascade through. **Condition attached:** HARDEN-01 must now also red-team the A3 precondition (a record set carrying foreign-`run_id` ids → typed abort, zero platform writes), alongside retry upsert safety and the aborted marker. S-01.4 cannot reach Done without it.
+- **gitleaks gate semantics (T-01.4.10 / DEBT-12): DECIDED.** Neither option originally offered was right alone. The gate protects against a *committed* secret, so a working-tree `dir` scan that flags a gitignored `.env` measures the wrong thing. Three legs: (1) **blocking** — `gitleaks git .` over full history, on every PR; this is what "gitleaks clean" means; (2) **blocking** — `gitleaks protect --staged` as a pre-commit hook, which catches the exact failure mode an allowlist would mask (someone force-adds or un-ignores `.env`) *before* it reaches history; (3) **assertion, not a scan** — CI asserts `git check-ignore -q .env` exits 0 and `git ls-files --error-unmatch .env` exits non-zero, so if `.env` ever becomes tracked the build fails independently of gitleaks' rules. **Do not add a `.gitleaks.toml` allowlist for `.env`** — it would silence leg 2 on that exact file for zero benefit. A local `dir` scan may exist as advisory only. **DEBT-12 → close** (tool installed, gate defined).
+
+## Known-open confirmations (not rediscovered as findings)
+- **INV-05** (`load_dotenv()` ordering): not S-01.3's — `make_platform`'s docstring assigns it to the caller and `orchestration/` is empty. S-01.4 duty. Agreed.
+- **F-7** (stale 1,641-char F2 measurement): **CLOSED** — `DATA-MODEL-01.md:46` now reads 1,898 with the correction note.
+- **F-6** (compose image pin): closed 2026-09-19; ops, outside this story's diff.
+- **Weak `test_make_platform_dispatches_on_platform_env`:** confirmed `isinstance`-only; a factory ignoring `LANGFUSE_HOST` would pass. Routing to FU-01.3-B is adequate in substance — but see F-2, the routing is recorded nowhere a card owner reads.
+
+## Debt surfaced (→ Dunga)
+- F-1 (precondition should own malformed records) — Low, fail-closed today.
+- F-2 (a)-(c) — record on FU-01.3-B as explicit DoD bullets so the re-stamp covers them.
+- **N6 note:** `make_platform` fails on a missing env var with a bare `KeyError` (`langfuse_adapter.py:468-470`). S-01.4's fail-closed-with-clear-message check must wrap or pre-validate. Not S-01.3's row — recorded so it is not lost.
