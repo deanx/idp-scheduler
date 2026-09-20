@@ -334,10 +334,19 @@ def test_a_single_mismatched_score_among_correct_ones_is_still_refused() -> None
     assert http_client.calls == []
 
 
-def test_correctly_derived_ids_for_all_three_score_families_pass() -> None:
+@pytest.mark.parametrize("run_id", ["run-1", "run-2"])
+def test_correctly_derived_ids_for_all_three_score_families_pass(run_id: str) -> None:
     """Proves the precondition isn't always-raising, over the full score
     vocabulary build_score_inputs emits (CT-03): field:<name>,
-    prompt:<16-hex> and the single per-document gate."""
+    prompt:<16-hex> and the single per-document gate.
+
+    Parametrized over two run_ids (Atchim FU-01.3-A review, suggestion 1):
+    with one fixed run_id, a mutant that ignores the run_id parameter and
+    hard-codes "run-1" — precisely the defect A3 exists to close — survives
+    every test in this file, and dies only incidentally in an unrelated
+    INV-01 test that happens to use a different run id. Varying it pins
+    "the parameter is actually consumed" here, where it belongs.
+    """
     adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
     prompt_name = prompt_score_name("who signed the invoice?")
     records: list[DocumentRecord] = [
@@ -346,19 +355,19 @@ def test_correctly_derived_ids_for_all_three_score_families_pass() -> None:
             "document_id": "doc-0",
             "scores": [
                 _score(
-                    run_id="run-1",
+                    run_id=run_id,
                     document_id="doc-0",
                     name=field_score_name("total"),
                     value="match",
                 ),
-                _score(run_id="run-1", document_id="doc-0", name=prompt_name, value="match"),
-                _score(run_id="run-1", document_id="doc-0", name="gate", value="PASS"),
+                _score(run_id=run_id, document_id="doc-0", name=prompt_name, value="match"),
+                _score(run_id=run_id, document_id="doc-0", name="gate", value="PASS"),
             ],
         }
     ]
 
     adapter.record_run(
-        dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+        dataset_name="ds", run_name="r", run_id=run_id, records=records, metadata=_METADATA
     )
 
     assert tracing_client.run_experiment_calls == 1
