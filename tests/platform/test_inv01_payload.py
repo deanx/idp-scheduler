@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from idp_regression.platform.langfuse_adapter import LangfuseAdapter
-from idp_regression.platform.scoring import build_score_inputs
+from idp_regression.platform.scoring import build_score_inputs, score_id
 from idp_regression.platform.tracing import ExperimentItem
 from idp_regression.platform.types import ScoreInput
 
@@ -291,8 +291,18 @@ def test_experiment_task_output_is_the_verdict_map_never_a_raw_value() -> None:
     adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
     adapter._cached_dataset_name = "ds"  # noqa: SLF001
     scores: list[ScoreInput] = [
-        {"id": "s1", "name": "field:total", "value": "wrong_value", "comment": None},
-        {"id": "s2", "name": "gate", "value": "FAIL", "comment": None},
+        {
+            "id": score_id(run_id="run-1", document_id="doc-1", score_name="field:total"),
+            "name": "field:total",
+            "value": "wrong_value",
+            "comment": None,
+        },
+        {
+            "id": score_id(run_id="run-1", document_id="doc-1", score_name="gate"),
+            "name": "gate",
+            "value": "FAIL",
+            "comment": None,
+        },
     ]
 
     adapter.record_run(

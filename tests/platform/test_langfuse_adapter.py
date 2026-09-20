@@ -26,7 +26,7 @@ from idp_regression.platform.errors import (
     TransportError,
 )
 from idp_regression.platform.langfuse_adapter import LangfuseAdapter, make_platform
-from idp_regression.platform.scoring import RUN_LEVEL_TRACE_SENTINEL, trace_id
+from idp_regression.platform.scoring import RUN_LEVEL_TRACE_SENTINEL, score_id, trace_id
 
 
 class FakeHttpClient:
@@ -46,6 +46,19 @@ class FakeHttpClient:
             if m == method and path.startswith(p):
                 return resp
         raise AssertionError(f"unexpected call: {method} {path}")
+
+def _derived_score(
+    *, document_id: str, name: str, value: str, run_id: str = "run-1"
+) -> dict[str, Any]:
+    """A ScoreInput whose id is derived from the SAME run_id record_run is
+    called with — record_run's A3 precondition (ADR-0005 #9) refuses any
+    other id, so fixtures must use the real derivation, not a stub."""
+    return {
+        "id": score_id(run_id=run_id, document_id=document_id, score_name=name),
+        "name": name,
+        "value": value,
+        "comment": None,
+    }
 
 
 def _v2_dataset_response(schema: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -363,7 +376,13 @@ def test_record_run_score_write_5xx_raises_score_write_failed_error() -> None:
         {
             "item_id": dataset["items"][0]["item_id"],
             "document_id": dataset["items"][0]["document_id"],
-            "scores": [{"id": "s1", "name": "gate", "value": "PASS", "comment": None}],
+            "scores": [
+                _derived_score(
+                    document_id=dataset["items"][0]["document_id"],
+                    name="gate",
+                    value="PASS",
+                )
+            ],
         }
     ]
 
@@ -409,7 +428,13 @@ def test_record_run_never_posts_to_the_v4_trace_ingestion_endpoint() -> None:
         {
             "item_id": dataset["items"][0]["item_id"],
             "document_id": dataset["items"][0]["document_id"],
-            "scores": [{"id": "s1", "name": "gate", "value": "PASS", "comment": None}],
+            "scores": [
+                _derived_score(
+                    document_id=dataset["items"][0]["document_id"],
+                    name="gate",
+                    value="PASS",
+                )
+            ],
         }
     ]
 
@@ -491,7 +516,11 @@ def test_write_scores_error_log_survives_a_newline_in_document_id_and_score_name
             "item_id": dataset["items"][0]["item_id"],
             "document_id": dataset["items"][0]["document_id"],
             "scores": [
-                {"id": "s1", "name": malicious_score_name, "value": "FAIL", "comment": None}
+                _derived_score(
+                    document_id=dataset["items"][0]["document_id"],
+                    name=malicious_score_name,
+                    value="FAIL",
+                )
             ],
         }
     ]
@@ -598,7 +627,13 @@ def _record_run_via(adapter: LangfuseAdapter) -> None:
         {
             "item_id": dataset["items"][0]["item_id"],
             "document_id": dataset["items"][0]["document_id"],
-            "scores": [{"id": "s1", "name": "gate", "value": "PASS", "comment": None}],
+            "scores": [
+                _derived_score(
+                    document_id=dataset["items"][0]["document_id"],
+                    name="gate",
+                    value="PASS",
+                )
+            ],
         }
     ]
     adapter.record_run(
@@ -672,7 +707,11 @@ def test_write_scores_retries_a_5xx_then_succeeds_with_the_same_score_id() -> No
 
     score_post_calls = [c for c in client.calls if c[1] == "/api/public/scores"]
     assert len(score_post_calls) == 2
-    assert score_post_calls[0][2]["id"] == score_post_calls[1][2]["id"] == "s1"
+    assert (
+        score_post_calls[0][2]["id"]
+        == score_post_calls[1][2]["id"]
+        == score_id(run_id="run-1", document_id="doc-0", score_name="gate")
+    )
 
 
 def test_write_scores_retries_a_transport_error_then_succeeds() -> None:

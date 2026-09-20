@@ -328,6 +328,30 @@ class LangfuseAdapter:
                 "(call get_dataset(dataset_name) first, in this same run)"
             )
 
+        # ADR-0005 #9 amendment A3 (Soneca, 2026-09-20): run_id is verified,
+        # not decorative. N26's cross-invocation no-overwrite guarantee rests
+        # on every scores[*].id having been derived from THIS run_id — score
+        # ids are the upsert key, so ids belonging to another invocation would
+        # overwrite that run's scores and still record as correct. A pure
+        # local loop over data already in hand: no extra call, no network.
+        # INV-02: the raise names document_id + score_name only (both
+        # value-free by construction) and never the offending id pair.
+        from idp_regression.platform.scoring import score_id
+
+        for record in records:
+            document_id = record["document_id"]
+            for score in record.get("scores", []):
+                score_name = score["name"]
+                if score["id"] != score_id(
+                    run_id=run_id, document_id=document_id, score_name=score_name
+                ):
+                    raise ExperimentRecordFailedError(
+                        "record_run: a score id was not derived from the run_id passed in "
+                        f"this call (document_id={document_id!r}, "
+                        f"score_name={score_name!r}) — every score id must be "
+                        "score_id(run_id, document_id, score_name) for this same run (N26)"
+                    )
+
         records_by_item_id = {record["item_id"]: record for record in records}
         task_failed = False
 

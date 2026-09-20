@@ -99,6 +99,16 @@ class PlatformAdapter(Protocol):
         scores on each item's real trace id. Raises
         ``ExperimentRecordFailedError`` | ``ScoreWriteFailedError`` |
         ``FlushFailedError``. Never retried by the adapter (ADR-0005 #9).
+
+        Obligation on ``run_id`` (ADR-0005 #9 amendment A3, 2026-09-20):
+        every ``scores[*].id`` MUST be derived from the ``run_id`` passed
+        in this same call. That is what makes two invocations under the
+        same ``run_name`` unable to overwrite each other's scores (N26) —
+        score ids are the upsert key. The derivation itself is each
+        adapter's own (this Protocol does not mandate a scheme, so an
+        adapter that derives ids differently stays implementable, N24).
+        An implementation MAY verify the obligation, and MUST raise
+        ``ExperimentRecordFailedError`` if it verifies and the check fails.
         """
         ...
 

@@ -13,7 +13,8 @@ import pytest
 
 from idp_regression.platform.errors import ExperimentRecordFailedError
 from idp_regression.platform.langfuse_adapter import LangfuseAdapter
-from idp_regression.platform.types import DocumentRecord, RunMetadata
+from idp_regression.platform.scoring import field_score_name, prompt_score_name, score_id
+from idp_regression.platform.types import DocumentRecord, RunMetadata, ScoreInput
 
 _METADATA: RunMetadata = {"action_id": "a", "action_version": "v", "golden_version": "g"}
 
@@ -47,8 +48,10 @@ class _RunExperimentTracingClient:
 
     def __init__(self) -> None:
         self.task_outputs: list[Any] = []
+        self.run_experiment_calls = 0
 
     def run_experiment(self, **kwargs: Any) -> _FakeResult:
+        self.run_experiment_calls += 1
         results = []
         for item in kwargs["data"]:
             output = kwargs["task"](item=item)
@@ -247,3 +250,150 @@ def test_record_run_raises_when_dataset_name_does_not_match_the_cached_dataset()
             records=records,
             metadata=_METADATA,
         )
+
+
+# --- FU-01.3-A / ADR-0005 #9 amendment A3: run_id is verified, not
+# decorative. Every scores[*].id MUST be uuid5-derived from the run_id
+# passed in this same call, checked before any SDK call (N26 becomes a
+# boundary-checked precondition instead of orchestrator discipline).
+
+
+def _adapter_with_tracing(
+    *item_ids: str,
+) -> tuple[LangfuseAdapter, _FakeHttpClient, _RunExperimentTracingClient]:
+    http_client = _FakeHttpClient()
+    tracing_client = _RunExperimentTracingClient()
+    adapter = LangfuseAdapter(client=http_client, tracing_client=tracing_client)
+    adapter._item_cache = {item_id: f"ds-{item_id}" for item_id in item_ids}  # noqa: SLF001
+    adapter._cached_dataset_name = "ds"  # noqa: SLF001
+    return adapter, http_client, tracing_client
+
+
+def _score(*, run_id: str, document_id: str, name: str, value: str) -> ScoreInput:
+    return {
+        "id": score_id(run_id=run_id, document_id=document_id, score_name=name),
+        "name": name,
+        "value": value,
+    }
+
+
+def test_score_id_from_a_different_run_id_is_refused_before_any_sdk_call() -> None:
+    """The defect N26 rests on: a DocumentRecord whose score ids were
+    derived from ANOTHER invocation's run_id would previously record as
+    correct, overwriting that other run's scores (the ids are the upsert
+    key). The check must fire before the experiment is created, so a
+    rejected run leaves nothing behind on the platform."""
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    records: list[DocumentRecord] = [
+        {
+            "item_id": "item-1",
+            "document_id": "doc-0",
+            # derived from a DIFFERENT run
+            "scores": [_score(run_id="run-OTHER", document_id="doc-0", name="gate", value="PASS")],
+        }
+    ]
+
+    with pytest.raises(ExperimentRecordFailedError, match="run_id"):
+        adapter.record_run(
+            dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+        )
+
+    assert tracing_client.run_experiment_calls == 0
+    assert tracing_client.task_outputs == []
+    assert http_client.calls == []
+
+
+def test_a_single_mismatched_score_among_correct_ones_is_still_refused() -> None:
+    """Whole-run refusal, not a per-score skip: one wrong id among many
+    correct ones must abort the entire record (a partial record is worse
+    than none — same stance as the task_failed path)."""
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1", "item-2")
+    records: list[DocumentRecord] = [
+        {
+            "item_id": "item-1",
+            "document_id": "doc-0",
+            "scores": [_score(run_id="run-1", document_id="doc-0", name="gate", value="PASS")],
+        },
+        {
+            "item_id": "item-2",
+            "document_id": "doc-1",
+            "scores": [
+                _score(run_id="run-1", document_id="doc-1", name="field:total", value="match"),
+                # right run_id, but derived for the WRONG document
+                _score(run_id="run-1", document_id="doc-0", name="gate", value="PASS"),
+            ],
+        },
+    ]
+
+    with pytest.raises(ExperimentRecordFailedError, match="run_id"):
+        adapter.record_run(
+            dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+        )
+
+    assert tracing_client.run_experiment_calls == 0
+    assert http_client.calls == []
+
+
+def test_correctly_derived_ids_for_all_three_score_families_pass() -> None:
+    """Proves the precondition isn't always-raising, over the full score
+    vocabulary build_score_inputs emits (CT-03): field:<name>,
+    prompt:<16-hex> and the single per-document gate."""
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    prompt_name = prompt_score_name("who signed the invoice?")
+    records: list[DocumentRecord] = [
+        {
+            "item_id": "item-1",
+            "document_id": "doc-0",
+            "scores": [
+                _score(
+                    run_id="run-1",
+                    document_id="doc-0",
+                    name=field_score_name("total"),
+                    value="match",
+                ),
+                _score(run_id="run-1", document_id="doc-0", name=prompt_name, value="match"),
+                _score(run_id="run-1", document_id="doc-0", name="gate", value="PASS"),
+            ],
+        }
+    ]
+
+    adapter.record_run(
+        dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+    )
+
+    assert tracing_client.run_experiment_calls == 1
+    score_calls = [c for c in http_client.calls if c[1] == "/api/public/scores"]
+    assert len(score_calls) == 3
+
+
+def test_the_run_id_mismatch_error_names_only_document_id_and_score_name() -> None:
+    """INV-02 (same class as QA-01 S-01.3 F-5 / REG-05): the raise must
+    carry document_id + score_name ONLY — both value-free by construction
+    (``field:<name>`` is charset-restricted, ``prompt:<16-hex>`` is a
+    digest). No golden value, and no dump of the offending id pair."""
+    sentinel_golden_value = "SENTINEL-GOLDEN-VALUE-do-not-leak-3e9f2b"
+    sentinel_prompt_key = "SENTINEL-PROMPT-KEY-do-not-leak-7f3c1a"
+    hashed_name = prompt_score_name(sentinel_prompt_key)
+
+    adapter, _, _ = _adapter_with_tracing("item-1")
+    bad_score = _score(
+        run_id="run-OTHER", document_id="doc-0", name=hashed_name, value=sentinel_golden_value
+    )
+    records: list[DocumentRecord] = [
+        {"item_id": "item-1", "document_id": "doc-0", "scores": [bad_score]}
+    ]
+
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        adapter.record_run(
+            dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+        )
+
+    message = str(excinfo.value)
+    assert sentinel_golden_value not in message
+    assert sentinel_prompt_key not in message
+    # neither the offending id nor the id it should have been
+    assert bad_score["id"] not in message
+    assert score_id(run_id="run-1", document_id="doc-0", score_name=hashed_name) not in message
+    # but it must still be actionable
+    assert "doc-0" in message
+    assert hashed_name in message
