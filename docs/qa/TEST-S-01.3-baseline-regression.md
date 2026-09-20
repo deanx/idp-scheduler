@@ -2,13 +2,14 @@
 
 **Status:** ✅ PASSED
 **Source:** /test gap-fill (Atchim TDD gate)
-**Date:** 2026-09-19
-**Commit:** 71e5e6acc81f6b0bd8bd224f6d0997c9f6ccce7b
+**Date:** 2026-09-20
+**Commit:** bb58be0397e5f4855e2d455b8150064a775bad21
 **Author:** alex@divinocosta.com.br
-**Atchim TDD gate:** PASSED (/test gate over the QA fix round 747cf80..71e5e6a on 2026-09-19. An independent coverage audit of the fix round confirmed REG-03/04/05 and Soneca's C1–C3; its gaps were closed in 5795993 and 71e5e6a. Atchim's mutation checks all killed. Earlier /test gate: ba6a905.)
-**Independence:** ✅ structural (different models): Dengoso (sonnet) reviewed by Atchim (opus). SPEC-01 is Risk: high.
+**Atchim TDD gate:** PASSED (2026-09-20, over FU-01.3-A `1187944..bb58be0`. Atchim re-ran mypy/ruff and the live suite himself rather than accepting the claim, and — because tests and source landed in one commit, so git cannot prove ordering — **reproduced RED independently** in a scratch worktree by reverting only `langfuse_adapter.py`/`types.py` to `1187944~1`: 3 failed, 9 passed, the three failures being exactly the refusal tests with `DID NOT RAISE`, and the positive-path test passing on old code, proving it is not vacuous. He then ran **seven hand-written mutants**; all died. M3 — `run_id` hard-coded, i.e. the parameter not consumed, the very defect A3 closes — survived all four new tests and died only incidentally in an unrelated INV-01 test; fixed in bb58be0 by parametrizing the positive path over two run_ids, and I re-applied M3 locally to confirm it now dies in the right file. Verdict APPROVED, 0 Critical, 0 Required. Earlier gates: 71e5e6a, ba6a905.)
+**Independence:** ✅ structural (different models): Dengoso (Opus 5) reviewed by Atchim (**Fable 5.1**). SPEC-01 is Risk: high. ⚠️ Note: the first re-review of this change was launched on Opus — same model as the implementer — which the stamp schema forbids for a Risk: high spec. It was stopped before producing a verdict and relaunched on Fable 5.1; the Opus run contributed nothing to this stamp. `hooks/check_reviewer_independence.py`, named by the schema as the enforcement point, does not exist in this repo, so this line is the honest label and not a machine-checked fact.
 **Static:** ✅ clean: mypy strict (41 files) + ruff; pip-audit clean (`langfuse==4.15.4` confined to `make_platform()`, N24)
 **Files:** CLAUDE.md, docs/adr/0002-idp-adapter-and-normalize-contract.md, docs/adr/0004-run-orchestration-and-failure-containment.md, docs/adr/0005-evaluation-platform-redecision.md, docs/design/CONTRACTS.md, docs/design/DATA-MODEL-01.md, docs/design/INVARIANTS.md, docs/design/SEQ-UC-01-baseline-regression.md, docs/qa/NFR-01.md, docs/qa/QA-01-baseline-regression-S-01.3.md, docs/qa/TEST-S-01.3-baseline-regression.md, pyproject.toml, src/idp_regression/platform/errors.py, src/idp_regression/platform/hashing.py, src/idp_regression/platform/langfuse_adapter.py, src/idp_regression/platform/schema/__init__.py, src/idp_regression/platform/schema/golden_schema_v1.json, src/idp_regression/platform/schema_provisioning.py, src/idp_regression/platform/scoring.py, src/idp_regression/platform/tracing.py, src/idp_regression/platform/transport.py, src/idp_regression/platform/types.py, tests/conftest.py, tests/platform/__init__.py, tests/platform/_tp45_subprocess_scenario.py, tests/platform/test_golden_schema_contract.py, tests/platform/test_hashing.py, tests/platform/test_integration_langfuse.py, tests/platform/test_inv01_payload.py, tests/platform/test_langfuse_adapter.py, tests/platform/test_log_redaction.py, tests/platform/test_module_boundary.py, tests/platform/test_record_run_preconditions.py, tests/platform/test_schema_provisioning.py, tests/platform/test_score_contract.py, tests/platform/test_scoring.py, tests/platform/test_tracing.py, tests/platform/test_transport.py, uv.lock
+**Files (FU-01.3-A delta, 1187944..bb58be0):** src/idp_regression/platform/langfuse_adapter.py (record_run precondition, +24), src/idp_regression/platform/types.py (PlatformAdapter.record_run docstring only), tests/platform/test_record_run_preconditions.py (+4 tests, one now parametrized over two run_ids), tests/platform/test_langfuse_adapter.py (fixture realignment to the real score_id() derivation + one assertion strengthened), tests/platform/test_inv01_payload.py (fixture realignment)
 **Sequence:** test-first per slice (git-verified, tests in the same or an earlier commit):
 - CT-05 schema contract, then the schema file (90bc241)
 - test_hashing, then hashing.py (471d7d3)
@@ -24,11 +25,18 @@ Fix rounds: traceId/dataType (f107524); tracing, **probed live before its tests*
 
 | Scope | Passed | Failed |
 |---|---|---|
-| Unit + contract (default run) | 220 | 0 |
-| Full suite incl. live integration (`RUN_INTEGRATION_TESTS=1`, local Langfuse 4.38.0, synthetic data) | 232 | 0 |
+| Unit + contract (default run, whole repo) | 464 | 0 |
+| Full suite incl. live integration (`RUN_INTEGRATION_TESTS=1`, local Langfuse 4.38.0, synthetic data) | 477 | 0 |
+| `tests/platform` only (this story's package) | 143 | 0 |
 | Bug-repros (`@bug-repro`) | — | none |
 
-Atchim mutation checks: every survivor from round 2 is killed. The final round killed two more TP-45 mutations: span output leaking `repr(exc)`, and an extra `document_id` in the output.
+One skip in the live run: `tests/adapter/test_integration_idp.py:63`, the S-01.6 live submit/poll test — no published IDP action id/version exists yet. Skipped by design, not an unlinked skip. The 12 `test_integration_langfuse.py` skips in the default run are the by-design integration gate (`tests/conftest.py:17-25`).
+
+Baseline before this round was 472/1 at `fe09898`. +4 at `1187944` (the A3 tests), +1 at `bb58be0` (the second parametrize case) = 477.
+
+Atchim mutation checks: every survivor from round 2 is killed. The earlier round killed two TP-45 mutations (span output leaking `repr(exc)`; an extra `document_id` in the output). **2026-09-20 (FU-01.3-A, Fable 5.1):** seven further mutants against the A3 precondition — check only the first record (killed), only the first score (killed), `run_id` hard-coded (survived the four new tests; see the gate line, fixed in `bb58be0`), `run_name` substituted for `run_id` (killed), `raise`→`continue` warn-only (killed), check relocated after `record_experiment` (killed by the `run_experiment_calls == 0` assertions), offending id appended to the message (killed by the INV-02 test). No mutant survives the suite.
+
+**Independent coverage audit (2026-09-20, fresh agent, no implementation context):** no MISSING rows across 23 DoD items and 15 S-01.3 test-plan rows. Pre-#9 DoD items (L119, L131, and parts of L125/L135/L136) are classified **SUPERSEDED**, not gaps — ADR-0005 #9 reshaped the Protocol to `get_dataset`/`record_run`/`mark_run_status`. One genuine uncovered obligation, correctly deferred: **INV-05** (`load_dotenv()` before client construction) is neither tested nor implemented here — `langfuse_adapter.py` assigns it to the caller and `orchestration/` is still empty, so it is an S-01.4 duty. Do not read this stamp as covering it. The audit also flagged six weak-but-passing tests; the one with real teeth is `test_make_platform_dispatches_on_platform_env` (`test_langfuse_adapter.py:294-303`), an `isinstance` smoke check that never asserts host/keys were wired, so a factory ignoring `LANGFUSE_HOST` would pass it — routed to FU-01.3-B rather than re-opened here.
 
 ## AC coverage
 
@@ -68,6 +76,7 @@ Atchim mutation checks: every survivor from round 2 is killed. The final round k
 - **N25** → user/Mestre, before any real-document run. DEBT-18 is closed: the user chose option B (no values on the platform), implemented in 50ce083, 49c2150, 320460f, 22d7c3c and 825201a.
 
 ## History
+- /test gap-fill (Atchim TDD gate) PASSED on 2026-09-19 at 71e5e6acc81f6b0bd8bd224f6d0997c9f6ccce7b: ✅ PASSED. Superseded by this re-stamp after FU-01.3-A (the A3 `run_id` precondition control) changed `langfuse_adapter.py`, `types.py` and three test files, staling the stamp.
 - /test gap-fill (Atchim TDD gate) PASSED at ba6a9056969136ef488eaeeca37b86e28483ac73, before the QA fix round. Superseded after QA S-01.3 ⚠️ (F-1..F-5) was fixed and re-gated.
 - /implement (Atchim TDD gate) PASSED at 825201a07fa8b3de3f31f326eaadbc1dc23a558b. Superseded by this /test stamp (required by the /qa rigor gate for Risk: high).
 - /implement (Atchim TDD gate) PASSED at 02cff1be9a607c91b3dc267a601f5003614a210a. Superseded by this re-stamp after the DEBT-18 option-B change (Atchim found a vacuous score-body assertion, fixed in 825201a, then re-APPROVED).
