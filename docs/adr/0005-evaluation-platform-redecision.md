@@ -230,12 +230,12 @@ Golden edits in MVP are low-volume. The Curator edits JSON in the Langfuse UI. G
 A local `validate-golden` helper (the same schema, `allErrors`, path-level messages) is a *candidate* for Epic C. That scope is Dunga's call, not decided here.
 
 ## Design patterns
-- **Adapter (GoF)**: unchanged from ADR-0001. `PlatformAdapter` Protocol plus a `LangfuseAdapter` class; the SDK and raw REST stay confined to `src/idp_regression/platform/` (N24). The v4 ingestion split (OTLP for traces, REST for scores) is hidden behind the adapter.
+- **Adapter (GoF)**: *pattern* unchanged from ADR-0001; the **interface is reshaped by Decision #9** — see §API contract (deltas). `PlatformAdapter` Protocol plus a `LangfuseAdapter` class; the SDK and raw REST stay confined to `src/idp_regression/platform/` (N24). The v4 ingestion split (OTLP for traces, REST for scores) is hidden behind the adapter.
 - **Specification (schema as data)**: the golden JSON Schema is a committed, versioned data artifact. Langfuse enforces it at write time and the Epic E form renders it. Stack-idiomatic form: a JSON file plus a small provisioning function that upserts it via REST. It is **not** a Python class hierarchy.
 - **Deterministic identity (ad-hoc, a pure function)**: `score_id(run_id, document_id, score_name) -> UUID` is a plain function. No GoF pattern fits better, and wrapping it would be over-application.
 
 ## API contract (deltas)
-- `PlatformAdapter` interface: **unchanged** (`get_dataset` / `write_scores` / `flush`, and no `get_golden_version`).
+- `PlatformAdapter` interface: **reshaped by Decision #9** — `get_dataset` / `record_run` / `mark_run_status`, and still no `get_golden_version` (INV-04 stays a single-fetch content hash). `write_scores`, `flush` and `run_dataset_experiment` are adapter-private internals behind `record_run`; there is no public flush seam and no flush retry.
 - New observable behaviours we commit to (Hyrum's Law):
   - Score ids are deterministic in `(run_id, document_id, score_name)`. Consumers may rely on "re-writing a score within a run replaces it".
   - Every golden dataset carries an `expectedOutputSchema`. Consumers (Epic E form, Epic C tooling) may assume stored goldens conform to the committed schema version. A run never proceeds against a drifted schema (Decision #8, abort `schema_drift`).
