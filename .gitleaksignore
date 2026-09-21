@@ -1,0 +1,18 @@
+# DEBT-45 — one triaged historical test-fixture literal.
+#
+# Committed in 353549d; renamed in the working tree by FU-01.3-D DoD (h)
+# but immutable in history. Verified across four audits NOT to be a
+# credential: it matches no value in the gitignored .env (16 values
+# checked), and .env is both gitignored and untracked. No rotation was
+# required.
+#
+# A FINGERPRINT pins exactly one commit x file x line x rule. It cannot
+# blind a future commit, another line, or even this same line in a later
+# commit — verified by planting a test secret after adding this entry and
+# confirming the scan still caught it.
+#
+# ⛔ DO NOT replace this with a path allowlist (paths = ['''tests/''']).
+# Both reviewers were emphatic: that blinds the gate on the highest-risk
+# file class in the repo, because a captured fixture is exactly how a real
+# value gets committed by accident.
+353549d18af0f2128e5323d104b42a5bf292fcb0:tests/platform/test_langfuse_adapter.py:generic-api-key:305
