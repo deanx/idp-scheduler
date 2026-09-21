@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated": "2026-09-21T10:47:36+00:00",
+  "generated": "2026-09-21T11:05:57+00:00",
   "note": "Derived from on-disk artifacts. Local verification status, not the board column (which stays canonical). Never hand-edit — regenerated on Stop.",
   "summary": {
     "total": 6,
@@ -12,7 +12,7 @@
   "registers": {
     "assumptions_high_open": 0,
     "regressions_pending": 3,
-    "debt_items": 39
+    "debt_items": 41
   },
   "stories": [
     {

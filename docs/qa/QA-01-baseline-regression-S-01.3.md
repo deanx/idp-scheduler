@@ -248,3 +248,92 @@ None.
 - F-1 (precondition should own malformed records) — Low, fail-closed today.
 - F-2 (a)-(c) — record on FU-01.3-B as explicit DoD bullets so the re-stamp covers them.
 - **N6 note:** `make_platform` fails on a missing env var with a bare `KeyError` (`langfuse_adapter.py:468-470`). S-01.4's fail-closed-with-clear-message check must wrap or pre-validate. Not S-01.3's row — recorded so it is not lost.
+
+---
+
+# Re-audit 2026-09-21 (after FU-01.3-B)
+
+**Verdict: ⚠️ Pass with follow-ups. S-01.3 STAYS DONE.** FU-01.3-B regressed nothing; every gate re-run green. 0 Critical, 0 Major, 2 Minor. One prior ruling overturned in part (M9).
+**Auditor:** Zangado (Fable 5.1). **Branch:** `feat/S-01.2-idp-adapter` @ `2cc4dde`. **Rigor:** standard — **no gate skipped by profile**.
+**Independence chain:** Dengoso (**sonnet**, implementer) → Atchim (**opus**, TDD gate) → Zangado (**Fable 5.1**, QA). Structural at every hop, as `Risk level: high` requires.
+
+## Subject of the re-audit
+The FU-01.3-B delta `bb58be0..7a45037` — `353549d` (typed malformed-record guard + record-phase deadline + no-redirect transport), `3ad1388` (split-brain fail-closed guard), `7a45037` (two mutant-closing test rounds) — plus today's re-stamp commits `0a534ec` / `2cc4dde`.
+
+## Entry gates (verified, not trusted)
+- Stamp ✅ PASSED, `Source: /test gap-fill (Atchim TDD gate)` — the rigor gate SPEC-01's `Risk level: high` demands. PASS.
+- **Freshness: PASS, and the self-reference checked rather than accepted.** The stamp records the *reviewed* SHA `7a45037`; its `Commit:` field warns that `git log {stamp_commit}..HEAD -- {Files}` returns the two stamp commits because `test_transport.py` and `docs/` paths sit in the `Files:` set. Zangado verified the falsifiable form himself: **`git diff --stat 7a45037 HEAD -- src/` is empty** — zero source drift. Self-reference, not staleness.
+- No test files deleted since `bb58be0`. Only `pytest.skip`s are the two documented live gates. No TODO/FIXME in `src/` or `tests/`. No merge/WIP commits in range.
+
+## Tests (Zangado's own runs)
+| Scope | Result |
+|---|---|
+| Default (`uv run pytest`) | **485 passed, 14 skipped** |
+| Live (`.env` sourced, `RUN_INTEGRATION_TESTS=1`, Langfuse 4.38.0 health 200) | **498 passed, 1 skipped** (S-01.6 IDP action gate) |
+| Composition subset (CT-03, CT-05, INV-01, hashing/INV-04, N24, log-redaction, preconditions) | **77 passed** |
+| `uv run mypy` / `uv run ruff check .` | clean / clean |
+
+## Gate results
+| Gate | Outcome |
+|---|---|
+| `Observability:` | **✅ VERIFIED** (S-01.3 scope) — observed firing, not read from code |
+| `Containment:` | **REQUIRED → deferred to S-01.4 `/harden`, UPHELD — condition WIDENED from one item to five** |
+| `LLM-Evals:` | **N/A** — NFR-01:12 justification confirmed (deterministic classifier, no LLM call) |
+| `UI conformance:` | **N/A** — no UI surface |
+| `SCA:` | **PASS** — `pip-audit`, no known vulnerabilities |
+| `Secrets:` | **⚠️ see F-2** — no committed credential, but `gitleaks git .` now returns 1 hit on a fixture literal |
+| `Composition:` | **PASS** — 77 contract/invariant + 2 live N26; INV-07 adapter leg new and passing |
+| `Cleanliness:` | **PASS** — `check_clean.py` exit 0 |
+
+**Observability detail.** Observed, not inferred: `transport_failed method="POST" path="/api/public/scores" detail="... unexpected redirect response"` on a real 3xx probe, redacted. INV-02 held on every path — 0 sentinel hits (expected value, score id, score name, secret, embedded URL credential) across all captured output and exception text. ⚠️ **Recorded, not a gap here:** the three *new* abort paths (malformed record, split-brain config, record deadline) emit **no log line by design** — typed raises only, the same convention as the A3 precondition. **S-01.4's N10 walk must log the mapped abort reason for them.**
+
+## NFR-01 walk (8b)
+**FU-01.3-B changed no row's ✅/❌ standing.** Owned by S-01.3: **N26 ✅ PASS** (unchanged standing, defence deepened — the shape guard makes A3's *precondition* typed, it does not alter the guarantee); **N10 S-01.3 leg ✅ PASS** (unchanged — new paths add no new abort *reason*); **N16 S-01.3 leg ✅ PASS — strengthened** (record-phase deadline is a new typed abort on the same row). N2 ✅ (p95 ~1.35 ms re-measured), N21 ✅, N22 ✅. N1/N3/N6/N7/N8/N14/N15/N28 ⚠️ WAIVED → S-01.4; **N6 caveat stands** (DEBT-30 — `make_platform` still bare-`KeyError`s on a *missing* env var; `PlatformConfigurationError` covers disagreement, not absence). All `system` rows ⚠️ WAIVED → `/signoff`. Full row-by-row markup in `docs/qa/NFR-01.md`.
+
+## Findings
+
+### Critical / Major
+None.
+
+### Minor
+
+**F-1 — three malformed-record shapes still escape `record_run` untyped, on the exact seam FU-01.3-B was closing.**
+`langfuse_adapter.py:409` subscripts `record["item_id"]` in a comprehension **seventeen lines before** the `_require_record_shape(record)` loop at `:426`, and the guard (`:66-99`) checks neither `item_id` nor that the record is a dict at all. Reproduced through the real `record_run` path with the dataset cache primed: record missing `item_id` → `KeyError: 'item_id'`; `item_id` a list → `TypeError: unhashable type`; record not a dict → `TypeError: string indices must be integers`. All three are **fail-closed** (0 SDK calls, 0 HTTP calls) — which is why this is Minor, and *not* why it should wait: an `except PlatformError:` caller in Epic D turns any of them into a raw traceback in a CI log instead of a gate message, on another team's prompt-change PR. The Protocol contract at `types.py:99-101` remains broken for these inputs; REG-09 `covered` is true only for its seven enumerated cases.
+- **Severity:** Minor · **`escaped-atchim: yes`** — same function, same seam, keys enumerated three lines apart.
+- **Second escape on this family in two consecutive audits**, and the third occurrence overall (REG-01, REG-04, REG-09).
+- **Ruling: PIN → widen REG-09, no new row** (Atchim). A REG-11 would fragment one class across two rows and let each row's case list look complete on its own — precisely the failure mode in play.
+
+**F-2 — `gitleaks git .` now fails on a fixture literal.**
+`tests/platform/test_langfuse_adapter.py:305`, value `distinctive-secret-2c71`, introduced in `353549d`, rule `generic-api-key`. Verified: matches **no** live `.env` value; `.env` remains gitignored and untracked (`check-ignore` 0 / `ls-files` non-zero). **Not a credential — no rotation.** But the gate as T-01.4.10 leg 1 defines it (blocking `gitleaks git .` over full history on every PR) now goes red, and the previous audit recorded this scan clean — the delta broke it.
+- **Severity:** Minor · **`escaped-atchim: no`** — the secret scan is the `/qa` 8g gate, outside the TDD gate's five axes.
+- **Ruling: no PIN** (Atchim). A regression test here would pin *gitleaks' entropy heuristic*, not our behaviour; the permanent control already exists — gitleaks runs in the gate.
+
+## Rulings (decisions, not findings)
+
+**1. The permanent fix for F-1 is structural, not a fourth case list.** Atchim's ruling, and the load-bearing part of this audit: **enumerating keys by hand is not the fix — it is the defect.** `DocumentRecord` is a `TypedDict` at `types.py:49-66`; the orchestrator confirmed `DocumentRecord.__required_keys__ == ['document_id', 'item_id', 'scores']`. Three consecutive attempts have enumerated a subset of a field list that was **importable all along**, and the base rate on that experiment is now 0 for 3. FU-01.3-D must land three structural parts:
+   1. **Ordering invariant, not a longer list** — validate *every* record at the very top of `record_run`, before any subscript of any record; derive `record_item_ids` from already-validated records. The `:409`-before-`:426` seam must become *physically impossible*, not merely patched at `:409`.
+   2. **Guard opens with a type check, not a key check** — `isinstance(record, dict)` as the first statement. `"document_id" not in record` on a `str` silently does substring semantics: the same trap FU-01.3-B already patched one level down for non-dict *scores* (REG-09's seventh case) and not one level up.
+   3. **Required keys come from the type, not from a human** — parametrize the missing-key cases over `DocumentRecord.__required_keys__`, so adding a field auto-generates its pin. This is the change that makes a fourth escape structurally unavailable.
+
+**2. ⚠️ Correction to the ruling — the property test carries a cost Atchim did not price.** He proposed a `hypothesis` property test over generated record shapes and stated *"`hypothesis 6.161.2` is already installed."* **It is not** — the orchestrator checked: absent from `pyproject.toml`, absent from `uv.lock`, absent from the venv (`ModuleNotFoundError`). So it is a **new dependency**, which under `CLAUDE.md ## Tooling` drags in a lock-file update and a `pip-audit` pass, and under N24/DEBT-13 discipline deserves a deliberate decision rather than riding in on a bug fix. **Parts 1–3 above need no new dependency and deliver most of the anti-enumeration value.** The property test is recorded as a *separate, optional* decision for Dunga to size — not a silent prerequisite of FU-01.3-D.
+
+**3. M9 — partly overturned, and Atchim accepted the correction.** He had ruled "drop `base_url=host`" an **equivalent** mutant ("do not test, do not delete"). Zangado monkeypatched `langfuse.Langfuse` with a kwargs spy and showed `make_platform()` passes `base_url == host` — directly assertable, at zero marginal cost since DEBT-32's fix installs that same spy. Atchim's restatement of his own error: it was an **unobserved** mutant, not an equivalent one — he scoped observability to *runtime behaviour* (where the guard does make the two indistinguishable) when the right scope is the **call contract**. The substantive argument decides it: `Langfuse(host=...)` alone *loses* to `LANGFUSE_BASE_URL` while `base_url=...` *wins*, so the day someone relaxes the guard, that kwarg is the only thing keeping credentials and OTLP traffic on the named host — and today nothing pins it. **"Do not delete" stands; "do not test" is struck.** REG-10's wording is amended accordingly.
+
+**4. Three-card split D/E/F — SOUND**, with F-1 landing on D (same file, same re-stamp). Estimate **3 → 5** (Atchim; Zangado said 4, Atchim raised it because the reordering touches `record_run`'s control flow).
+
+**5. Review-method debt — the root cause, recorded as such.** Atchim accepted `escaped-atchim: yes` without qualification and named the method error: all 12 of his mutants were drawn from the **changed lines**, so `:409` — unchanged — was never in the mutant population. *"Reviewing a guard by mutating the guard is circular."* The correct method, not applied: for each key in the declared type's `__required_keys__`, ask whether any path reaches a subscript of it **before** validation. One lookup would have surfaced `item_id` in both prior audits. This belongs in the review protocol, not just in one file's fix.
+
+## Known-open confirmations (not rediscovered as findings)
+- **HARDEN-01 still does not exist** — containment deferral to S-01.4 upheld, condition widened to five items (see NFR-01 markup). S-01.4 cannot reach Done without all five.
+- **DEBT-30** (`make_platform` bare `KeyError` on a *missing* env var) — S-01.4 T-01.4.1's duty, unchanged.
+- **DEBT-20's deadline value stays `None` = disabled and PROVISIONAL** pending S-01.6 timings.
+- **REG-08** remains `pending-test` on its false-positive residual (FU-01.3-C); its false-negative leg was confirmed covered today.
+- Zangado could **not** independently reproduce the SDK `base_url`-beats-`host=` precedence claim (a subprocess constructor probe emitted nothing). Two prior reviewers did reproduce it, and **the verdict does not depend on it** — the guard fails closed either way. Recorded so the claim is not treated as thrice-confirmed.
+
+## Debt surfaced (→ Dunga)
+- **F-1 → FU-01.3-D DoD bullet, est. 3 → 5**, with the three structural parts above. Widen REG-09's case list; no new row.
+- **F-2 → rename the fixture value** (e.g. `distinctive-secret-NOT-A-REAL-KEY-2c71`) — preserves the distinctiveness the assertion needs while killing the entropy signature, and leaves the detector armed on that line. `# gitleaks:allow` is the **fallback only**, and only with a same-line reason comment; **re-run `gitleaks git .` to verify, do not assume**. **Never** add a `.gitleaks.toml` path allowlist for `tests/` — both reviewers were emphatic: it blinds the gate on the highest-risk file class in the repo, since fixtures are exactly how a real captured value gets committed by accident.
+- **M9 pin → FU-01.3-D DoD (a)**: the DEBT-32 constructor spy must also assert `Langfuse` is called with `base_url == host == LANGFUSE_HOST`.
+- **Review-method debt**: guard-function reviews must enumerate obligations from the **declared type** (`TypedDict.__required_keys__` / dataclass fields), not from the diff's changed lines; a mutant population drawn only from changed lines cannot detect an unguarded caller *above* the guard.
+- **`hypothesis` property test** — optional, needs a dependency decision (see Ruling 2).
+- **ruff `select` has no `S` (bandit) family at all** (`pyproject.toml:57`), so the `noqa: S310` at `transport.py:117` never suppressed anything and the transport files have never had the URL-scheme audit run against them. Low; decide deliberately whether to enable `S3xx` or record it as out of scope. Not a finding.
