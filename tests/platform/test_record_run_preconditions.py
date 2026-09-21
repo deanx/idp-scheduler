@@ -759,9 +759,32 @@ def test_record_not_a_dict_raises_typed_error_before_any_sdk_call() -> None:
     same trap FU-01.3-B already patched one level down for non-dict
     scores (REG-09's seventh anchor case) and not one level up. No
     document_id can be named here (there is no dict to read one from,
-    same stance as the missing-document_id anchor case above)."""
+    same stance as the missing-document_id anchor case above).
+
+    Atchim re-review R-1: the fixture must contain ALL THREE required
+    key names as substrings (not just one, as the original "item_id"
+    fixture did). With `isinstance(record, dict)` deleted, `key not in
+    record` does substring semantics -- a fixture containing only
+    "item_id" happens to make `"document_id" not in record` True, so
+    the `__required_keys__` loop raises a TYPED
+    ExperimentRecordFailedError BY ACCIDENT, via the exact trap this
+    guard exists to prevent, and the mutant is never observed. Worse:
+    `DocumentRecord.__required_keys__` is a frozenset, so which key the
+    loop happens to check first (and therefore whether it "accidentally"
+    raises) varies with `PYTHONHASHSEED` -- DEBT-34's defect class
+    (an assertion that observes nothing) reproduced inside the very
+    card whose job includes closing DEBT-34. With all three key names
+    present as substrings, `key not in record` is False for every key
+    under every hash seed, the loop always falls through, and the
+    guard's `isinstance` check is the ONLY thing standing between this
+    fixture and an untyped exception -- deterministically, every seed.
+    Also asserts the SPECIFIC message, not just that SOME typed error
+    was raised."""
     adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
-    bad_record: Any = "item_id"  # a plain str -- would substring-match its own key name
+    # Deliberately contains all three required key names as substrings
+    # -- see the docstring above for why a partial match (e.g. just
+    # "item_id") does not pin the guard.
+    bad_record: Any = "item_id document_id scores"
     records: list[DocumentRecord] = [bad_record]
 
     with pytest.raises(ExperimentRecordFailedError) as excinfo:
@@ -769,5 +792,36 @@ def test_record_not_a_dict_raises_typed_error_before_any_sdk_call() -> None:
             dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
         )
 
-    _assert_no_score_sentinel_leaked(str(excinfo.value))
+    message = str(excinfo.value)
+    assert "not a dict" in message
+    _assert_no_score_sentinel_leaked(message)
+    _assert_zero_platform_writes(http_client, tracing_client)
+
+
+def test_shape_validation_covers_every_record_not_just_the_first() -> None:
+    """Atchim re-review R-2: `for record in records:` -> `for record in
+    records[:1]:` survived the entire 171-test platform suite, because
+    every malformed-record test in this file used a SINGLE-element
+    `records` list -- the "very top" half of DoD (g) part (1) was
+    pinned, the "EVERY record" half was not. A well-formed record at
+    index 0, malformed at index 1: the run must still fail closed."""
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    well_formed: DocumentRecord = {
+        "item_id": "item-1",
+        "document_id": "doc-0",
+        "scores": [],
+    }
+    malformed: Any = {
+        "item_id": ["not", "a", "string"],
+        "document_id": "doc-1",
+        "scores": [],
+    }
+    records: list[DocumentRecord] = [well_formed, malformed]
+
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        adapter.record_run(
+            dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+        )
+
+    assert "doc-1" in str(excinfo.value)
     _assert_zero_platform_writes(http_client, tracing_client)

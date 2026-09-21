@@ -100,7 +100,7 @@ def _require_record_shape(record: DocumentRecord) -> None:
     """
     if not isinstance(record, dict):
         raise ExperimentRecordFailedError("record_run: a record is not a dict (malformed input)")
-    for key in DocumentRecord.__required_keys__:
+    for key in sorted(DocumentRecord.__required_keys__):
         if key not in record:
             if key == "document_id":
                 raise ExperimentRecordFailedError("record_run: a record is missing 'document_id'")
