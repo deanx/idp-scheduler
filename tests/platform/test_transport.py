@@ -171,7 +171,10 @@ def test_redirect_response_raises_typed_error_and_credential_never_reaches_the_t
     308 falling through to `raw = exc.read()`, returning `(30x, None)`
     from `request()` as if it were an ordinary response. Every caller
     only checks `status >= 400`, so that reads as SUCCESS -- exactly the
-    "returned as success" failure mode DoD (e) names."""
+    "returned as success" failure mode DEBT-26 exists to prevent, and the
+    platform half REG-07 requires. (FU-01.3-B has no lettered DoD (e); its
+    letters are (a)/(b)/(c) and this test pins the unlettered DEBT-26 leg
+    of the base bundle.)"""
     server_b = _start_server(response_status=200)
     try:
         port_b = server_b.server_address[1]
