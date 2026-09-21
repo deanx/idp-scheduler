@@ -15,6 +15,7 @@ from idp_regression.platform import langfuse_adapter as _langfuse_adapter_module
 from idp_regression.platform.errors import ExperimentRecordFailedError
 from idp_regression.platform.langfuse_adapter import (
     _DOCUMENT_RECORD_REQUIRED_FIELDS,
+    _RUN_METADATA_REQUIRED_FIELDS,
     LangfuseAdapter,
 )
 from idp_regression.platform.scoring import field_score_name, prompt_score_name, score_id
@@ -792,14 +793,23 @@ def test_a_non_dict_score_raises_typed_error_before_any_sdk_call() -> None:
 # defect"): (1) validate EVERY record at the very TOP of record_run,
 # before any subscript of any record -- the :409-before-:426 seam is now
 # physically impossible; (2) isinstance(record, dict) is the guard's
-# FIRST statement; (3) required keys are read from `_required_fields
-# (DocumentRecord)` (DEBT-49's sound derivation -- verified
-# ['document_id', 'item_id', 'scores'], and NOT
+# FIRST statement; (3) required keys are read from production's
+# `_required_field_names(DocumentRecord)` (the precomputed
+# `_DOCUMENT_RECORD_REQUIRED_FIELDS` constant, DEBT-49's sound derivation
+# -- verified ['document_id', 'item_id', 'scores'], and NOT
 # `DocumentRecord.__required_keys__`, which is unsound under postponed
 # annotations for any TypedDict carrying a `NotRequired` field; see
-# DEBT-49 and `_type_pins._required_fields`'s docstring), not
-# hand-enumerated, so a fourth escape is structurally unavailable. The
-# seven anchor tests above are left untouched.
+# DEBT-49 and `_type_pins._required_fields`'s docstring for the test-side
+# mirror of the same derivation), not hand-enumerated. This makes a
+# PRESENCE gap in a hand-listed key set structurally unavailable -- it
+# does NOT by itself guarantee a field's VALUE type is checked; that is
+# the separate job of the `_str_fields`-parametrized value-type tests
+# below (overclaim correction, /test TDD gate re-round: the original
+# wording here -- "so a fourth escape is structurally unavailable" --
+# read as an unqualified claim about EVERY escape, the exact overclaim
+# QA-01 re-audit #3 F-1 falsified and REGRESSIONS.md/DEBT-43/
+# PROGRESS.md:82 record as corrected). The seven anchor tests above are
+# left untouched.
 
 
 _STR_FIELD_PROBE_REQUIRED_FIELDS = [
@@ -1244,6 +1254,47 @@ def test_metadata_missing_any_field_raises_typed_error_parametrized(missing_key:
     _assert_zero_platform_writes(http_client, tracing_client)
 
 
+def test_production_drift_pin_run_metadata_required_fields_matches_the_type() -> None:
+    """R-2 (fix-round finding, second /test TDD gate): `RunMetadata`'s
+    counterpart to `test_production_drift_pin_document_record_required_
+    fields_matches_the_type` above -- `DocumentRecord` got a drift pin,
+    `RunMetadata` did not. This assertion calls the SOUND test-side
+    derivation directly and compares it to production's precomputed
+    constant -- tautological today (the values agree).
+
+    Verified-honesty correction (re-round): I hand-verified, empirically,
+    with each candidate applied/tested/restored byte-identical/diffed,
+    that this pin does **NOT** kill (M13) the hand-written literal
+    `["action_id", "action_version", "golden_version"]`, (M5) `sorted(
+    RunMetadata.__required_keys__)`, OR (M4) `_str_annotated_field_names(
+    RunMetadata)` -- and, further, that it does NOT even catch a
+    `_required_field_names` FUNCTION-BODY change of the same shape as
+    `DocumentRecord`'s own mutation 1 (collapsing to a bare `hint is str`
+    filter). ALL FOUR candidates -- the three named mutants plus that
+    function-body mutation -- reproduce the IDENTICAL output
+    (`['action_id', 'action_version', 'golden_version']`) for
+    `RunMetadata`, because it has exactly three fields, all plain `str`,
+    none `NotRequired`: there is no shape difference in this specific
+    type for ANY value-comparison test to key on -- the equivalent-mutant
+    trap is total here, not partial the way it was for `DocumentRecord`
+    (which has one non-`str` required field, `scores`, giving mutation 1
+    something to diverge on). `RunMetadata` has no such probe available
+    either: `_RUN_METADATA_REQUIRED_FIELDS` is a precomputed module
+    constant tied to `RunMetadata` specifically, not a reusable function
+    call site the way `_required_field_names` itself is, so there is no
+    cheap probe-level pin here the way `test_production_required_field_
+    names_matches_the_sound_derivation_on_a_probe_type` exists for
+    `DocumentRecord`'s side. M13, M5, and M4 are therefore each
+    latent-only against this pin -- none is claimed as covered by it. Its
+    real, narrower protective value: if `RunMetadata` ever gains a field
+    (`str`-obligated or not) while this constant is for some reason NOT
+    recomputed from the live type (e.g. hardcoded, or computed once and
+    cached before the type change), THIS pin -- which always re-derives
+    the test-side half fresh -- would catch the staleness. It is kept for
+    that reason, not because it kills any of the three named mutants."""
+    assert _required_fields(RunMetadata) == _RUN_METADATA_REQUIRED_FIELDS
+
+
 def test_require_run_metadata_shape_checks_presence_of_a_non_str_required_field(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1251,7 +1302,7 @@ def test_require_run_metadata_shape_checks_presence_of_a_non_str_required_field(
     NON-`str` field's PRESENCE must still be checked, even though
     `_require_run_metadata_shape`'s VALUE-type loop only ever looks at
     `str`-annotated fields. `RunMetadata` has no non-`str` field today,
-    so this pins the MECHANISM directly by monkeypatching production's
+    so this pins the CONSUMER directly by monkeypatching production's
     presence-derivation constant (`_RUN_METADATA_REQUIRED_FIELDS`) to
     include a simulated `attempt` field that `_RUN_METADATA_STR_FIELDS`
     does NOT carry -- exactly the shape a real `attempt: int` addition to
@@ -1263,9 +1314,18 @@ def test_require_run_metadata_shape_checks_presence_of_a_non_str_required_field(
     shape` was already fixed against (DEBT-49), reproduced one guard
     over. Calls the REAL production function directly (not through
     `record_run`), so this is white-box by design -- the point is to pin
-    `_require_run_metadata_shape`'s internal presence source, not observe
-    it indirectly through a `RunMetadata` shape that cannot carry the
-    case."""
+    `_require_run_metadata_shape`'s reliance on `_RUN_METADATA_REQUIRED_
+    FIELDS` for presence, not observe it indirectly through a
+    `RunMetadata` shape that cannot carry the case.
+
+    Scope note (second /test TDD gate): monkeypatching the constant pins
+    how `_require_run_metadata_shape` CONSUMES it -- it says nothing
+    about whether the constant itself is correctly PRODUCED. That is a
+    separate concern, covered by the drift pin above
+    (`test_production_drift_pin_run_metadata_required_fields_matches_
+    the_type`); a mutation of the constant's own derivation survives
+    THIS test untouched, because this test overwrites the constant
+    before ever reading production's derivation of it."""
     monkeypatch.setattr(
         _langfuse_adapter_module,
         "_RUN_METADATA_REQUIRED_FIELDS",

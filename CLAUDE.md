@@ -22,12 +22,42 @@ English
 - **Dependency pinning:** install, then `pip freeze` to a committed lock file; install from the lock thereafter.
 
 ## Rigor
-Profile: standard
+Profile: prototype
 
-> Rationale: this is a real, long-lived internal product, but the first milestone is an MVP.
+> **Changed 2026-09-21 by user decision: `standard` → `prototype`, to reach the MVP faster.**
+>
+> Previous rationale, preserved because it weighed this exact argument and reached the opposite
+> conclusion: *"this is a real, long-lived internal product, but the first milestone is an MVP.
 > Start `standard`; run individual gates at `--rigor=full` before the tool is trusted to gate
-> other teams' prompt changes. The classifier is pure and must always stay unit-tested (the
-> mechanical floor holds in every profile).
+> other teams' prompt changes."* The reversal is deliberate and is recorded, not silently applied.
+>
+> **What does NOT change — these are not profile-driven and still bind:**
+> - **The mechanical floor holds in every profile:** tests exist and pass, static analysis clean,
+>   secret scan. The classifier is pure and must always stay unit-tested.
+> - **`Risk level: high` still requires a `/test` stamp.** `/qa`'s rigor gate reads the risk level
+>   from the **SPEC header**, not from this profile, so SPEC-01 cannot be QA'd on an
+>   `/implement`-only stamp regardless of what this line says. **Profile ≠ risk level.**
+> - **NFR-01's markers are per-UC, not per-profile:** `Containment: REQUIRED` (HARDEN-01, five
+>   conditions), `Observability: REQUIRED`. Lowering the profile does not waive them.
+> - **DEBT-44** (a `/test` gate on a Risk:high delta may not be run by the APPROVE-issuing
+>   reviewer instance) is a written project rule, not a profile setting.
+>
+> **What this buys, and what it costs.** Fewer reviewer passes and lighter gates per story, so
+> stories close faster. The cost is a lighter *Done*, honestly labelled — and every gate this
+> profile turns off must be **recorded** (`skipped: prototype profile`) in the QA report and the
+> state log, never silently dropped.
+>
+> ⚠️ **The specific risk, stated once so it is on the record.** This product's entire value is
+> being a CI gate other teams trust. On 2026-09-21 alone, the gates being lightened found two
+> **fail-open** defects — `overall_gate` returning `"PASS"` for any unrecognised verdict, and a
+> non-string `document_id` being written to the platform while the call returned success. Both
+> would have produced **silently-wrong GREEN builds**, which is the worst failure this system can
+> produce and the one a lighter profile is least likely to catch. Neither was found by a test
+> suite; both were found by mutation testing and independent review.
+>
+> **Re-raise to `standard` before this tool gates another team's prompt changes**, and run the
+> individual gates at `--rigor=full` before that point. Until then, treat green as "the MVP's own
+> tests pass", not as "this gate can be trusted".
 
 ## Domain
 - **Product:** IDP Regression Tester — a system that validates MuleSoft Anypoint IDP extraction output against a known-good reference, so a changed extraction prompt (or action version) can be judged better or worse with confidence.
