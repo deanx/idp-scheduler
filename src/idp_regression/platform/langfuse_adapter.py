@@ -64,21 +64,55 @@ _DEFAULT_SCORE_WRITE_BACKOFF_CAP_SECONDS = 8.0
 
 
 def _require_record_shape(record: DocumentRecord) -> None:
-    """FU-01.3-B / QA-01 F-1 / REG-09: validate a record's SHAPE before
-    the run_id derivation check below, so malformed caller input raises
-    the typed ``ExperimentRecordFailedError`` (the Protocol docstring's
-    promised contract, ``types.py:99-101``) instead of an untyped
-    ``KeyError``/``TypeError``. Called before any SDK call, so
+    """FU-01.3-B / QA-01 F-1 / REG-09 (widened by FU-01.3-D): validate a
+    record's SHAPE before ANY subscript of it, so malformed caller input
+    raises the typed ``ExperimentRecordFailedError`` (the Protocol
+    docstring's promised contract, ``types.py:99-101``) instead of an
+    untyped ``KeyError``/``TypeError``. Called from a loop at the very
+    TOP of ``record_run``, before ``record_item_ids`` is even built --
+    the seam where ``record["item_id"]`` used to be subscripted
+    seventeen lines before this guard ran is now physically impossible,
+    not merely patched at that call site. Runs before any SDK call, so
     ``run_experiment_calls == 0`` holds on every path here. Absorbs the
     ``.get("scores")`` tolerance debt from FU-01.3-A -- this replaces it.
 
+    FU-01.3-D / QA-01 re-audit F-1 structural fix (Atchim's ruling,
+    carried verbatim in substance -- "enumerating keys by hand is not
+    the fix, it IS the defect"):
+      1. ``isinstance(record, dict)`` is the FIRST statement --
+         ``"x" not in record`` on a ``str`` silently does substring
+         semantics, the same trap already patched one level down for
+         non-dict scores (REG-09's seventh anchor case).
+      2. Required keys are read from ``DocumentRecord.__required_keys__``
+         (verified ``{'document_id', 'item_id', 'scores'}``), not
+         hand-enumerated, so a new required field on the TypedDict
+         auto-generates its own guard here -- three consecutive
+         hand-written attempts enumerated a subset of that list (0 for 3).
+      3. ``item_id``'s VALUE (not just its presence) is checked -- a
+         non-string ``item_id`` would otherwise sail past the key check
+         and later blow up ``set(record_item_ids)`` with an untyped
+         ``TypeError: unhashable type``.
+
     INV-02: the message names ``document_id`` ONLY -- never a score id,
-    name, or value. Case (record missing "document_id" itself) has no
-    document_id to name at all, so it says so without inventing one.
+    name, or value. Cases with no document_id to name (record is not a
+    dict at all, or ``document_id`` itself is the missing key) say so
+    without inventing one.
     """
-    if "document_id" not in record:
-        raise ExperimentRecordFailedError("record_run: a record is missing 'document_id'")
+    if not isinstance(record, dict):
+        raise ExperimentRecordFailedError("record_run: a record is not a dict (malformed input)")
+    for key in DocumentRecord.__required_keys__:
+        if key not in record:
+            if key == "document_id":
+                raise ExperimentRecordFailedError("record_run: a record is missing 'document_id'")
+            raise ExperimentRecordFailedError(
+                f"record_run: record for document_id={record.get('document_id')!r} "
+                f"is missing {key!r}"
+            )
     document_id = record["document_id"]
+    if not isinstance(record["item_id"], str):
+        raise ExperimentRecordFailedError(
+            f"record_run: record for document_id={document_id!r} has a non-string 'item_id'"
+        )
     scores = record.get("scores")
     if not isinstance(scores, list):
         # Covers both `"scores": None` (TypeError today) and any other
@@ -406,6 +440,15 @@ class LangfuseAdapter:
                 "get_dataset(dataset_name) first, in this same run"
             )
 
+        # FU-01.3-D / QA-01 re-audit F-1 (REG-09 widened): validate EVERY
+        # record's shape here, at the very TOP of record_run, before ANY
+        # subscript of ANY record below -- the seam where
+        # record["item_id"] used to be subscripted seventeen lines before
+        # this guard ran is now physically impossible, not merely patched
+        # at that call site.
+        for record in records:
+            _require_record_shape(record)
+
         record_item_ids = [record["item_id"] for record in records]
         if len(record_item_ids) != len(set(record_item_ids)):
             raise ExperimentRecordFailedError("record_run: duplicate item_id in records")
@@ -423,8 +466,8 @@ class LangfuseAdapter:
         # local loop over data already in hand: no extra call, no network.
         # INV-02: the raise names document_id + score_name only (both
         # value-free by construction) and never the offending id pair.
+        # (Shape already validated above -- this loop only derives ids.)
         for record in records:
-            _require_record_shape(record)
             document_id = record["document_id"]
             for score in record.get("scores", []):
                 score_name = score["name"]

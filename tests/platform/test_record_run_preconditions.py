@@ -7,7 +7,7 @@ control-flow tests, not integration facts.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -621,4 +621,117 @@ def test_a_non_dict_score_raises_typed_error_before_any_sdk_call() -> None:
         )
 
     assert "doc-0" in str(excinfo.value)
+    _assert_zero_platform_writes(http_client, tracing_client)
+
+
+# --- FU-01.3-D DoD (g) / QA-01 re-audit F-1: REG-09 WIDENED. Three sibling
+# shapes on the SAME seam still escaped record_run untyped, because
+# langfuse_adapter.py:409 used to subscript record["item_id"] in a
+# comprehension seventeen lines BEFORE the _require_record_shape loop at
+# :426, and the guard checked neither "item_id" nor isinstance(record,
+# dict). The structural fix (Atchim's ruling, carried verbatim in
+# substance -- "enumerating keys by hand is not the fix, it IS the
+# defect"): (1) validate EVERY record at the very TOP of record_run,
+# before any subscript of any record -- the :409-before-:426 seam is now
+# physically impossible; (2) isinstance(record, dict) is the guard's
+# FIRST statement; (3) required keys are read from
+# DocumentRecord.__required_keys__ (verified ['document_id', 'item_id',
+# 'scores']), not hand-enumerated, so a fourth escape is structurally
+# unavailable. The seven anchor tests above are left untouched.
+
+
+@pytest.mark.parametrize("missing_key", sorted(DocumentRecord.__required_keys__))
+def test_record_missing_any_required_key_raises_typed_error_before_any_sdk_call(
+    missing_key: str,
+) -> None:
+    """Part (3) of the structural fix: parametrized over
+    DocumentRecord.__required_keys__, NOT a hand-written list -- a new
+    required field on the TypedDict auto-generates its own case here.
+    Two of these three keys (document_id, scores) already had a
+    hand-written anchor test above; item_id did not -- proof that
+    hand-enumeration is exactly the gap this parametrization closes."""
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    full_record: dict[str, Any] = {
+        "item_id": "item-1",
+        "document_id": "doc-0",
+        "scores": [
+            {
+                "id": _SENTINEL_SCORE_ID,
+                "name": _SENTINEL_SCORE_NAME,
+                "value": _SENTINEL_SCORE_VALUE,
+            }
+        ],
+    }
+    del full_record[missing_key]
+    records: list[DocumentRecord] = [cast(DocumentRecord, full_record)]
+
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        adapter.record_run(
+            dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+        )
+
+    message = str(excinfo.value)
+    if missing_key != "document_id":
+        # document_id itself can't be named in the message when IT is
+        # the missing key (INV-02: no document_id to name -- the message
+        # says so without inventing one, same stance as the pre-existing
+        # anchor test for this case).
+        assert "doc-0" in message
+    _assert_no_score_sentinel_leaked(message)
+    _assert_zero_platform_writes(http_client, tracing_client)
+
+
+def test_item_id_not_a_string_raises_typed_error_before_any_sdk_call() -> None:
+    """QA-01 re-audit F-1 (REG-09 widened): a well-shaped record whose
+    `item_id` is the wrong type (e.g. a list) used to reach
+    `record["item_id"]` in the comprehension that built
+    `record_item_ids`, then `set(record_item_ids)` raised an untyped
+    `TypeError: unhashable type`. Moving the shape guard to record_run's
+    very top -- before that comprehension ever runs -- makes this seam
+    physically impossible."""
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    bad_record: Any = {
+        "item_id": ["not", "a", "string"],
+        "document_id": "doc-0",
+        "scores": [
+            {
+                "id": _SENTINEL_SCORE_ID,
+                "name": _SENTINEL_SCORE_NAME,
+                "value": _SENTINEL_SCORE_VALUE,
+            }
+        ],
+    }
+    records: list[DocumentRecord] = [bad_record]
+
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        adapter.record_run(
+            dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+        )
+
+    message = str(excinfo.value)
+    assert "doc-0" in message
+    _assert_no_score_sentinel_leaked(message)
+    _assert_zero_platform_writes(http_client, tracing_client)
+
+
+def test_record_not_a_dict_raises_typed_error_before_any_sdk_call() -> None:
+    """QA-01 re-audit F-1 (REG-09 widened): a record that isn't even a
+    dict (e.g. a bare string) used to reach `record["item_id"]` and raise
+    an untyped `TypeError: string indices must be integers`.
+    `isinstance(record, dict)` is now the guard's FIRST statement --
+    `"x" not in record` on a str silently does substring semantics, the
+    same trap FU-01.3-B already patched one level down for non-dict
+    scores (REG-09's seventh anchor case) and not one level up. No
+    document_id can be named here (there is no dict to read one from,
+    same stance as the missing-document_id anchor case above)."""
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    bad_record: Any = "item_id"  # a plain str -- would substring-match its own key name
+    records: list[DocumentRecord] = [bad_record]
+
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        adapter.record_run(
+            dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+        )
+
+    _assert_no_score_sentinel_leaked(str(excinfo.value))
     _assert_zero_platform_writes(http_client, tracing_client)
