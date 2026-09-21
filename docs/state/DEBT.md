@@ -282,3 +282,29 @@ The real risk is not the ~1 point of double-counting. It is the **opposite** out
 - **(b) A *production document* was extracted** → judge that output live. **NOT this product.** The classifier compares an extraction against a **known-good golden for that specific document**; an arbitrary production document has none, so there is nothing to compare against. That is drift/confidence monitoring — a different Epic with a different data model. Building (b) is not an extension of this system; it is a new one.
 
 **⚠️ Scope fence.** Nothing here is MVP. The published IDP action id is already the **only** critical path; this must not become a second one. `T-01.6.6` adds *questions* answerable while the org is already open — it adds no build work and does not extend S-01.6's half-day time-box.
+
+---
+
+## 🔴 DEBT-52 — `git add -A` while a subagent is working: two mislabelled commits, one shipped mutant
+
+**Status:** rule adopted, history left intact · **Origin:** orchestrator error, 2026-09-21, twice in one session · **Impact: High** — one instance silently reverted a correctness fix and shipped an actively-applied mutant.
+
+**What happened, twice, both mine.**
+
+| Commit | Claims to be | Actually contained |
+|---|---|---|
+| `b56f105` | *"spec(S-01.6): add T-01.6.6"* | the spec change **+ a 1-line revert of `include_extras=True` in `langfuse_adapter.py`** (half of DEBT-49's own fix) **+ 44 lines of a test file** |
+| `dd3ad51` | *"docs(backlog): record BACKLOG-01 + ASM-06"* | the docs **+ the entire Required-A/B fix round** — 81 lines of `langfuse_adapter.py`, 151 of `test_record_run_preconditions.py`, 11 of `test_langfuse_adapter.py` |
+
+**Cause, precisely.** `git add -A` stages the whole working tree. A subagent was concurrently editing those files, and in `b56f105`'s case was **mid-mutation-test** — apply mutant → observe → restore. The `add -A` landed between *apply* and *restore*, so **an actively-applied mutant was committed as if it were source.** The mutant was exactly "drop `include_extras=True`", i.e. Required A's mutation 3, which is why it reproduced later against what looked like clean HEAD.
+
+**Why it shipped silently:** the pin that would have caught it did not exist yet — it was the very thing Required A was raised to add. With the new probe pin in place, re-applying that change fails `test_production_required_field_names_matches_the_sound_derivation_on_a_probe_type` (verified). The defect and its detector were created in the same round, in that order.
+
+**The rule, adopted now:**
+> **Never `git add -A` / `git commit -a` while any subagent has write access to the repo.** Stage explicit paths only — `git add docs/state/DEBT.md`, never `git add -A`. A concurrent agent's working tree is not a stable snapshot: it may hold an applied mutant, a half-finished edit, or a deliberately-broken RED state.
+
+**Second-order lesson, which is the more general one.** Both commits *appeared* clean — tests passed, `mypy`/`ruff` were clean — because the swallowed content was either a valid intermediate state or a mutant whose detector did not yet exist. **A green suite does not tell you what is in your commit.** `git show --stat` before committing is the check; the file list is the only thing that reveals a docs commit carrying production source.
+
+**History deliberately NOT rewritten.** The branch's commits are wrong in their *messages*, not in their *content* — the final tree is correct (559 passed, `include_extras=True` restored, pins in place). Rewriting published history to fix a message is the destructive remedy this project already rejected for DEBT-45's gitleaks hit, and the same reasoning applies. This row is the record; the commits stay.
+
+🔗 Sibling of [[DEBT-46]] (a routed item with no owner) and [[DEBT-51]] (a duty with two owners). All three are *bookkeeping that diverged from reality* — and this one is the sharpest, because the divergence was introduced by the person writing the record.
