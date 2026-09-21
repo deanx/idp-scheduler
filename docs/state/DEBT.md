@@ -231,7 +231,7 @@ This is the same "wrong story's debt" shape Dunga ruled against for FU-01.1-A, a
 
 ---
 
-## DEBT-51 — DEBT-30's `KeyError` wrap is priced under two tasks
+## ~~DEBT-51~~ — WITHDRAWN: DEBT-30 is singly owned; the finding was a misreading
 
 **Status:** open (scope/planning) · **Origin:** S-01.4 estimation pass, 2026-09-21 (Dengoso) · **Impact: Low** — a double-count, but the failure mode is worse than the points.
 
@@ -239,7 +239,15 @@ This is the same "wrong story's debt" shape Dunga ruled against for FU-01.1-A, a
 
 The real risk is not the ~1 point of double-counting. It is the **opposite** outcome: a duty owned by two tasks is a duty each can assume the other discharged, which is how N6 reaches `/qa` unmet with both tasks ticked. That is the mirror image of DEBT-46 — there, a routed item had no owner; here it has two, which fails the same way.
 
-**Action:** assign it to exactly one task (T-01.4.1 is the better home — it is the entry point that must fail closed with a clear message) and strike the reference from the other.
+⚠️ **WITHDRAWN 2026-09-21 — this finding was wrong, and I verified it rather than acting on it.** The double-ownership does not exist in the authoritative records:
+- `DEBT-30`'s own row names **only `T-01.4.1`**.
+- `T-01.4.10`'s task text covers **N4, N5, N17, INV-02, INV-05** — **not N6**, and does not mention the `KeyError` wrap.
+- **`SPEC-01` never references `DEBT-30` at all**, under either task.
+- The S-01.4 compliance DoD bullet at `:356` covers credential hygiene and the gitleaks gate; it carries no N6 or `KeyError` duty.
+
+The claim came from an estimation pass inferring shared ownership from adjacent prose. **No action needed — the duty is already singly owned by T-01.4.1.** Kept as a withdrawn row rather than deleted, because a finding that was recorded and then silently vanished is the [[DEBT-46]] failure in reverse: the next reader would find the S-01.4 kickoff telling them to 'settle DEBT-51 before starting' and no trace of why it stopped mattering.
+
+**The reusable lesson is the same one this session keeps re-learning:** a finding is a hypothesis until checked against the authoritative record. I recorded this one on a subagent's reading without verifying it, which is the same shape as the five overclaims — a claim written one notch wider than the evidence.
 
 ---
 
