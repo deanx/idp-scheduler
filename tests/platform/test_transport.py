@@ -1,11 +1,16 @@
-"""transport.py — timeout (R7) + redact() wiring (R4/TP-44)."""
+"""transport.py — timeout (R7) + redact() wiring (R4/TP-44) + no-redirect
+opener (DEBT-26, REG-07)."""
 
 from __future__ import annotations
 
+import http.server
 import logging
+import threading
+import urllib.error
 
 import pytest
 
+from idp_regression.platform import transport
 from idp_regression.platform.errors import TransportError
 from idp_regression.platform.transport import UrllibHttpClient, redact
 
@@ -32,9 +37,7 @@ def test_socket_timeout_raises_typed_transport_error(monkeypatch: pytest.MonkeyP
     def _raise_timeout(*args: object, **kwargs: object) -> None:
         raise TimeoutError("timed out")
 
-    import urllib.request
-
-    monkeypatch.setattr(urllib.request, "urlopen", _raise_timeout)
+    monkeypatch.setattr(transport, "_urlopen", _raise_timeout)
 
     with pytest.raises(TransportError):
         client.request("GET", "/api/public/v2/datasets/x")
@@ -46,9 +49,7 @@ def test_url_error_raises_typed_transport_error(monkeypatch: pytest.MonkeyPatch)
     def _raise_url_error(*args: object, **kwargs: object) -> None:
         raise urllib.error.URLError("connection refused")
 
-    import urllib.request
-
-    monkeypatch.setattr(urllib.request, "urlopen", _raise_url_error)
+    monkeypatch.setattr(transport, "_urlopen", _raise_url_error)
 
     with pytest.raises(TransportError):
         client.request("GET", "/api/public/v2/datasets/x")
@@ -63,9 +64,7 @@ def test_socket_timeout_message_never_leaks_the_auth_header(
     def _raise_timeout(*args: object, **kwargs: object) -> None:
         raise TimeoutError("timed out")
 
-    import urllib.request
-
-    monkeypatch.setattr(urllib.request, "urlopen", _raise_timeout)
+    monkeypatch.setattr(transport, "_urlopen", _raise_timeout)
 
     with pytest.raises(TransportError) as excinfo:
         client.request("GET", "/api/public/v2/datasets/x")
@@ -109,9 +108,7 @@ def test_transport_failed_error_log_survives_a_newline_in_the_path(
     def _raise_timeout(*args: object, **kwargs: object) -> None:
         raise TimeoutError("timed out")
 
-    import urllib.request
-
-    monkeypatch.setattr(urllib.request, "urlopen", _raise_timeout)
+    monkeypatch.setattr(transport, "_urlopen", _raise_timeout)
 
     with pytest.raises(TransportError):
         client.request("GET", malicious_path)
@@ -120,3 +117,74 @@ def test_transport_failed_error_log_survives_a_newline_in_the_path(
         rendered = record.getMessage()
         assert "\n" not in rendered, f"raw newline reached a rendered log line: {rendered!r}"
         assert 'dataset="ok"' not in rendered, f"unescaped quote forged a field: {rendered!r}"
+
+
+class _RecordingHandler(http.server.BaseHTTPRequestHandler):
+    """A minimal local HTTP server recording the Authorization header of
+    every request it receives, answering with a fixed status (DEBT-26,
+    REG-07 -- same pattern as tests/adapter/test_transport.py)."""
+
+    received_auth_headers: list[str | None] = []
+    response_status = 200
+
+    def do_GET(self) -> None:  # noqa: N802 - stdlib handler method name
+        self.received_auth_headers.append(self.headers.get("Authorization"))
+        self.send_response(self.response_status)
+        if self.response_status in (301, 302, 303, 307, 308):
+            self.send_header("Location", self.redirect_location)  # type: ignore[attr-defined]
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *args: object) -> None:  # silence stderr noise
+        return
+
+
+def _start_server(
+    *, response_status: int = 200, redirect_location: str = ""
+) -> http.server.HTTPServer:
+    handler_cls = type(
+        "_Handler",
+        (_RecordingHandler,),
+        {
+            "received_auth_headers": [],
+            "response_status": response_status,
+            "redirect_location": redirect_location,
+        },
+    )
+    server = http.server.HTTPServer(("127.0.0.1", 0), handler_cls)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
+def test_redirect_response_raises_typed_error_and_credential_never_reaches_the_target() -> None:
+    """DEBT-26 / REG-07: two REAL local servers (not mocks) -- server B
+    would receive the Basic auth header (Langfuse credentials) if the
+    real urllib opener followed the 302 from server A. It must not."""
+    server_b = _start_server(response_status=200)
+    try:
+        port_b = server_b.server_address[1]
+        server_a = _start_server(
+            response_status=302,
+            redirect_location=f"http://127.0.0.1:{port_b}/other",
+        )
+        try:
+            port_a = server_a.server_address[1]
+            client = UrllibHttpClient(
+                f"http://127.0.0.1:{port_a}", "pub", "redirect-test-secret-xyz"
+            )
+            with pytest.raises(TransportError) as excinfo:
+                client.request("GET", "/x")
+            assert "redirect-test-secret-xyz" not in str(excinfo.value)
+            assert "redirect-test-secret-xyz" not in repr(excinfo.value.__cause__)
+            assert "redirect-test-secret-xyz" not in repr(excinfo.value.__context__)
+            handler_a_cls = server_a.RequestHandlerClass
+            assert len(handler_a_cls.received_auth_headers) == 1  # type: ignore[attr-defined]
+        finally:
+            server_a.shutdown()
+            server_a.server_close()
+    finally:
+        server_b.shutdown()
+        server_b.server_close()
+    handler_b_cls = server_b.RequestHandlerClass
+    assert handler_b_cls.received_auth_headers == []  # type: ignore[attr-defined]

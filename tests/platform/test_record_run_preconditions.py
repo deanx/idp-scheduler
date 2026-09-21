@@ -154,10 +154,22 @@ def test_task_failed_raises_experiment_record_failed_and_skips_score_writes() ->
     )
     adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
     adapter._cached_dataset_name = "ds"  # noqa: SLF001
-    # A record missing the required "scores" key — the task's dict
-    # comprehension over `record["scores"]` will KeyError, triggering
-    # task_failed.
-    malformed: Any = {"item_id": "item-1", "document_id": "doc-0"}
+    # A record with a well-shaped ``scores`` list (passes the FU-01.3-B
+    # shape precondition and the run_id derivation check) but the score
+    # dict is missing "value" — the task's dict comprehension over
+    # `score["value"]` will KeyError, triggering task_failed. (Before
+    # FU-01.3-B this used a record missing "scores" entirely, but that
+    # now raises earlier, from the shape precondition itself — REG-09.)
+    malformed: Any = {
+        "item_id": "item-1",
+        "document_id": "doc-0",
+        "scores": [
+            {
+                "id": score_id(run_id="run-1", document_id="doc-0", score_name="gate"),
+                "name": "gate",
+            }
+        ],
+    }
 
     with pytest.raises(ExperimentRecordFailedError, match="task caught an unexpected exception"):
         adapter.record_run(
@@ -179,7 +191,18 @@ def test_task_failed_output_is_the_fixed_constant() -> None:
     adapter = LangfuseAdapter(client=_FakeHttpClient(), tracing_client=tracing_client)
     adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
     adapter._cached_dataset_name = "ds"  # noqa: SLF001
-    malformed: Any = {"item_id": "item-1", "document_id": "doc-0"}  # no "scores"
+    # See the sibling test above (REG-09): a well-shaped scores list with
+    # a score missing "value" still trips the task's own catch-all.
+    malformed: Any = {
+        "item_id": "item-1",
+        "document_id": "doc-0",
+        "scores": [
+            {
+                "id": score_id(run_id="run-1", document_id="doc-0", score_name="gate"),
+                "name": "gate",
+            }
+        ],
+    }
 
     with pytest.raises(ExperimentRecordFailedError):
         adapter.record_run(
@@ -406,3 +429,121 @@ def test_the_run_id_mismatch_error_names_only_document_id_and_score_name() -> No
     # but it must still be actionable
     assert "doc-0" in message
     assert hashed_name in message
+
+
+# --- FU-01.3-B / QA-01 F-1 / REG-09: malformed caller input must raise
+# ExperimentRecordFailedError (the typed contract, types.py:99-101), never
+# an untyped KeyError/TypeError -- and must do so before any SDK call
+# (run_experiment_calls stays 0 on every one of these paths). This also
+# absorbs the `.get("scores")` tolerance debt (FU-01.3-A handoff, Open
+# item 1): the shape check below replaces that tolerance entirely.
+
+_SENTINEL_SCORE_ID = "SENTINEL-SCORE-ID-do-not-leak-9b1e4f"
+_SENTINEL_SCORE_NAME = "SENTINEL-SCORE-NAME-do-not-leak-2d7c8a"
+_SENTINEL_SCORE_VALUE = "SENTINEL-SCORE-VALUE-do-not-leak-5a3f19"
+
+
+def _assert_zero_platform_writes(
+    http_client: _FakeHttpClient, tracing_client: _RunExperimentTracingClient
+) -> None:
+    assert tracing_client.run_experiment_calls == 0
+    assert http_client.calls == []
+
+
+def _assert_no_score_sentinel_leaked(message: str) -> None:
+    assert _SENTINEL_SCORE_ID not in message
+    assert _SENTINEL_SCORE_NAME not in message
+    assert _SENTINEL_SCORE_VALUE not in message
+
+
+def test_score_missing_id_raises_typed_error_before_any_sdk_call() -> None:
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    bad_score: Any = {"name": _SENTINEL_SCORE_NAME, "value": _SENTINEL_SCORE_VALUE}
+    records: list[DocumentRecord] = [
+        {"item_id": "item-1", "document_id": "doc-0", "scores": [bad_score]}
+    ]
+
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        adapter.record_run(
+            dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+        )
+
+    message = str(excinfo.value)
+    assert "doc-0" in message
+    _assert_no_score_sentinel_leaked(message)
+    _assert_zero_platform_writes(http_client, tracing_client)
+
+
+def test_score_missing_name_raises_typed_error_before_any_sdk_call() -> None:
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    bad_score: Any = {"id": _SENTINEL_SCORE_ID, "value": _SENTINEL_SCORE_VALUE}
+    records: list[DocumentRecord] = [
+        {"item_id": "item-1", "document_id": "doc-0", "scores": [bad_score]}
+    ]
+
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        adapter.record_run(
+            dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+        )
+
+    message = str(excinfo.value)
+    assert "doc-0" in message
+    _assert_no_score_sentinel_leaked(message)
+    _assert_zero_platform_writes(http_client, tracing_client)
+
+
+def test_scores_none_raises_typed_error_before_any_sdk_call() -> None:
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    records: list[DocumentRecord] = [
+        {"item_id": "item-1", "document_id": "doc-0", "scores": None}  # type: ignore[typeddict-item]
+    ]
+
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        adapter.record_run(
+            dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+        )
+
+    message = str(excinfo.value)
+    assert "doc-0" in message
+    _assert_zero_platform_writes(http_client, tracing_client)
+
+
+def test_scores_not_a_list_raises_typed_error_before_any_sdk_call() -> None:
+    """Atchim's addition at ruling time: `"scores"` can be any wrong
+    shape, not just `None` -- a dict is a concrete case a `.get(...,
+    [])` tolerance would NOT catch either (a dict is truthy and iterable,
+    so it would silently iterate its keys as if they were score dicts)."""
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    records: list[DocumentRecord] = [
+        {  # type: ignore[typeddict-item]
+            "item_id": "item-1",
+            "document_id": "doc-0",
+            "scores": {"id": _SENTINEL_SCORE_ID},
+        }
+    ]
+
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        adapter.record_run(
+            dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+        )
+
+    message = str(excinfo.value)
+    assert "doc-0" in message
+    _assert_no_score_sentinel_leaked(message)
+    _assert_zero_platform_writes(http_client, tracing_client)
+
+
+def test_record_missing_document_id_raises_typed_error_before_any_sdk_call() -> None:
+    """Found by Atchim at ruling time, not in the original F-1 finding.
+    There is no document_id to name in this case -- the message must say
+    so without inventing one (INV-02)."""
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    bad_record: Any = {"item_id": "item-1", "scores": []}
+    records: list[DocumentRecord] = [bad_record]
+
+    with pytest.raises(ExperimentRecordFailedError, match="document_id"):
+        adapter.record_run(
+            dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+        )
+
+    _assert_zero_platform_writes(http_client, tracing_client)

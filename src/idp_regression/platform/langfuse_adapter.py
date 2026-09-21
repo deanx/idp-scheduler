@@ -31,6 +31,7 @@ from idp_regression.platform.errors import (
     TracingNotConfiguredError,
     TransportError,
 )
+from idp_regression.platform.scoring import RUN_LEVEL_TRACE_SENTINEL, score_id, trace_id
 from idp_regression.platform.tracing import ExperimentItem, ExperimentRunner, record_experiment
 from idp_regression.platform.transport import HttpClient, UrllibHttpClient, sanitize_for_log
 from idp_regression.platform.types import (
@@ -61,6 +62,42 @@ _DEFAULT_SCORE_WRITE_BACKOFF_BASE_SECONDS = 1.0
 _DEFAULT_SCORE_WRITE_BACKOFF_CAP_SECONDS = 8.0
 
 
+def _require_record_shape(record: DocumentRecord) -> None:
+    """FU-01.3-B / QA-01 F-1 / REG-09: validate a record's SHAPE before
+    the run_id derivation check below, so malformed caller input raises
+    the typed ``ExperimentRecordFailedError`` (the Protocol docstring's
+    promised contract, ``types.py:99-101``) instead of an untyped
+    ``KeyError``/``TypeError``. Called before any SDK call, so
+    ``run_experiment_calls == 0`` holds on every path here. Absorbs the
+    ``.get("scores")`` tolerance debt from FU-01.3-A -- this replaces it.
+
+    INV-02: the message names ``document_id`` ONLY -- never a score id,
+    name, or value. Case (record missing "document_id" itself) has no
+    document_id to name at all, so it says so without inventing one.
+    """
+    if "document_id" not in record:
+        raise ExperimentRecordFailedError("record_run: a record is missing 'document_id'")
+    document_id = record["document_id"]
+    scores = record.get("scores")
+    if not isinstance(scores, list):
+        # Covers both `"scores": None` (TypeError today) and any other
+        # non-list shape (e.g. a dict -- truthy and iterable, so a bare
+        # `.get(..., [])` tolerance would NOT have caught it either).
+        raise ExperimentRecordFailedError(
+            f"record_run: record for document_id={document_id!r} has a non-list "
+            "'scores' value (expected a list of score dicts)"
+        )
+    for score in scores:
+        if not isinstance(score, dict) or "id" not in score:
+            raise ExperimentRecordFailedError(
+                f"record_run: a score for document_id={document_id!r} is missing 'id'"
+            )
+        if "name" not in score:
+            raise ExperimentRecordFailedError(
+                f"record_run: a score for document_id={document_id!r} is missing 'name'"
+            )
+
+
 def _body_snippet_for_error(body: Any) -> str:
     """A logging-safe error summary — deliberately NEVER the raw response
     body. A 400 validation body can echo back golden-shaped values (NFR
@@ -84,6 +121,8 @@ class LangfuseAdapter:
         score_write_backoff_cap_seconds: float = _DEFAULT_SCORE_WRITE_BACKOFF_CAP_SECONDS,
         sleep: Callable[[float], None] = time.sleep,
         random_func: Callable[[], float] = random.random,
+        record_deadline_seconds: float | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._client = client
         self._tracing_client = tracing_client
@@ -92,6 +131,17 @@ class LangfuseAdapter:
         self._score_write_backoff_cap_seconds = score_write_backoff_cap_seconds
         self._sleep = sleep
         self._random = random_func
+        #: DEBT-20: a whole-record-phase wall-clock cap (INV-07,
+        #: monotonic). None = disabled -- the shipped default. This is
+        #: the ADAPTER's own deadline (Soneca ruling: the orchestrator
+        #: never sees the per-score loop under ADR-0005 #9, so it has
+        #: nothing to time). PROVISIONAL: the real value needs S-01.6
+        #: timings + N8's 50-doc arithmetic, neither of which exist yet
+        #: -- a low guess would convert a slow-but-alive platform from
+        #: *stretching* a run into *aborting* one that would otherwise
+        #: have succeeded, on a CI gate whose whole job is to be trusted.
+        self._record_deadline_seconds = record_deadline_seconds
+        self._clock = clock
         #: item_id -> dataset_id from the most recent get_dataset call —
         #: record_run() reads this instead of re-fetching (INV-04,
         #: ADR-0005 #9 "no second fetch"). DEBT-18 (Atchim suggestion):
@@ -205,16 +255,49 @@ class LangfuseAdapter:
             page += 1
         return items
 
-    def _write_scores(self, *, trace_id: str, document_id: str, scores: list[ScoreInput]) -> None:
+    def _check_record_deadline(
+        self, *, deadline: float | None, document_id: str, score_name: str
+    ) -> None:
+        """DEBT-20: the whole-record-phase deadline, checked between
+        scores AND between retry attempts (INV-07 monotonic). A no-op
+        when disabled (``deadline is None``)."""
+        if deadline is not None and self._clock() >= deadline:
+            raise ScoreWriteFailedError(
+                "write_scores: record-phase deadline exceeded before writing "
+                f"score {score_name!r} for document_id={document_id!r}"
+            )
+
+    def _write_scores(
+        self,
+        *,
+        trace_id: str,
+        document_id: str,
+        scores: list[ScoreInput],
+        deadline: float | None = None,
+    ) -> None:
         """Adapter-private (ADR-0005 #9 — no longer on the Protocol). Called
         by ``record_run`` once a real, ingested ``trace_id`` is known for
         the document (never the deterministic pre-#9 ``trace_id()``, which
-        ``mark_run_status`` still uses for its own sentinel trace)."""
+        ``mark_run_status`` still uses for its own sentinel trace).
+
+        ``deadline`` (DEBT-20) is an absolute ``self._clock()``-scale
+        value, shared across every record in the same ``record_run`` call
+        -- computed once by the caller, not reset per record."""
         for score in scores:
-            self._write_score_with_retry(trace_id=trace_id, document_id=document_id, score=score)
+            self._check_record_deadline(
+                deadline=deadline, document_id=document_id, score_name=score["name"]
+            )
+            self._write_score_with_retry(
+                trace_id=trace_id, document_id=document_id, score=score, deadline=deadline
+            )
 
     def _write_score_with_retry(
-        self, *, trace_id: str, document_id: str, score: ScoreInput
+        self,
+        *,
+        trace_id: str,
+        document_id: str,
+        score: ScoreInput,
+        deadline: float | None = None,
     ) -> None:
         """REG-03/F-2: a bounded retry (ADR-0004 #3 backoff shape). The
         score_id is deterministic (ADR-0005 #5), so every retried attempt
@@ -232,6 +315,9 @@ class LangfuseAdapter:
         last_status: int | None = None
         last_body: Any = None
         for attempt in range(1, self._score_write_max_attempts + 1):
+            self._check_record_deadline(
+                deadline=deadline, document_id=document_id, score_name=score["name"]
+            )
             try:
                 status, body = self._client.request("POST", "/api/public/scores", payload)
             except TransportError as exc:
@@ -336,9 +422,8 @@ class LangfuseAdapter:
         # local loop over data already in hand: no extra call, no network.
         # INV-02: the raise names document_id + score_name only (both
         # value-free by construction) and never the offending id pair.
-        from idp_regression.platform.scoring import score_id
-
         for record in records:
+            _require_record_shape(record)
             document_id = record["document_id"]
             for score in record.get("scores", []):
                 score_name = score["name"]
@@ -400,10 +485,21 @@ class LangfuseAdapter:
                 "record_run: the total task caught an unexpected exception for at least one item"
             )
 
+        # DEBT-20: one deadline for the WHOLE record phase (every record,
+        # every score, every retry attempt below) -- computed once here,
+        # not reset per record. Disabled (None) unless a caller opted in.
+        deadline = (
+            None
+            if self._record_deadline_seconds is None
+            else self._clock() + self._record_deadline_seconds
+        )
         for record in records:
             trace_id = trace_ids[record["item_id"]]
             self._write_scores(
-                trace_id=trace_id, document_id=record["document_id"], scores=record["scores"]
+                trace_id=trace_id,
+                document_id=record["document_id"],
+                scores=record["scores"],
+                deadline=deadline,
             )
 
     def mark_run_status(
@@ -415,12 +511,6 @@ class LangfuseAdapter:
         action_version: str,
         golden_version: str,
     ) -> None:
-        from idp_regression.platform.scoring import (
-            RUN_LEVEL_TRACE_SENTINEL,
-            score_id,
-            trace_id,
-        )
-
         comment = (
             f"action_id={action_id} action_version={action_version} "
             f"golden_version={golden_version}"

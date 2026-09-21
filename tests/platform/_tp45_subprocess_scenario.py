@@ -35,7 +35,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from idp_regression.platform.errors import ExperimentRecordFailedError, FlushFailedError
 from idp_regression.platform.langfuse_adapter import LangfuseAdapter
-from idp_regression.platform.scoring import build_score_inputs
+from idp_regression.platform.scoring import build_score_inputs, score_id
 from idp_regression.platform.types import RunMetadata
 
 PATH_SENTINEL = "/IDP_DOCUMENT_DIR/invoice-007.pdf"
@@ -107,7 +107,27 @@ def main() -> None:
             {"item_id": "item-1", "document_id": PATH_SENTINEL, "scores": scores}
         ]
     elif scenario == "failure":
-        records = [{"item_id": "item-1", "document_id": "doc-1"}]  # no "scores" -> KeyError
+        # A well-shaped "scores" list (passes the FU-01.3-B shape
+        # precondition / REG-09 and the run_id derivation check) but the
+        # score dict is missing "value" -> a genuine KeyError inside the
+        # REAL task, in this isolated subprocess. (Before FU-01.3-B this
+        # used a record missing "scores" entirely, but that now raises
+        # earlier from the precondition itself, before the task ever
+        # runs, and would never reach this scenario's real-SDK span.)
+        records = [
+            {
+                "item_id": "item-1",
+                "document_id": "doc-1",
+                "scores": [
+                    {
+                        "id": score_id(
+                            run_id=f"run-{scenario}", document_id="doc-1", score_name="gate"
+                        ),
+                        "name": "gate",
+                    }
+                ],
+            }
+        ]
     else:
         raise SystemExit(f"unknown scenario: {scenario!r}")
 

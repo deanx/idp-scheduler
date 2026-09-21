@@ -292,14 +292,45 @@ def test_mark_run_status_failure_raises_typed_error() -> None:
 
 
 def test_make_platform_dispatches_on_platform_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """QA-01 re-audit F-2 / DoD (b): an isinstance-only assertion here
+    would pass even if the factory ignored LANGFUSE_HOST entirely --
+    assert the constructed UrllibHttpClient AND the SDK client actually
+    carry the host and both keys, not just that SOME LangfuseAdapter
+    came back."""
+    import base64
+
     monkeypatch.setenv("PLATFORM", "langfuse")
     monkeypatch.setenv("LANGFUSE_HOST", "https://example.invalid")
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pub")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "distinctive-pub-9f3a")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "distinctive-secret-2c71")
+    # The SDK's own base_url resolution prioritizes LANGFUSE_BASE_URL over
+    # the explicit `host=` constructor arg when both are present -- an
+    # ambient .env (sourced for the live-integration gate) can leak it in.
+    # Isolate this test from that so it asserts the FACTORY's wiring, not
+    # whatever else happens to be in the process environment.
+    monkeypatch.delenv("LANGFUSE_BASE_URL", raising=False)
 
     adapter = make_platform()
 
     assert isinstance(adapter, LangfuseAdapter)
+
+    # -- raw-REST UrllibHttpClient (datasets/schema/scores) --
+    http_client = adapter._client  # noqa: SLF001
+    assert http_client._host == "https://example.invalid"  # noqa: SLF001
+    decoded = base64.b64decode(
+        http_client._auth_header.removeprefix("Basic ")  # noqa: SLF001
+    ).decode("ascii")
+    assert decoded == "distinctive-pub-9f3a:distinctive-secret-2c71"
+
+    # -- Langfuse SDK client (OTLP trace + dataset-run linkage) --
+    sdk_client = adapter._tracing_client  # noqa: SLF001
+    assert sdk_client._base_url == "https://example.invalid"  # type: ignore[attr-defined]  # noqa: SLF001
+    sdk_headers = sdk_client.api._client_wrapper.get_headers()  # type: ignore[attr-defined]
+    assert sdk_headers["X-Langfuse-Public-Key"] == "distinctive-pub-9f3a"
+    sdk_decoded = base64.b64decode(
+        sdk_headers["Authorization"].removeprefix("Basic ")
+    ).decode("ascii")
+    assert sdk_decoded == "distinctive-pub-9f3a:distinctive-secret-2c71"
 
 
 def test_make_platform_raises_on_unknown_platform(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -775,6 +806,191 @@ def test_write_scores_persistent_transport_error_raises_after_exactly_max_attemp
 
     score_post_calls = [c for c in client.calls if c[1] == "/api/public/scores"]
     assert len(score_post_calls) == 3
+
+
+# --- FU-01.3-B / DEBT-20: record-phase monotonic deadline. Provisional
+# -- the mechanism lands here; the real deadline VALUE stays owed to
+# S-01.6 timings + N8's 50-doc arithmetic (Soneca ruling). Default is
+# None (disabled) -- a low guess would ship a new way to abort a run
+# that would otherwise have succeeded.
+
+
+def _sequenced_clock(*times: float) -> Any:
+    """A fake monotonic clock: returns each value in order, then holds at
+    the last one for any further call (mirrors a real clock continuing
+    to run past a deadline without needing an unbounded fixture)."""
+    values = list(times)
+
+    def _clock() -> float:
+        if len(values) > 1:
+            return values.pop(0)
+        return values[0]
+
+    return _clock
+
+
+def test_record_deadline_defaults_to_disabled_and_never_consults_the_clock() -> None:
+    """Ship with a generous default or None=disabled (DEBT-20's own
+    warning) -- assert the shipped default really is disabled, not a
+    picked number, by proving the clock is never even called."""
+
+    def _clock_must_not_be_called() -> float:
+        raise AssertionError("clock must not be consulted when the deadline is disabled")
+
+    client = _QueuedScorePostClient(
+        static_responses=_dataset_fetch_responses(),
+        score_post_queue=[(200, {"id": "x"})],
+    )
+    adapter = LangfuseAdapter(
+        client=client,
+        tracing_client=_CompletingTracingClient(),
+        sleep=lambda _seconds: None,
+        clock=_clock_must_not_be_called,
+    )
+
+    _record_run_via(adapter)  # must not raise, must not touch the clock
+
+    assert adapter._record_deadline_seconds is None  # noqa: SLF001
+
+
+def test_record_deadline_exceeded_before_any_score_write_raises_without_any_post() -> None:
+    client = _QueuedScorePostClient(
+        static_responses=_dataset_fetch_responses(),
+        score_post_queue=[(200, {"id": "x"})],
+    )
+    adapter = LangfuseAdapter(
+        client=client,
+        tracing_client=_CompletingTracingClient(),
+        sleep=lambda _seconds: None,
+        record_deadline_seconds=5.0,
+        # deadline = clock() + 5.0 = 105.0 at record_run start; the
+        # per-score check below then observes 200.0, already past it.
+        clock=_sequenced_clock(100.0, 200.0),
+    )
+
+    with pytest.raises(ScoreWriteFailedError, match="deadline"):
+        _record_run_via(adapter)
+
+    score_post_calls = [c for c in client.calls if c[1] == "/api/public/scores"]
+    assert score_post_calls == []
+
+
+def test_record_deadline_exceeded_between_scores_stops_further_writes() -> None:
+    """Direct call (precise clock-call control): 3 scores in one
+    document, deadline exceeded right before the 3rd -- the first two
+    are written, the third is refused before any POST for it."""
+    http_client = _QueuedScorePostClient(
+        static_responses={},
+        score_post_queue=[(200, {"id": "x"}), (200, {"id": "x"})],
+    )
+    adapter = LangfuseAdapter(
+        client=http_client,
+        tracing_client=_CompletingTracingClient(),
+        sleep=lambda _seconds: None,
+        clock=_sequenced_clock(0.0, 0.0, 50.0, 50.0, 150.0),
+    )
+    scores = [
+        _derived_score(document_id="doc-0", name=f"field:score-{i}", value="match")
+        for i in range(3)
+    ]
+
+    with pytest.raises(ScoreWriteFailedError, match="deadline"):
+        adapter._write_scores(  # noqa: SLF001
+            trace_id="trace-1", document_id="doc-0", scores=scores, deadline=100.0
+        )
+
+    score_post_calls = [c for c in http_client.calls if c[1] == "/api/public/scores"]
+    assert len(score_post_calls) == 2
+
+
+def test_record_deadline_checked_between_retry_attempts() -> None:
+    """A transient TransportError on attempt 1 backs off, but the
+    deadline check at the top of attempt 2 fires first -- attempt 2's
+    POST must never happen."""
+    http_client = _QueuedScorePostClient(
+        static_responses={},
+        score_post_queue=[TransportError("connection reset")],
+    )
+    adapter = LangfuseAdapter(
+        client=http_client,
+        tracing_client=_CompletingTracingClient(),
+        sleep=lambda _seconds: None,
+        # call 1: per-score check (0.0 < 10.0, passes); call 2: attempt-1
+        # check (0.0 < 10.0, passes) -> TransportError -> sleep -> call 3:
+        # attempt-2 check (20.0 >= 10.0, deadline exceeded).
+        clock=_sequenced_clock(0.0, 0.0, 20.0),
+    )
+    score = _derived_score(document_id="doc-0", name="gate", value="PASS")
+
+    with pytest.raises(ScoreWriteFailedError, match="deadline"):
+        adapter._write_scores(  # noqa: SLF001
+            trace_id="trace-1", document_id="doc-0", scores=[score], deadline=10.0
+        )
+
+    assert len(http_client.calls) == 1
+
+
+def test_record_deadline_persists_across_records_not_reset_per_record() -> None:
+    """Integration-level proof through record_run: the deadline is
+    computed ONCE for the whole record phase, not per-record -- a
+    deadline exceeded after record 1's score must also stop record 2's,
+    even though record 2 is a fresh _write_scores call."""
+    client = _QueuedScorePostClient(
+        static_responses={
+            ("GET", "/api/public/v2/datasets/ds"): (200, _v2_dataset_response(None)),
+            ("GET", "/api/public/dataset-items?datasetName=ds"): (
+                200,
+                _dataset_items_page(
+                    [
+                        {
+                            "id": "item-1",
+                            "input": {"document_id": "doc-0"},
+                            "expectedOutput": {"fields": {}},
+                        },
+                        {
+                            "id": "item-2",
+                            "input": {"document_id": "doc-1"},
+                            "expectedOutput": {"fields": {}},
+                        },
+                    ],
+                    page=1,
+                    total_pages=1,
+                ),
+            ),
+        },
+        score_post_queue=[(200, {"id": "x"})],
+    )
+    adapter = LangfuseAdapter(
+        client=client,
+        tracing_client=_CompletingTracingClient(),
+        sleep=lambda _seconds: None,
+        record_deadline_seconds=5.0,
+        # deadline = 0.0 + 5.0 = 5.0. record-1's score check sees 0.0
+        # (passes), its attempt check sees 0.0 (passes) -> succeeds.
+        # record-2's score check then sees 10.0 -- exceeded.
+        clock=_sequenced_clock(0.0, 0.0, 0.0, 10.0),
+    )
+    dataset = adapter.get_dataset("ds")
+    records = [
+        {
+            "item_id": item["item_id"],
+            "document_id": item["document_id"],
+            "scores": [_derived_score(document_id=item["document_id"], name="gate", value="PASS")],
+        }
+        for item in dataset["items"]
+    ]
+
+    with pytest.raises(ScoreWriteFailedError, match="deadline"):
+        adapter.record_run(
+            dataset_name="ds",
+            run_name="run-1",
+            run_id="run-1",
+            records=records,  # type: ignore[arg-type]
+            metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+        )
+
+    score_post_calls = [c for c in client.calls if c[1] == "/api/public/scores"]
+    assert len(score_post_calls) == 1
 
 
 def test_write_scores_4xx_makes_exactly_one_attempt_never_retried() -> None:

@@ -33,6 +33,38 @@ _AUTH_HEADER_PATTERN = re.compile(r"Basic\s+[A-Za-z0-9+/=]+")
 DEFAULT_TIMEOUT_SECONDS = 30.0
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect (DEBT-26, sibling of the adapter's
+    ``_NoRedirectHandler``, QA S-01.2 F-2) -- the Basic ``Authorization``
+    header (Langfuse credentials) must never be re-sent to a different
+    host, even for a same-origin redirect (defense-in-depth) or an
+    https->http downgrade. Returning ``None`` makes urllib raise
+    ``HTTPError`` for the 3xx status instead of transparently following
+    it, so a redirect becomes an ordinary non-2xx response handled (and
+    redacted) like any other."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        return None
+
+
+#: A module-level opener with redirects disabled — built once, reused for
+#: every request. Exposed as a call-through function (rather than used
+#: directly as ``_opener.open``) so tests can monkeypatch a single seam.
+_opener = urllib.request.build_opener(_NoRedirectHandler)
+
+
+def _urlopen(req: urllib.request.Request, timeout: float) -> Any:
+    return _opener.open(req, timeout=timeout)
+
+
 def redact(text: str) -> str:
     """Strip a Basic auth header value out of arbitrary text before logging."""
     return _AUTH_HEADER_PATTERN.sub("Basic ***REDACTED***", text)
@@ -82,12 +114,28 @@ class UrllibHttpClient:
         req.add_header("Authorization", self._auth_header)
         req.add_header("Content-Type", "application/json")
         try:
-            with urllib.request.urlopen(  # noqa: S310 - internal Langfuse host only
-                req, timeout=self._timeout_seconds
-            ) as resp:
+            with _urlopen(req, self._timeout_seconds) as resp:  # noqa: S310 - internal Langfuse host only
                 raw = resp.read().decode("utf-8")
                 status = resp.status
         except urllib.error.HTTPError as exc:
+            if 300 <= exc.code < 400:
+                # DEBT-26: a 3xx should never happen for Langfuse's API;
+                # the no-redirect opener converts an actual redirect
+                # attempt into this HTTPError instead of transparently
+                # following it and re-sending the Basic auth header to a
+                # different host. Treat it as a typed transport error
+                # immediately, and never read/return its body. Close the
+                # unread response explicitly (releases the socket/file) --
+                # don't rely on addinfourl's __del__ finalizer timing.
+                exc.close()
+                message = redact(f"{method} {path} failed: unexpected redirect response")
+                logger.error(
+                    "transport_failed method=%s path=%s detail=%s",
+                    sanitize_for_log(method),
+                    sanitize_for_log(path),
+                    sanitize_for_log(message),
+                )
+                raise TransportError(message) from exc
             raw = exc.read().decode("utf-8")
             status = exc.code
         except (TimeoutError, urllib.error.URLError) as exc:
