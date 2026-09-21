@@ -505,6 +505,13 @@ def test_score_missing_name_raises_typed_error_before_any_sdk_call() -> None:
 
 
 def test_scores_none_raises_typed_error_before_any_sdk_call() -> None:
+    """Delta-coverage audit note: no sentinel-bearing score can be added
+    to THIS fixture -- ``scores: None`` is the malformed shape under
+    test, and ``document_id`` is the one field INV-02 deliberately
+    allows in the message. There is nothing else in a ``DocumentRecord``
+    to leak here, so the sentinel-absence leg genuinely doesn't apply to
+    this case (unlike the missing-``document_id`` sibling below, which
+    DOES carry a scores list and gets the fix)."""
     adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
     records: list[DocumentRecord] = [
         {"item_id": "item-1", "document_id": "doc-0", "scores": None}  # type: ignore[typeddict-item]
@@ -548,16 +555,31 @@ def test_scores_not_a_list_raises_typed_error_before_any_sdk_call() -> None:
 def test_record_missing_document_id_raises_typed_error_before_any_sdk_call() -> None:
     """Found by Atchim at ruling time, not in the original F-1 finding.
     There is no document_id to name in this case -- the message must say
-    so without inventing one (INV-02)."""
+    so without inventing one (INV-02). Delta-coverage audit follow-up:
+    the record carries a sentinel-bearing score (unreachable by the code
+    path -- document_id is checked first -- but present in the fixture)
+    so the sentinel-absence assertion actually proves something, rather
+    than trivially passing because nothing sensitive was ever in the
+    fixture to begin with."""
     adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
-    bad_record: Any = {"item_id": "item-1", "scores": []}
+    bad_record: Any = {
+        "item_id": "item-1",
+        "scores": [
+            {
+                "id": _SENTINEL_SCORE_ID,
+                "name": _SENTINEL_SCORE_NAME,
+                "value": _SENTINEL_SCORE_VALUE,
+            }
+        ],
+    }
     records: list[DocumentRecord] = [bad_record]
 
-    with pytest.raises(ExperimentRecordFailedError, match="document_id"):
+    with pytest.raises(ExperimentRecordFailedError, match="document_id") as excinfo:
         adapter.record_run(
             dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
         )
 
+    _assert_no_score_sentinel_leaked(str(excinfo.value))
     _assert_zero_platform_writes(http_client, tracing_client)
 
 

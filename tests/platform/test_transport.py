@@ -157,15 +157,26 @@ def _start_server(
     return server
 
 
-def test_redirect_response_raises_typed_error_and_credential_never_reaches_the_target() -> None:
+@pytest.mark.parametrize("redirect_status", [301, 302, 303, 307, 308])
+def test_redirect_response_raises_typed_error_and_credential_never_reaches_the_target(
+    redirect_status: int,
+) -> None:
     """DEBT-26 / REG-07: two REAL local servers (not mocks) -- server B
     would receive the Basic auth header (Langfuse credentials) if the
-    real urllib opener followed the 302 from server A. It must not."""
+    real urllib opener followed the redirect from server A. It must not.
+
+    Delta-coverage audit M2: parametrized over every 3xx code the no-
+    redirect handler must cover, not just 302 -- a narrowed
+    `300 <= exc.code < 400` -> `exc.code == 302` mutant left 301/303/307/
+    308 falling through to `raw = exc.read()`, returning `(30x, None)`
+    from `request()` as if it were an ordinary response. Every caller
+    only checks `status >= 400`, so that reads as SUCCESS -- exactly the
+    "returned as success" failure mode DoD (e) names."""
     server_b = _start_server(response_status=200)
     try:
         port_b = server_b.server_address[1]
         server_a = _start_server(
-            response_status=302,
+            response_status=redirect_status,
             redirect_location=f"http://127.0.0.1:{port_b}/other",
         )
         try:

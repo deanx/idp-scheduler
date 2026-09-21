@@ -915,6 +915,38 @@ def test_record_deadline_defaults_to_disabled_and_never_consults_the_clock() -> 
     assert adapter._record_deadline_seconds is None  # noqa: SLF001
 
 
+def test_record_deadline_is_computed_absolute_not_relative_to_the_configured_seconds() -> None:
+    """Delta-coverage audit M1: nothing previously proved the deadline is
+    an ABSOLUTE clock value (`self._clock() + record_deadline_seconds`)
+    rather than the bare `record_deadline_seconds` treated as a deadline
+    on its own. In production `time.monotonic()` returns seconds since
+    boot (~10**5-10**6) -- a relative deadline would make every
+    configured deadline fire on the FIRST score of every run, the moment
+    anyone sets one. A large starting clock value (1000.0, well past any
+    plausible `record_deadline_seconds`) with a deadline that must NOT be
+    exceeded proves the `+` is really there."""
+    client = _QueuedScorePostClient(
+        static_responses=_dataset_fetch_responses(),
+        score_post_queue=[(200, {"id": "x"})],
+    )
+    adapter = LangfuseAdapter(
+        client=client,
+        tracing_client=_CompletingTracingClient(),
+        sleep=lambda _seconds: None,
+        record_deadline_seconds=5.0,
+        # deadline = clock() + 5.0. Absolute: 1000.0 + 5.0 = 1005.0, and
+        # the later checks (1001.0) are still well under it -- must NOT
+        # raise. Relative (the mutant): the deadline would collapse to
+        # the bare 5.0, and 1001.0 >= 5.0 would raise immediately.
+        clock=_sequenced_clock(1000.0, 1001.0, 1001.0),
+    )
+
+    _record_run_via(adapter)  # must NOT raise
+
+    score_post_calls = [c for c in client.calls if c[1] == "/api/public/scores"]
+    assert len(score_post_calls) == 1
+
+
 def test_record_deadline_exceeded_before_any_score_write_raises_without_any_post() -> None:
     client = _QueuedScorePostClient(
         static_responses=_dataset_fetch_responses(),
