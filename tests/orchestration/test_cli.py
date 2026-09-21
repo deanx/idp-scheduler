@@ -197,3 +197,60 @@ def test_load_dotenv_is_called_before_parse_args(monkeypatch: pytest.MonkeyPatch
 
     assert exit_code == 0
     assert call_order == ["load_dotenv", "parse_args"]
+
+
+def test_main_returns_3_when_run_eval_hits_the_not_implemented_boundary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    """C5 (DEBT-44 gate, fourth instance): this is the cli->facade seam
+    exercised end to end, with the REAL `facade.run_eval` (not
+    monkeypatched, unlike every other test in this file). Today
+    `run_eval` ALWAYS raises `NotImplementedError` once its pre-run
+    checks pass (T-01.4.2 onward is not built), so this untested branch
+    is the one every real invocation takes -- mutating `return 3` ->
+    `return 0` previously survived all 665 tests because nothing
+    exercised this path with a real facade. `tmp_path` isolates from any
+    real ambient `.env`."""
+    monkeypatch.chdir(tmp_path)  # type: ignore[arg-type]
+    monkeypatch.setenv("PLATFORM", "langfuse")
+    monkeypatch.setenv("LANGFUSE_HOST", "https://example.invalid")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pub")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
+    monkeypatch.setenv("IDP_CLIENT_ID", "id")
+    monkeypatch.setenv("IDP_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("IDP_REGION", "us-east")
+    monkeypatch.setenv("IDP_ORG_ID", "org-123")
+
+    exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
+
+    assert exit_code == 3
+
+
+def test_version_at_the_64_char_cap_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """C2 (DEBT-44 gate, fourth instance): `_VERSION_PATTERN`'s `{1,64}`
+    cap (TP-31) was stated in both `cli.py`'s and this module's own
+    docstrings but had no test -- a mutant widening the cap to
+    unbounded (`{1,}`) survived all 665 tests. Boundary-pin both edges."""
+    calls: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(
+        cli, "run_eval", lambda a, v, r: calls.append((a, v, r)) or 0  # type: ignore[func-returns-value]
+    )
+    version = "a" * 64
+
+    exit_code = cli.main(["--action", _VALID_UUID, "--version", version, "--run", "nightly"])
+
+    assert exit_code == 0
+    assert calls == [(_VALID_UUID, version, "nightly")]
+
+
+def test_version_one_char_past_the_64_char_cap_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(cli, "run_eval", _fail_if_called)
+    version = "a" * 65
+
+    exit_code = cli.main(["--action", _VALID_UUID, "--version", version, "--run", "nightly"])
+
+    assert exit_code != 0

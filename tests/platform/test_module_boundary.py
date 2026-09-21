@@ -26,3 +26,12 @@ def test_no_vendor_reference_outside_platform_package() -> None:
         if _VENDOR_PATTERN.search(text):
             offenders.append(str(path))
     assert offenders == [], f"Langfuse references leaked outside platform/: {offenders}"
+
+
+def test_guard_catches_a_qualified_module_reference() -> None:
+    """DEBT-44 gate, fourth-instance suggestion: R-1's own fix was
+    unpinned -- reverting `_VENDOR_PATTERN` to `\\blangfuse\\b` survived
+    the suite green, because nothing exercised the regex directly against
+    the exact blind spot it was built to close (`_` is a word character,
+    so a bounded pattern never matches a qualified import path)."""
+    assert _VENDOR_PATTERN.search("from idp_regression.platform.langfuse_adapter import x")

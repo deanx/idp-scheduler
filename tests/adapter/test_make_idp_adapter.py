@@ -121,3 +121,31 @@ def test_missing_required_credential_raises(monkeypatch: pytest.MonkeyPatch) -> 
         monkeypatch.delenv(key, raising=False)
     with pytest.raises(RuntimeError, match="IDP_CLIENT_ID"):
         make_idp_adapter()
+
+
+@pytest.mark.parametrize("whitespace_value", ["   ", "\t", "\n", "\t\n ", " \r\n\t "])
+@pytest.mark.parametrize("required_var", list(_REQUIRED_ENV))
+def test_whitespace_only_required_credential_raises(
+    required_var: str, whitespace_value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DEBT-44 gate, fourth instance, finding R-3: `_require`'s
+    `if not value:` accepted a whitespace-only credential (reproduced
+    live: `IDP_CLIENT_SECRET="   "` passed N6's pre-run checks) -- the
+    same gap fixed for the platform's three vars in
+    `idp_regression.orchestration.bootstrap` (Atchim review C-1) applied
+    here too, on the other four."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv(required_var, whitespace_value)
+    with pytest.raises(RuntimeError, match=required_var):
+        make_idp_adapter()
+
+
+@pytest.mark.parametrize("required_var", list(_REQUIRED_ENV))
+def test_literal_zero_required_credential_is_not_falsely_rejected(
+    required_var: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard for the whitespace-only fix: `"0".strip()` is
+    still the truthy, non-empty string `"0"` and must be accepted."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv(required_var, "0")
+    make_idp_adapter()  # must not raise

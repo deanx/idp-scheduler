@@ -25,10 +25,18 @@ elimination, not by narrowing).
 
 `make_idp_adapter()` (`idp_regression.adapter.idp_client`) already raises
 a clear `RuntimeError(f"missing required env var {name}")` on its own
-missing-var path and correctly rejects an empty string too
-(`if not value:`) — no wrapping needed there; `run_eval` still catches it
-so a missing/empty IDP credential produces a controlled exit rather than
-an unhandled traceback (see `facade.py`).
+missing/empty/whitespace-only-var path — no wrapping needed there;
+`run_eval` still catches it so a missing IDP credential produces a
+controlled exit rather than an unhandled traceback (see `facade.py`).
+⚠️ **This claim is verified, not assumed (DEBT-44 gate, fourth instance,
+finding R-3, 2026-09-21):** an earlier version of this docstring read
+`_require`'s `if not value:` as sufficient and used that reading to
+justify not extending this file's own whitespace-only fix there — the
+reading was literally true and operationally misleading, since
+`if not value:` alone accepts `"   "` (reproduced live:
+`IDP_CLIENT_SECRET="   "` passed every N6 pre-run check). `_require` now
+carries the identical `.strip()` fix this file's `validate_platform_credentials`
+does, so the "no wrapping needed" conclusion now actually holds.
 
 The required var names come from `idp_regression.platform.REQUIRED_ENV_VARS`
 (NOT hand-listed here) — both to avoid yet another hand-written key list

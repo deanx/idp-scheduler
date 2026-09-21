@@ -1,10 +1,25 @@
 """T-01.4.10 (DEBT-45) -- the redefined gitleaks gate has three legs. This
 suite pins the *shape* of each leg (file presence, key flags/commands) so a
-future edit cannot silently regress leg 1 back to full-history, drop leg 2's
-wiring, or turn leg 3 into a scan. It intentionally does NOT re-run
-`gitleaks git .` over history in CI (that would reintroduce exactly the
-O(history)-per-PR problem T-01.4.10 exists to remove) -- leg-firing proof
-lives in the implementation transcript, not in the regular suite.
+future edit is caught, not merely likely to be caught, if it silently
+regresses leg 1 back to full-history, drops leg 2's wiring, or turns leg 3
+into a scan. It intentionally does NOT re-run `gitleaks git .` over history
+in CI (that would reintroduce exactly the O(history)-per-PR problem
+T-01.4.10 exists to remove) -- leg-firing proof lives in the implementation
+transcript, not in the regular suite.
+
+⚠️ **Honesty note (DEBT-44 gate, fourth instance, findings T1/T3, 2026-09-21):
+this file has already overclaimed "cannot" once** -- the prior wording here
+said a regression "cannot silently" happen, while two of the load-bearing
+assertions (leg 1's scoping, leg 3's assertion-not-scan property) were still
+whole-file-text substring matches a mutant satisfied via a surviving
+comment or an echoed-but-never-executed string. Both are now resolved
+against `yaml.safe_load`'s parsed job/step structure and mutation-verified
+against the exact mutants that beat the prior version (see
+`test_diff_scoped_not_full_history` and
+`test_workflow_asserts_env_ignored_and_untracked`). This suite is tested
+against every mutant devised against it SO FAR, not proven exhaustive --
+treat "the suite is green" as evidence, not proof, and re-mutate before
+trusting a future edit here on the strength of this docstring alone.
 
 ⛔ None of these tests may assert or encode a `paths = ["tests/"]`
 allowlist anywhere in the gitleaks config surface -- see
@@ -45,6 +60,16 @@ def _triggers(workflow: dict[str, Any]) -> Any:
     return workflow.get("on", workflow.get(True))
 
 
+def _read_shell_script_excluding_comments(relpath: str) -> str:
+    """A shell script has no structured parser here the way a workflow
+    has `yaml.safe_load` -- but a `#`-prefixed line is unambiguously a
+    comment, so at minimum a claim that lives ONLY in a comment (the same
+    bypass class T1/T3 closed for the YAML files) should not satisfy an
+    assertion about what the script actually DOES."""
+    lines = _read(relpath).splitlines()
+    return "\n".join(line for line in lines if not line.strip().startswith("#"))
+
+
 class TestLeg1DiffScopedGate:
     """Blocking, diff-scoped -- never full-history, never unbounded."""
 
@@ -52,24 +77,39 @@ class TestLeg1DiffScopedGate:
         assert (REPO_ROOT / ".github/workflows/secrets-gate.yml").exists()
 
     def test_diff_scoped_not_full_history(self) -> None:
-        content = _read(".github/workflows/secrets-gate.yml")
-        assert "log-opts" in content, "leg 1 must scope the scan via --log-opts, not full history"
-        # The bare, unscoped invocation this leg replaces -- must not appear
-        # on its own line (the scoped invocation below always carries
-        # --log-opts on the same line).
-        for line in content.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("gitleaks git ."):
-                assert "log-opts" in stripped, f"unscoped gitleaks invocation: {stripped!r}"
+        """DEBT-44 gate, fourth instance, finding T1: a whole-file
+        substring match on `"log-opts"` is satisfied by that string
+        surviving in a COMMENT (stripped by the YAML parser, so this
+        alone would already close it) -- but the prior per-line
+        `.strip().startswith("gitleaks git .")` guard was ALSO blind to
+        an inline `run: gitleaks git . ...` form (only multi-line `run:
+        |` blocks were split and inspected per-line), a form that
+        genuinely exists elsewhere in this repo (`secrets-audit.yml`).
+        Resolve the job's steps and check every ACTUAL gitleaks
+        invocation, regardless of the YAML scalar style it's written in."""
+        workflow = _load_workflow(".github/workflows/secrets-gate.yml")
+        steps = workflow["jobs"]["gitleaks-diff"]["steps"]
+        run_commands = [step["run"] for step in steps if "run" in step]
+
+        gitleaks_invocations = [cmd for cmd in run_commands if "gitleaks git" in cmd]
+        assert gitleaks_invocations, "leg 1 must invoke `gitleaks git`"
+        for cmd in gitleaks_invocations:
+            assert "--log-opts" in cmd, f"unscoped gitleaks invocation: {cmd!r}"
 
     def test_triggers_on_pull_request(self) -> None:
         workflow = _load_workflow(".github/workflows/secrets-gate.yml")
         assert "pull_request" in _triggers(workflow)
 
     def test_merge_base_resolved_against_base_ref(self) -> None:
-        content = _read(".github/workflows/secrets-gate.yml")
-        assert "merge-base" in content
-        assert "base_ref" in content
+        """Same class as T1 (DEBT-44 gate, fourth instance) -- resolved
+        against the job's actual step commands, not whole-file text, so a
+        comment mentioning these tokens can't substitute for the real
+        resolution logic."""
+        workflow = _load_workflow(".github/workflows/secrets-gate.yml")
+        steps = workflow["jobs"]["gitleaks-diff"]["steps"]
+        run_commands = [step["run"] for step in steps if "run" in step]
+        assert any("merge-base" in cmd for cmd in run_commands)
+        assert any("base_ref" in cmd for cmd in run_commands)
 
     def test_no_tests_paths_allowlist_anywhere_in_workflow(self) -> None:
         content = _read(".github/workflows/secrets-gate.yml")
@@ -86,17 +126,17 @@ class TestLeg2PreCommitHook:
         assert hook.stat().st_mode & 0o111, "pre-commit hook must be executable"
 
     def test_hook_scans_staged_not_history_or_working_tree(self) -> None:
-        content = _read(".githooks/pre-commit")
+        content = _read_shell_script_excluding_comments(".githooks/pre-commit")
         assert "gitleaks git --staged" in content
 
     def test_hook_fails_closed_when_gitleaks_missing(self) -> None:
-        content = _read(".githooks/pre-commit")
+        content = _read_shell_script_excluding_comments(".githooks/pre-commit")
         assert "set -euo pipefail" in content
         assert "command -v gitleaks" in content
         assert "exit 1" in content
 
     def test_install_script_wires_hookspath(self) -> None:
-        content = _read("scripts/install-git-hooks.sh")
+        content = _read_shell_script_excluding_comments("scripts/install-git-hooks.sh")
         assert "core.hooksPath" in content
         assert ".githooks" in content
 
@@ -109,10 +149,38 @@ class TestLeg3AssertionNotScan:
     """No gitleaks invocation -- two shell assertions."""
 
     def test_workflow_asserts_env_ignored_and_untracked(self) -> None:
-        content = _read(".github/workflows/secrets-gate.yml")
-        assert "git check-ignore -q .env" in content
-        assert "git ls-files --error-unmatch .env" in content
-        assert "gitleaks" not in content.split("env-hygiene:")[1].split("lockfile-pin:")[0]
+        """DEBT-44 gate, fourth instance, finding T3: two mutants survived
+        the whole-file-text version of this test. (1) Replacing the
+        failure block with `echo "skipping: git ls-files
+        --error-unmatch .env"` still contains the invocation text --
+        as a STRING ARGUMENT to echo, never executed as a command -- so a
+        plain "is this substring anywhere in the resolved run command"
+        check is not enough by itself; the assertion below additionally
+        requires a bare `exit 1` line, which only exists when the
+        conditional actually executes (the echo-only replacement has no
+        `exit 1` anywhere). (2) Replacing the whole step with `run:
+        "true"` is caught by scoping to `jobs["env-hygiene"]["steps"]`'s
+        own resolved run commands, not the whole file's text."""
+        workflow = _load_workflow(".github/workflows/secrets-gate.yml")
+        steps = workflow["jobs"]["env-hygiene"]["steps"]
+        run_commands = [step["run"] for step in steps if "run" in step]
+
+        assert any("git check-ignore -q .env" in cmd for cmd in run_commands)
+
+        ls_files_commands = [
+            cmd for cmd in run_commands if "git ls-files --error-unmatch .env" in cmd
+        ]
+        assert ls_files_commands, "leg 3 must invoke `git ls-files --error-unmatch .env`"
+        assert any(
+            line.strip() == "exit 1" for cmd in ls_files_commands for line in cmd.splitlines()
+        ), (
+            "the .env-must-not-be-tracked step must actually be able to fail the job "
+            "(a bare `exit 1` line), not merely log the invocation's text"
+        )
+
+        assert not any("gitleaks" in cmd for cmd in run_commands), (
+            "leg 3 is assertion-only -- no gitleaks invocation belongs in this job"
+        )
 
     def test_env_is_actually_ignored(self) -> None:
         result = subprocess.run(
@@ -140,8 +208,14 @@ class TestFullHistoryAuditIsSeparateAndNonBlocking:
         assert (REPO_ROOT / ".github/workflows/secrets-audit.yml").exists()
 
     def test_audit_is_scheduled_not_pull_request_triggered(self) -> None:
+        """Presence half migrated to the resolved trigger block (same
+        class as T1/T3, DEBT-44 gate fourth instance); the absence half
+        stays a whole-text check on purpose -- the gate's own note: an
+        absence assertion over whole text is over-strict, never
+        tautological (nothing can satisfy `not in` by being a comment)."""
+        workflow = _load_workflow(".github/workflows/secrets-audit.yml")
+        assert "schedule" in _triggers(workflow)
         content = _read(".github/workflows/secrets-audit.yml")
-        assert "schedule:" in content
         assert "pull_request" not in content
 
     def test_audit_is_non_blocking(self) -> None:

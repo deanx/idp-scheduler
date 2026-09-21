@@ -329,8 +329,16 @@ def make_idp_adapter() -> MuleSoftIDPAdapter:
     """
 
     def _require(name: str) -> str:
+        # DEBT-44 gate, fourth instance, finding R-3 (2026-09-21): a bare
+        # `if not value:` accepts a whitespace-only value ("   " is
+        # truthy) -- reproduced live, `IDP_CLIENT_SECRET="   "` passed
+        # every N6 pre-run check. `.strip()` before the truthiness check
+        # closes it without over-rejecting: a literal `"0"` credential is
+        # still non-empty after stripping and stays accepted. Mirrors
+        # `idp_regression.orchestration.bootstrap.validate_platform_credentials`'s
+        # identical fix for the platform's three vars (Atchim review C-1).
         value = os.environ.get(name)
-        if not value:
+        if value is None or not value.strip():
             raise RuntimeError(f"missing required env var {name}")
         return value
 
