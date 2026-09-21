@@ -414,3 +414,77 @@ None.
 
 ## Open decision — `hypothesis` DEFER should now be REVISITED, not merely counted
 Dunga's own trigger rule was "a third **distinct** residual appearing". F-1 is that third residual (**value types**), on top of ME's larger-prefix gap and N-2's fourth-key caveat. The trigger has fired.
+
+---
+
+# Re-audit #4 — 2026-09-21 (after FU-01.3-G)
+
+**Verdict: ⚠️ Pass with follow-ups. S-01.3 STAYS DONE.** 0 Critical · 0 Major · **2 Minor** (1 new, 1 carried).
+**Auditor:** Zangado (Fable 5.1) @ `f2ac3a6`. **Rigor:** standard, no gate skipped.
+**Independence chain:** Dengoso **sonnet** → Atchim **opus ×3 distinct instances** (#1 FU-01.3-D, #2 FU-01.3-G review ×2 rounds, #3 the `/test` gate per DEBT-44) → Zangado **Fable 5.1**. Nothing below rests on any APPROVE, PASS or register row.
+
+## Entry gates — all five stand, none falsified
+Stamp ✅ PASSED with the `/test` gap-fill source `Risk: high` requires; `git diff --stat 758ab5f HEAD -- src/` **empty** (F-G2 was test-only); no deleted tests; only documented skips; `check_clean.py` exit 0; no merge/WIP commits, no TODO/FIXME.
+
+## Own runs
+| Scope | Result |
+|---|---|
+| Default | **498 passed, 14 skipped** |
+| Live (Langfuse 4.38.0) | **511 passed, 1 skipped** |
+| Composition subset | **72 passed** |
+| mypy / ruff / pip-audit | clean / clean / clean |
+
+**Independent mutation re-execution** (source restored byte-identical; `git diff --stat -- src/` empty at end): **M13** reproduced exactly — mutating `types.py:65` (`DocumentRecord`, *not* `DatasetItem` at `:24`) gives `1 failed, 175 passed`, collected 177→176, the sole failure being the production pin. **Confirmed decisive and probe-unreachable.** M1, M2, MY-9, M7 each re-killed, **each by a single test** — the pins are not redundant and each is the sole guard for its mutant.
+
+## Gate lines
+| Gate | Outcome |
+|---|---|
+| `Observability:` | **✅ VERIFIED** — observed, not read |
+| `Containment:` | **REQUIRED → deferred to S-01.4, UPHELD. Five-item condition STANDS; leg (2) partially discharged, not closed** |
+| `SCA:` | **✅ PASS** |
+| `Secrets:` | **⚠️ — F-2 carried** (no credential; gate definition is the defect) |
+| `Composition:` | **✅ PASS** (72 + live N26/INV-01) |
+| `Cleanliness:` | **✅ PASS** |
+| `LLM-Evals:` / `UI:` | N/A / N/A |
+
+**Observability detail.** Root-logger DEBUG handler; both guards driven with `None` / `7` / `[MARKER]` / `{"k": MARKER}`. `record_run`: 4/4 typed `ExperimentRecordFailedError`, **0 log lines, 0 HTTP, 0 SDK**, marker absent from exception text *and* logs, score sentinels absent. `get_dataset`: 4/4 typed `DatasetFetchFailedError`, 0 log lines, marker absent. **INV-02 holds in everything they emit — which is exactly nothing beyond a constant message.** Recorded, not a gap: both guards are silent by design, so **S-01.4/N10 owes the log line** for both.
+
+## The fix itself — verified structurally, not by fixture luck
+`record_run` (`:452-470`): tracing-client check → dataset-name check → `for record in records: _require_record_shape(record)` — **before** `record_item_ids`, the A3 loop, `records_by_item_id`, `ExperimentItem` construction (`:522`) and `record_experiment` (`:535`). **No path from entry to any HTTP or SDK call skips the guard for any record.** Inside the guard, the `document_id` isinstance (`:111`) sits after the key loop and before first use (`:120`). `get_dataset`'s guard (`:293`) raises before `items.append` and before `_item_cache[item_id]`, so a malformed item never primes the cache. **F-1 of re-audit #3 is closed at both boundaries.**
+
+## Findings
+
+### Minor
+
+**F-1 (NEW) — `get_dataset`'s value-type guard is hand-enumerated: `DatasetItem.item_id` is never checked. 1 of 2 `str` fields — the exact shape of re-audit #3's F-1, one boundary over.**
+`langfuse_adapter.py:286` `item_id = raw_item["id"]` → `:307` `self._item_cache[item_id] = dataset_id`. Verified independently by the orchestrator: `get_type_hints(DatasetItem)`'s `str` fields are exactly `['document_id', 'item_id']`, and only the first is guarded. Driven live:
+- `id: 7` / `id: None` → **`get_dataset` returns normally**, `items[0].item_id == 7`, `_item_cache` keyed `{7: …}`, 0 log lines. A later `record_run` then raises typed with **http=0, sdk=0** — so **fail-closed at the second boundary**.
+- `id: [..]` / `id: {..}` → **untyped `TypeError: unhashable type`** inside `get_dataset` (REG-04/REG-09 untyped-escape class, fail-closed, 0 writes). No INV-02 leak either way.
+- **Why Minor, not a reopen:** every path is fail-closed. **Why it matters anyway:** the card's own principle was *both trust boundaries or neither*, and bullet (iii) made the `record_run` side type-driven **precisely so this asymmetry could not recur** — but the `get_dataset` side got one hand-written test for one field. `DatasetItem` has exactly the two-`str`-field coincidence the probe was built to break.
+- **`escaped-atchim: yes`** — declared type says `str`; DEBT-40's one-lookup method finds it; **three** instances looked at this function.
+
+⚠️ **PROCESS FINDING (orchestrator, verified): this gap was already reported four hours earlier and never carded.** Atchim instance #2 raised it as **S-1** in its FU-01.3-G review — *"`get_dataset` type-checks `document_id` but not `item_id`, on the same three lines… the identical asymmetry that was F-1, reproduced in the fix for F-1, one variable to the left"* — and repeated it in its re-review under "Debt to hand to Dunga". `docs/state/DEBT.md` has **no row for it** (DEBT-43 records the general *rule*, not this gap). It was surfaced, routed, and evaporated; Zangado then rediscovered it as a finding. **This is SPEC-01:193 — "a baton sentence is not a backlog" — failing again, on the very card where a reviewer's routed item was supposed to become an explicit DoD bullet in the same session.** The rule exists; the enforcement does not.
+
+**F-2 (CARRIED, = re-audit #3 F-2) — `Secrets: ⚠️` stands; `.gitleaks.toml` still absent.** `escaped-atchim: no` — gate design.
+Re-run: staged **0**; `gitleaks git .` **1** (140 commits); **merge-base-scoped also 1** — re-confirmed that merge-base scoping does not clear this branch. `.gitleaks.toml` does not exist.
+**Ruling: acceptable for S-01.3 to stay Done — for one more audit, not indefinitely.** Predicate: (a) working tree clean ✓; (b) the historical hit is triaged and verified non-credential ✓; (c) the fingerprint entry is a **human** decision (DEBT-45) blocked on nobody but the human ✓ — *"and that is the part that must not drift."* **S-01.3 is not the story whose Done depends on the secret gate's definition — T-01.4.10/S-01.4 is. If DEBT-45 is still open at S-01.4's `/qa`, that is an S-01.4 Done-blocker.**
+
+## NFR-01 walk — FU-01.3-G changed no row's standing
+N26 ✅ (score-id scoping untouched; the guard is a precondition on the record, not the id derivation), N10 S-01.3 leg ✅ (new paths add no new abort *reason*; silent by design), N16 ✅, N2 ✅, N21 ✅, N22 ✅. N1/N3/N6/N7/N8/N14/N15/N28 ⚠️ WAIVED → S-01.4 (N6/DEBT-30 stands). System rows ⚠️ WAIVED → `/signoff`.
+✅ **The carried N12/N20 note is now DISCHARGED.** Re-audit #3 left: *"`document_id` reaches the span `input` unvalidated; the invariant assumes it is a string — enforce it."* `ExperimentItem.input={"document_id": …}` at `:526` is now only reachable after `_require_record_shape` has proven `isinstance(record["document_id"], str)` for **every** record (`:469-470`), and inbound, `get_dataset` refuses a non-string before it can prime the cache. **Rewritten for `/signoff`:** *"N12/N20 — `document_id` is type-enforced at both trust boundaries as of FU-01.3-G (`:111`, `:293`); residual: `item_id` is not enforced at `get_dataset` (re-audit #4 F-1), fail-closed downstream."*
+
+## Containment — leg (2) partially discharged, five-item condition stands
+FU-01.3-G discharges leg (2)'s *"value type — including F-1's non-string `document_id`"* clause at the unit level. It does **not** discharge *"every `DocumentRecord` field"* (only `str` fields are type-driven — F-G1's forward obligation) and does **not** touch *"malformed record at index ≥ 2"* (the killing test uses a single record at index 0; ME's anchor still only reaches index 1 — FU-01.3-H's residual). **No sixth item.** Leg (2) reworded: *"…every `DocumentRecord` field's presence and value type (str-typed value guards landed by FU-01.3-G; non-`str` fields are an event-shaped obligation), with the malformed record at index ≥ 2."*
+
+## Rulings on the five questions put to him
+1. **The fix** — closes F-1 at both boundaries; zero-platform-writes holds **structurally**, verified by tracing every path from `record_run`'s entry.
+2. **The type-driven mechanism** — genuine, and the two-pin design is sound. He reproduced **M13** himself (avoiding the `DatasetItem`/`DocumentRecord` false-negative trap). *"Collapsing them would delete a guarantee, not a redundancy."* The register's "lead with M13" is right.
+3. **My two corrections** — **accurate, not overcorrected.** One optional precision: `hint is str` is also **`NotRequired[str]`-inclusive** (the probe asserts `optional_field` *is* in the result), so "str-annotated" should read "resolves to `str` after `get_type_hints`". Not a finding.
+4. **The sweep / FO-5** — **correctly out of scope for S-01.3.** `overall_gate` is S-01.1's surface; `VerdictMap` is produced only by `classify()`; S-01.3 consumes verdict strings it never interprets. **But he independently judges FO-5 real and sizes it Major on S-01.1's ledger** — *"fail-open in the direction that flips a CI gate green, and INV-08 makes the gate the source of truth"* — closed by a one-line `else: raise ClassifierError`. Card it against S-01.1/REG-01's family, not here.
+5. **S-01.3 stays Done** — the only fail-open is closed structurally and pinned by single-test-kill mutants he re-ran; the new F-1 is fail-closed on every path.
+
+## Escape-capture (9a)
+- **F-1** — `escaped-atchim: yes` — same declared-type lookup, other boundary, three instances.
+- **F-2** — `escaped-atchim: no` — gate design, outside the lens.
+
+⚠️ **Signal worth more than either finding:** *"two consecutive audits, two '1 of 2 `str` fields' misses on the same card family, under three reviewer instances. The lens is finding **the reported field**, not **the declared type's field set**. DEBT-40's method is right; it is being applied to the field named in the finding rather than to the TypedDict."* That belongs in the DEBT-40/43/44 protocol amendment.
