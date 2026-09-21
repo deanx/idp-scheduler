@@ -15,12 +15,34 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _read(relpath: str) -> str:
     return (REPO_ROOT / relpath).read_text()
+
+
+def _load_workflow(relpath: str) -> dict[str, Any]:
+    """Parse a workflow file and resolve it against ITS ACTUAL structure,
+    never a substring of its text (Atchim review finding 6, DEBT-44 gate
+    #2: a string surviving in a *comment* satisfied a substring
+    assertion while the resolved job key it was meant to pin had
+    changed). PyYAML uses the YAML 1.1 resolver, under which a bare `on:`
+    key parses as the boolean `True`, not the string `"on"` -- GitHub
+    Actions' own quirk, not a bug here; callers needing the trigger block
+    must look it up as `workflow[True]`."""
+    loaded = yaml.safe_load(_read(relpath))
+    assert isinstance(loaded, dict)
+    return loaded
+
+
+def _triggers(workflow: dict[str, Any]) -> Any:
+    """The `on:` block, resolved past PyYAML's YAML-1.1 boolean-key quirk."""
+    return workflow.get("on", workflow.get(True))
 
 
 class TestLeg1DiffScopedGate:
@@ -41,8 +63,8 @@ class TestLeg1DiffScopedGate:
                 assert "log-opts" in stripped, f"unscoped gitleaks invocation: {stripped!r}"
 
     def test_triggers_on_pull_request(self) -> None:
-        content = _read(".github/workflows/secrets-gate.yml")
-        assert "pull_request:" in content
+        workflow = _load_workflow(".github/workflows/secrets-gate.yml")
+        assert "pull_request" in _triggers(workflow)
 
     def test_merge_base_resolved_against_base_ref(self) -> None:
         content = _read(".github/workflows/secrets-gate.yml")
@@ -123,8 +145,15 @@ class TestFullHistoryAuditIsSeparateAndNonBlocking:
         assert "pull_request" not in content
 
     def test_audit_is_non_blocking(self) -> None:
-        content = _read(".github/workflows/secrets-audit.yml")
-        assert "continue-on-error: true" in content
+        """Atchim review finding 6, DEBT-44 gate #2: a substring match on
+        `"continue-on-error: true"` is satisfied by that string surviving
+        ANYWHERE in the file -- including a header comment -- while a
+        mutant sets the actual job's `continue-on-error: false`. Resolve
+        the workflow and assert the RESOLVED job key, so a change to what
+        the workflow actually does is what's being pinned."""
+        workflow = _load_workflow(".github/workflows/secrets-audit.yml")
+        job = workflow["jobs"]["full-history-audit"]
+        assert job["continue-on-error"] is True
 
     def test_gate_workflow_never_schedules_full_history(self) -> None:
         gate_content = _read(".github/workflows/secrets-gate.yml")
@@ -164,8 +193,15 @@ class TestLockFilePin:
         )
 
     def test_ci_installs_locked_not_resolved(self) -> None:
-        content = _read(".github/workflows/secrets-gate.yml")
-        assert "--locked" in content, "CI must install from the lock file, not re-resolve"
+        """`yaml.safe_load`-verified: assert the flag appears in the
+        RESOLVED `lockfile-pin` job's own step commands, not merely
+        somewhere in the file text (Atchim review finding 6's class)."""
+        workflow = _load_workflow(".github/workflows/secrets-gate.yml")
+        steps = workflow["jobs"]["lockfile-pin"]["steps"]
+        run_commands = [step["run"] for step in steps if "run" in step]
+        assert any("--locked" in cmd for cmd in run_commands), (
+            "CI must install from the lock file, not re-resolve"
+        )
 
 
 class TestGitleaksignoreBaselineNeverBlindedByPathAllowlist:

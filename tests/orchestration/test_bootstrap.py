@@ -81,6 +81,45 @@ def test_validate_platform_credentials_raises_when_a_var_is_set_but_empty(
     assert excinfo.value.variable_name == empty_var
 
 
+@pytest.mark.parametrize(
+    "whitespace_value", ["   ", "\t", "\n", "\t\n ", " \r\n\t "]
+)
+@pytest.mark.parametrize(
+    "whitespace_var", ["LANGFUSE_HOST", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"]
+)
+def test_validate_platform_credentials_raises_when_a_var_is_whitespace_only(
+    whitespace_var: str, whitespace_value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DEBT-44 gate finding 1 (2026-09-21, reproduced live): a
+    whitespace-only value (e.g. a trailing-space `.env` line, or a CI
+    secret resolving to a blank line) is truthy in Python and previously
+    passed `validate_platform_credentials` unrejected -- reaching a real
+    client at T-01.4.2 to die at the first 401 instead of failing closed
+    here, with a clear message, before any network call (N6)."""
+    _set_all_platform_env(monkeypatch)
+    monkeypatch.setenv(whitespace_var, whitespace_value)
+
+    with pytest.raises(MissingCredentialError) as excinfo:
+        validate_platform_credentials()
+
+    assert excinfo.value.variable_name == whitespace_var
+
+
+@pytest.mark.parametrize(
+    "falsy_looking_var", ["LANGFUSE_HOST", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"]
+)
+def test_validate_platform_credentials_does_not_reject_a_literal_zero(
+    falsy_looking_var: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard for the finding-1 fix: `"0".strip()` is still the
+    truthy, non-empty string `"0"` -- a credential that happens to be the
+    single character `"0"` must NOT be treated as missing."""
+    _set_all_platform_env(monkeypatch)
+    monkeypatch.setenv(falsy_looking_var, "0")
+
+    validate_platform_credentials()  # must not raise
+
+
 def test_validate_platform_credentials_error_message_names_only_the_variable_not_any_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

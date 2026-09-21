@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import argparse
 import logging
 
 import pytest
@@ -169,3 +170,30 @@ def test_load_dotenv_runs_before_the_action_default_is_resolved(
 
     assert exit_code == 0
     assert calls == [(_VALID_UUID, "1.0", "nightly")]
+
+
+def test_load_dotenv_is_called_before_parse_args(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DEBT-44 gate finding 2 (2026-09-21): the functional pin above
+    (`test_load_dotenv_runs_before_the_action_default_is_resolved`) still
+    passes if `load_dotenv()` runs anywhere before the `--action`
+    fallback lookup specifically -- a mutant that moves the
+    `load_dotenv()` call to AFTER `parser.parse_args(argv)` but still
+    before that fallback lookup survives it. This test pins the stronger,
+    literal property the module docstring claims: `load_dotenv()` is
+    called before `parse_args` is ever invoked, the same `call_order`
+    shape already used for `run_eval` in `test_facade.py`."""
+    call_order: list[str] = []
+    monkeypatch.setattr(cli, "load_dotenv", lambda: call_order.append("load_dotenv"))
+
+    class _RecordingParser:
+        def parse_args(self, argv: object) -> argparse.Namespace:
+            call_order.append("parse_args")
+            return argparse.Namespace(version="1.0", run_name="nightly", action=_VALID_UUID)
+
+    monkeypatch.setattr(cli, "_build_parser", lambda: _RecordingParser())
+    monkeypatch.setattr(cli, "run_eval", lambda a, v, r: 0)
+
+    exit_code = cli.main([])
+
+    assert exit_code == 0
+    assert call_order == ["load_dotenv", "parse_args"]

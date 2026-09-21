@@ -57,10 +57,18 @@ class MissingCredentialError(Exception):
 
 def validate_platform_credentials() -> None:
     """Fail closed if any required platform credential env var is
-    missing OR empty, before any client is constructed and before any
-    network call (NFR N6, DEBT-30). Raises `MissingCredentialError`
-    naming the first missing/empty variable found (fixed iteration
-    order over `REQUIRED_ENV_VARS`)."""
+    missing, empty, OR whitespace-only, before any client is constructed
+    and before any network call (NFR N6, DEBT-30). Raises
+    `MissingCredentialError` naming the first missing/empty/whitespace-
+    only variable found (fixed iteration order over `REQUIRED_ENV_VARS`).
+
+    DEBT-44 gate finding 1 (2026-09-21, reproduced live): `if not
+    os.environ.get(name)` alone accepts a whitespace-only value (e.g. a
+    trailing-space `.env` line, or a CI secret resolving to a blank
+    line) -- Python truthiness treats `"   "` as truthy. `.strip()`
+    before the truthiness check closes that without over-rejecting: a
+    literal `"0"` credential is still non-empty after stripping and is
+    correctly accepted."""
     for name in REQUIRED_ENV_VARS:
-        if not os.environ.get(name):
+        if not (os.environ.get(name) or "").strip():
             raise MissingCredentialError(name)
