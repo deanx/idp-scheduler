@@ -16,15 +16,26 @@ no ``${VAR}`` interpolation, no multiline values"* would have left a
 latent bug waiting for the first `.env` that used any of them.
 
 ⚠️ **The path is passed explicitly, and that is load-bearing.** A bare
-``load_dotenv()`` resolves the file by walking **up** from the calling
-module, so it would silently pick up an unrelated *parent* directory's
-`.env` — a credential file the operator never chose, which is the
-REG-07/REG-10 family (*a credential reaching a place the caller did not
-pick*) in a new dress. The contract ADR-0004, `.env.example` and the
-tests all assume is **read `./.env` from the current working
-directory**; that is what this does. Swapping to the bare call silently
-changes which file is read — it was caught here only because the tests
-pin the cwd behaviour.
+``load_dotenv()`` calls ``find_dotenv()``, which walks up from **the
+calling frame's file** — i.e. from *this module's location in the source
+tree* — and only falls back to the cwd when the caller has no real
+filename (a ``-c`` string, a REPL). So the bare form resolves relative to
+**wherever the code is installed**, ignoring the operator's working
+directory entirely: an installed package would read a `.env` sitting next
+to its own source, and a CI job's working directory would be disregarded.
+That is the same REG-07/REG-10 family (*a credential reaching a place the
+caller did not pick*), and it is what pulled this checkout's real
+credential file into the test process — nine tests broke on the swap,
+which is how it was caught.
+
+⚠️ **Correction, 2026-09-21 (Atchim review R-… / orchestrator's error).**
+An earlier version of this docstring said the bare call would read "an
+unrelated *parent directory's* `.env`". That describes only the cwd
+**fallback** path, not the actual mechanism, and it understated the
+problem: resolution keys off the *source tree*, not the cwd's ancestry.
+Recorded rather than quietly reworded, because a wrong mechanism in a
+docstring is how the next reader reintroduces the bug while believing
+they understand it.
 
 `override=False` is explicit rather than implied: a variable already
 present in the real environment **wins** over the file. That ordering is
