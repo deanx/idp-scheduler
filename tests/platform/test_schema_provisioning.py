@@ -35,19 +35,15 @@ def test_provision_upserts_via_post_datasets() -> None:
     assert body["expectedOutputSchema"] == load_golden_schema()
 
 
-def test_provision_never_sends_an_empty_or_null_schema() -> None:
-    client = RecordingHttpClient()
-
-    provision_golden_schema(client, dataset_name="spike-01-patterns")
-
-    _, _, body = client.calls[0]
-    assert body["expectedOutputSchema"]  # truthy: non-empty, non-null
-
-
-# --- TP-42 (gap 4): the truthiness check above can never fail — every
+# --- TP-42 (gap 4): a truthiness-only check here could never fail — every
 # provisioning call posts the same fixed, always-populated committed
-# schema, so the guard it exercises is dead under the current code path.
-# These replace/extend it with cases that can actually go red.
+# schema, so that guard would be dead under the current code path.
+# FU-01.3-D / DEBT-35: the truthy-only assertion (`assert
+# body["expectedOutputSchema"]`) was superseded by the strictly stronger
+# equality check at :35 (`== load_golden_schema()`) three lines above it
+# — it could never fail while :35 passes, so it was deleted rather than
+# folded (nothing it proved wasn't already proven). The cases below
+# replace/extend it with cases that can actually go red.
 
 
 def test_provision_raises_and_makes_no_call_when_the_committed_schema_is_empty(

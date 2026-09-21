@@ -303,7 +303,7 @@ def test_make_platform_dispatches_on_platform_env(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("PLATFORM", "langfuse")
     monkeypatch.setenv("LANGFUSE_HOST", "https://example.invalid")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "distinctive-pub-9f3a")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "distinctive-secret-2c71")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "distinctive-secret-NOT-A-REAL-KEY-2c71")
     # Isolation, not a dodge (Atchim R-1): this test's job is the FACTORY's
     # host/key wiring, not the LANGFUSE_HOST/LANGFUSE_BASE_URL split-brain
     # -- that has its own dedicated tests below. An ambient .env (sourced
@@ -323,7 +323,7 @@ def test_make_platform_dispatches_on_platform_env(monkeypatch: pytest.MonkeyPatc
     decoded = base64.b64decode(
         http_client._auth_header.removeprefix("Basic ")  # noqa: SLF001
     ).decode("ascii")
-    assert decoded == "distinctive-pub-9f3a:distinctive-secret-2c71"
+    assert decoded == "distinctive-pub-9f3a:distinctive-secret-NOT-A-REAL-KEY-2c71"
 
     # -- Langfuse SDK client (OTLP trace + dataset-run linkage) --
     sdk_client = adapter._tracing_client  # noqa: SLF001
@@ -333,7 +333,7 @@ def test_make_platform_dispatches_on_platform_env(monkeypatch: pytest.MonkeyPatc
     sdk_decoded = base64.b64decode(
         sdk_headers["Authorization"].removeprefix("Basic ")
     ).decode("ascii")
-    assert sdk_decoded == "distinctive-pub-9f3a:distinctive-secret-2c71"
+    assert sdk_decoded == "distinctive-pub-9f3a:distinctive-secret-NOT-A-REAL-KEY-2c71"
 
 
 def test_make_platform_raises_on_unknown_platform(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -400,6 +400,80 @@ def test_make_platform_resolves_both_clients_to_the_same_host_when_unset_or_equa
     sdk_client = adapter._tracing_client  # noqa: SLF001
     assert http_client._host == "https://example.invalid"  # noqa: SLF001
     assert sdk_client._base_url == "https://example.invalid"  # type: ignore[attr-defined]  # noqa: SLF001
+
+
+# --- FU-01.3-D DoD (a) / DEBT-32 (REG-10 ordering pin, kills mutant M10)
+# + QA-01 re-audit Ruling 3 (M9 partly overturned, the base_url call-
+# contract pin). The shipped ordering in make_platform() is already
+# correct -- these tests do NOT change any production behaviour, they
+# only PIN it: (1) neither client is constructed when the split-brain
+# guard raises (moving the guard below both constructions survived the
+# suite -- mutant M10); (2) on the happy path, the SDK client is
+# constructed with base_url == host == LANGFUSE_HOST (Langfuse(host=...)
+# alone LOSES to LANGFUSE_BASE_URL's env precedence while base_url=...
+# WINS, so this kwarg is the only thing keeping credentials and OTLP
+# traffic on the named host the day someone relaxes the guard).
+
+
+class _ConstructorSpy:
+    """Records every call's args/kwargs and returns an opaque stub --
+    make_platform() only constructs and stores these, it never calls a
+    method on either client, so a stub is sufficient."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append((args, kwargs))
+        return object()
+
+
+def test_make_platform_constructs_neither_client_when_the_split_brain_guard_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DEBT-32 / REG-10 ordering pin. Exit condition: mutant M10 (the
+    split-brain guard moved BELOW both client constructions) no longer
+    survives -- both spies must see zero calls when the guard raises."""
+    http_spy = _ConstructorSpy()
+    sdk_spy = _ConstructorSpy()
+    monkeypatch.setattr(
+        "idp_regression.platform.langfuse_adapter.UrllibHttpClient", http_spy
+    )
+    monkeypatch.setattr("langfuse.Langfuse", sdk_spy)
+    monkeypatch.setenv("PLATFORM", "langfuse")
+    monkeypatch.setenv("LANGFUSE_HOST", "https://intended.invalid")
+    monkeypatch.setenv("LANGFUSE_BASE_URL", "https://elsewhere.invalid")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pub")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
+
+    with pytest.raises(PlatformConfigurationError):
+        make_platform()
+
+    assert http_spy.calls == []
+    assert sdk_spy.calls == []
+
+
+def test_make_platform_constructs_the_sdk_client_with_base_url_equal_to_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """QA-01 re-audit Ruling 3 (M9 partly overturned, Atchim accepted the
+    correction): "do not delete" base_url=host still stands, and "do not
+    test" is struck -- it is an UNOBSERVED mutant on the call contract,
+    not an equivalent one on runtime behaviour. Zero marginal cost: reuses
+    the same spy DEBT-32's fix installs."""
+    sdk_spy = _ConstructorSpy()
+    monkeypatch.setattr("langfuse.Langfuse", sdk_spy)
+    monkeypatch.setenv("PLATFORM", "langfuse")
+    monkeypatch.setenv("LANGFUSE_HOST", "https://example.invalid")
+    monkeypatch.delenv("LANGFUSE_BASE_URL", raising=False)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pub")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
+
+    make_platform()
+
+    assert len(sdk_spy.calls) == 1
+    _, kwargs = sdk_spy.calls[0]
+    assert kwargs["base_url"] == kwargs["host"] == "https://example.invalid"
 
 
 # --- /test gap-fill: ScoreWriteFailedError (langfuse_adapter.py:178) -------
@@ -889,6 +963,25 @@ def _sequenced_clock(*times: float) -> Any:
         return values[0]
 
     return _clock
+
+
+def test_record_deadline_check_is_inclusive_at_exact_equality() -> None:
+    """FU-01.3-D DoD (d) / DEBT-36, mutant M12: `self._clock() >=
+    deadline` mutated to `> deadline` survived the suite -- an
+    exactly-equal clock reading must still raise. Materiality is near
+    zero (measure-zero in production against a monotonic clock), but
+    it's cheaply distinguishable with the existing fake-clock harness,
+    unlike M9."""
+    adapter = LangfuseAdapter(
+        client=_QueuedScorePostClient(static_responses={}, score_post_queue=[]),
+        tracing_client=_CompletingTracingClient(),
+        clock=lambda: 100.0,
+    )
+
+    with pytest.raises(ScoreWriteFailedError, match="deadline"):
+        adapter._check_record_deadline(  # noqa: SLF001
+            deadline=100.0, document_id="doc-0", score_name="gate"
+        )
 
 
 def test_record_deadline_defaults_to_disabled_and_never_consults_the_clock() -> None:

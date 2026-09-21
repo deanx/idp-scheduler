@@ -122,19 +122,46 @@ def test_precondition_raises_when_records_contain_an_item_id_not_in_the_cache() 
 def test_precondition_passes_and_records_when_item_ids_match_exactly() -> None:
     """Sanity: the exact-match case (no duplicate, no missing, no extra)
     proceeds and writes scores — proves the precondition isn't just
-    always-raising."""
+    always-raising.
+
+    FU-01.3-D / DEBT-34 fix (2026-09-21): the fixture used to give every
+    record an EMPTY "scores" list, so `assert score_calls == []` could
+    never fail — it observed that nothing existed, not that nothing
+    leaked, while the docstring claimed the opposite ("writes scores").
+    Fix picks the FIRST of DEBT-34's two options (give the fixture real
+    scores, a coverage gain) rather than re-wording the docstring."""
     adapter, http_client = _adapter_with_cache("item-1", "item-2")
-    records = [_record("item-1", "doc-0"), _record("item-2", "doc-1")]
+    records: list[DocumentRecord] = [
+        {
+            "item_id": "item-1",
+            "document_id": "doc-0",
+            "scores": [
+                {
+                    "id": score_id(run_id="run-1", document_id="doc-0", score_name="gate"),
+                    "name": "gate",
+                    "value": "PASS",
+                }
+            ],
+        },
+        {
+            "item_id": "item-2",
+            "document_id": "doc-1",
+            "scores": [
+                {
+                    "id": score_id(run_id="run-1", document_id="doc-1", score_name="gate"),
+                    "name": "gate",
+                    "value": "PASS",
+                }
+            ],
+        },
+    ]
 
     adapter.record_run(
         dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
     )
 
     score_calls = [c for c in http_client.calls if c[1] == "/api/public/scores"]
-    # zero scores per record here (empty "scores" lists), but no
-    # precondition/task_failed error means record_run reached the write
-    # loop; assert it didn't raise (implicit) and made it past the gate.
-    assert score_calls == []
+    assert len(score_calls) == 2
 
 
 # --- task_failed raise (:235-238) --------------------------------------
@@ -160,6 +187,12 @@ def test_task_failed_raises_experiment_record_failed_and_skips_score_writes() ->
     # `score["value"]` will KeyError, triggering task_failed. (Before
     # FU-01.3-B this used a record missing "scores" entirely, but that
     # now raises earlier, from the shape precondition itself — REG-09.)
+    # DEBT-39: this fixture passes only because `_require_record_shape`
+    # does not check "value" today — the moment it does, this record
+    # would be rejected at the PRECONDITION and never reach the task,
+    # silently hollowing out what this test means to cover. A future
+    # "value" check must re-fixture this test deliberately, not by
+    # reflex-adding "value" here.
     malformed: Any = {
         "item_id": "item-1",
         "document_id": "doc-0",
@@ -193,6 +226,9 @@ def test_task_failed_output_is_the_fixed_constant() -> None:
     adapter._cached_dataset_name = "ds"  # noqa: SLF001
     # See the sibling test above (REG-09): a well-shaped scores list with
     # a score missing "value" still trips the task's own catch-all.
+    # DEBT-39: same dependency as the sibling test above — this fixture
+    # passes only because `_require_record_shape` does not check "value"
+    # today; a future "value" check must re-fixture this deliberately.
     malformed: Any = {
         "item_id": "item-1",
         "document_id": "doc-0",
