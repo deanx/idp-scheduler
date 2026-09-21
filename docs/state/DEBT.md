@@ -213,3 +213,34 @@ DatasetItem:    required=['document_id', 'golden', 'item_id'] optional=[]
 > **Closed: FO-1, FO-2, FO-3, FO-4, FO-5, FO-7 (all three legs)** — six of nine, plus **DEBT-49**, the unsound-instrument finding that came out of FO-2 and that every other type-driven guard in the repo rested on.
 > **Remaining: FO-6** (`expected_output_schema` — latent; its consumer, the orchestrator's `schema_drift` comparison, does not exist until S-01.4) and **FO-9** (`LANGFUSE_HOST`/`IDP_REGION`/`IDP_ORG_ID` have no scheme or format validation — same threat family as **DEBT-45**/REG-07/REG-10, and best decided together with the T-01.4.10 gate definition the human still owns).
 > ⚠️ **Both stamps are now STALE.** `classifier/gate.py` (FO-5) stales **S-01.1**; `platform/langfuse_adapter.py` + `scoring.py` stale **S-01.3**. Neither story's Done is currently backed by a fresh stamp, and `/qa` will block on freshness for both. The re-stamps must be run under **DEBT-44** by an instance that did not review these diffs.
+
+---
+
+## DEBT-50 — T-01.4.4 hides S-01.2 work behind an S-01.4 task number
+
+**Status:** open (scope/planning) · **Origin:** S-01.4 estimation pass, 2026-09-21 (Dengoso) · **Impact: Med** — it misattributes a story's cost and hides a cross-story re-stamp.
+
+T-01.4.4 ("401 mid-run refresh-then-fail-closed", **5 pts**, carried on S-01.4's ledger) is mostly **S-01.2** work. Its own DoD says so: per **DEBT-21**, once `extract()` has raised, the orchestrator cannot retry the triggering poll without an illegal re-submit — so the refresh-then-retry has to live in **the adapter's poll loop**. QA S-01.2 F-5's submit-401/403 → `auth_failure` mis-mapping rides along with it.
+
+So the 5 points cover an **S-01.2 module change + an S-01.2 `/test` re-stamp + an S-01.4 mapping layer**, while appearing on S-01.4's ledger as orchestrator work. The mapping layer genuinely *is* S-01.4's, so this is not necessarily a re-file — but the **cross-story file set and the second re-stamp must be visible before the work starts**, not discovered when S-01.2's stamp goes stale mid-S-01.4.
+
+This is the same "wrong story's debt" shape Dunga ruled against for FU-01.1-A, and the same reason FU-01.3-G was kept off the test-hygiene card FU-01.3-F.
+
+**Action:** annotate T-01.4.4 with its true file set and the S-01.2 re-stamp before S-01.4 is scheduled; decide deliberately whether the adapter half re-files to S-01.2 or stays as declared cross-story work.
+
+---
+
+## DEBT-51 — DEBT-30's `KeyError` wrap is priced under two tasks
+
+**Status:** open (scope/planning) · **Origin:** S-01.4 estimation pass, 2026-09-21 (Dengoso) · **Impact: Low** — a double-count, but the failure mode is worse than the points.
+
+**DEBT-30** (`make_platform` raises a bare `KeyError` on a missing env var, so NFR **N6**'s "fail closed with a clear message" clause is unmet) is referenced under **both** `T-01.4.1`'s fail-closed-credential DoD bullet **and** `T-01.4.10`'s hygiene surface.
+
+The real risk is not the ~1 point of double-counting. It is the **opposite** outcome: a duty owned by two tasks is a duty each can assume the other discharged, which is how N6 reaches `/qa` unmet with both tasks ticked. That is the mirror image of DEBT-46 — there, a routed item had no owner; here it has two, which fails the same way.
+
+**Action:** assign it to exactly one task (T-01.4.1 is the better home — it is the entry point that must fail closed with a clear message) and strike the reference from the other.
+
+---
+
+> ### 🧾 Estimation-pass bookkeeping note (2026-09-21)
+> The S-01.4/S-01.6 **inline** `est: TBD` markers were stale, not missing — the Estimates table at `SPEC-01:578` has carried per-task numbers since 2026-09-19. **The orchestrator misread the story body as authoritative and told the user the last MVP story had never been estimated. It had.** Recorded because it is the same *scope-narrower-than-the-class* error as [[DEBT-40]]/[[DEBT-43]]/[[DEBT-47]] — the instrument (reading the story body) was narrower than the class (the whole spec file), and a correct answer inside that scope read as a complete one. ⚠️ **The same drift remains on S-01.1/S-01.2/S-01.3's inline markers (37 of them)** — harmless now that those stories are Done, but it is what made the misreading plausible. Sync them when any of those stories is next touched.
