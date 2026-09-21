@@ -39,9 +39,9 @@ from idp_regression.classifier import classify, overall_gate
 from idp_regression.classifier.types import Golden, NormalizedOutput
 from idp_regression.platform.langfuse_adapter import make_platform
 from idp_regression.platform.schema_provisioning import provision_golden_schema
+from idp_regression.platform.scoring import build_score_inputs
 from idp_regression.platform.transport import UrllibHttpClient
 from idp_regression.platform.types import DocumentRecord, RunMetadata
-from idp_regression.platform.scoring import build_score_inputs
 
 BASELINE_ACTION_VERSION = "v-baseline-1"
 CANDIDATE_ACTION_VERSION = "v-candidate-2"
@@ -114,7 +114,8 @@ def seed_golden_set(client: UrllibHttpClient, document_id: str) -> str:
         },
     )
     assert status == 200, f"seeding failed: {status} {body}"
-    print(f"  Seeded golden item   : document_id={document_id!r}  ({len(GOLDEN['fields'])} fields)")
+    n_fields = len(GOLDEN["fields"])
+    print(f"  Seeded golden item   : document_id={document_id!r}  ({n_fields} fields)")
     return dataset_name
 
 
