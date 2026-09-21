@@ -102,7 +102,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         logger.error("run_eval: --version has an invalid format")
         return 1
 
-    return run_eval(action_id, args.version, args.run_name)
+    try:
+        return run_eval(action_id, args.version, args.run_name)
+    except NotImplementedError as exc:
+        # T-01.4.1 slice boundary (facade.py): the per-document run loop
+        # is not built yet (T-01.4.2 onward), so `run_eval` always raises
+        # past its pre-run checks today. Convert that into a controlled
+        # exit rather than an uncaught traceback -- exit code 3 is
+        # reserved for this and is not part of the eventual 0/non-zero
+        # CI-gate contract (ADR-0004 §Exit-code contract).
+        logger.error("run_eval: %s", exc)
+        return 3
 
 
 if __name__ == "__main__":  # pragma: no cover - thin process entry

@@ -11,6 +11,7 @@ slice's honest, explicit boundary.
 
 from __future__ import annotations
 
+import json
 import logging
 
 import pytest
@@ -43,21 +44,23 @@ def _disable_dotenv_file_loading(monkeypatch: pytest.MonkeyPatch, tmp_path: obje
 # --- INV-05: load_dotenv() ordering -----------------------------------
 
 
-def test_run_eval_calls_load_dotenv_before_constructing_the_platform_client(
+def test_run_eval_calls_load_dotenv_before_validating_platform_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     call_order: list[str] = []
     monkeypatch.setattr(facade, "load_dotenv", lambda: call_order.append("load_dotenv"))
 
-    def fake_construct_platform() -> None:
-        call_order.append("construct_platform")
+    def fake_validate_platform_credentials() -> None:
+        call_order.append("validate_platform_credentials")
         raise MissingCredentialError("LANGFUSE_HOST")
 
-    monkeypatch.setattr(facade, "construct_platform", fake_construct_platform)
+    monkeypatch.setattr(
+        facade, "validate_platform_credentials", fake_validate_platform_credentials
+    )
 
     run_eval("action", "version", "run")
 
-    assert call_order == ["load_dotenv", "construct_platform"]
+    assert call_order == ["load_dotenv", "validate_platform_credentials"]
 
 
 # --- NFR N6 / DEBT-30: fail-closed on missing platform credential -----
@@ -86,6 +89,30 @@ def test_run_eval_returns_nonzero_and_names_the_missing_platform_var(
     assert "LANGFUSE_HOST" in caplog.text
     assert "distinctive-pub-9f3a" not in caplog.text
     assert "distinctive-secret-NOT-A-REAL-KEY-2c71" not in caplog.text
+
+
+def test_run_eval_returns_nonzero_when_a_platform_var_is_set_but_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+) -> None:
+    """Atchim review C-1 (2026-09-21, reproduced live): a required var
+    set to the EMPTY string must be rejected exactly like an absent one
+    -- N6 is defeated if only presence, not non-emptiness, is checked."""
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "")
+
+    def _fail_if_called() -> None:
+        raise AssertionError("make_idp_adapter must not be called: zero network calls (N6)")
+
+    monkeypatch.setattr(facade, "make_idp_adapter", _fail_if_called)
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    assert "LANGFUSE_PUBLIC_KEY" in caplog.text
 
 
 # --- NFR N6: fail-closed on missing IDP credential ---------------------
@@ -164,18 +191,28 @@ def test_run_eval_sanitizes_logged_values_not_just_names_them(
     caplog: pytest.LogCaptureFixture,
     tmp_path: object,
 ) -> None:
-    """Mutation-catching: `run_name` reaches the pre-run-checks-passed log
-    line. If it were interpolated raw (%s) instead of through
-    `sanitize_for_log`, an embedded quote would survive unescaped --
-    `sanitize_for_log` (json.dumps) always escapes it."""
+    """Mutation-catching, PER FIELD (Atchim review R-4, 2026-09-21): the
+    pre-run-checks-passed log line interpolates FOUR values
+    (run/experiment/action/version), each through its own
+    `sanitize_for_log(...)` call. A single `'\\"' in caplog.text`
+    assertion is satisfied if ANY ONE of the four is sanitized -- it does
+    not catch a regression that un-sanitizes exactly one field while
+    leaving the other three correct (verified: dropping ONLY the
+    `run_name` wrapper survived that assertion). Assert each field's
+    escaped form individually instead."""
     _disable_dotenv_file_loading(monkeypatch, tmp_path)
     _set_all_credential_env(monkeypatch)
+    monkeypatch.setattr(facade, "generate_run_id", lambda: "0123456789abcdef0123456789abcdef")
+
+    action_id = "12345678-1234-1234-1234-123456789012"
+    version = '1.0" forged="1'
+    run_name = 'nightly" forged="1'
+    experiment_name = run_name + "-01234567"
 
     with caplog.at_level(logging.INFO), pytest.raises(NotImplementedError):
-        run_eval(
-            "12345678-1234-1234-1234-123456789012",
-            "1.0",
-            'nightly" forged="1',
-        )
+        run_eval(action_id, version, run_name)
 
-    assert '\\"' in caplog.text
+    assert f"run={json.dumps(run_name)}" in caplog.text
+    assert f"experiment={json.dumps(experiment_name)}" in caplog.text
+    assert f"action={json.dumps(action_id)}" in caplog.text
+    assert f"version={json.dumps(version)}" in caplog.text

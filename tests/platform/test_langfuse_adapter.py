@@ -813,7 +813,14 @@ def test_make_platform_raises_on_langfuse_host_with_embedded_credential(
         "https://example.invalid",
         "http://example.invalid",
         "https://example.invalid:3000",
-        "https://cloud.langfuse.com",
+        # Atchim review R-6, 2026-09-21: this used to be the real
+        # "https://cloud.langfuse.com" -- calling make_platform() against
+        # it constructs a LIVE SDK client aimed at production (a real
+        # exporter thread, no network isolation), for a test whose only
+        # job is "a well-formed multi-label host is accepted". `.invalid`
+        # is the reserved TLD for exactly this (RFC 2606) and keeps the
+        # multi-label-host coverage without a live target.
+        "https://cloud.langfuse.invalid",
     ],
 )
 def test_make_platform_accepts_well_formed_langfuse_host(
@@ -825,7 +832,9 @@ def test_make_platform_accepts_well_formed_langfuse_host(
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pub")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
 
-    make_platform()  # must not raise
+    adapter = make_platform()  # must not raise
+
+    assert isinstance(adapter, LangfuseAdapter)
 
 
 @pytest.mark.parametrize("base_url_env", [None, "https://example.invalid"])
