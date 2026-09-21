@@ -181,3 +181,30 @@ The convenience argument is real but secondary: all three edits are test-file-on
 
 ### Deadline (Zangado, re-audit #4)
 `Secrets: ⚠️` has stood for **two consecutive audits**. Acceptable for S-01.3 to stay Done **for one more audit, not indefinitely**. **If DEBT-45 is still open at S-01.4's `/qa`, it is an S-01.4 Done-blocker** — S-01.3 is not the story whose Done depends on the secret gate's definition; **T-01.4.10 / S-01.4 is.**
+
+---
+
+## 🔴 DEBT-49 — `TypedDict.__required_keys__` is UNSOUND in this codebase, and DEBT-43's rule half-rests on it
+
+**Status:** open · **Origin:** FU/FO-2 implementation, 2026-09-21 (found by the implementer, **independently verified by the orchestrator**) · **Impact: High** — it invalidates half of a rule this project has been building on all session, and it is a latent production regression, not only a process defect.
+
+**Measured, not inferred** (Python 3.13.5, `from __future__ import annotations` in `platform/types.py`):
+```
+ScoreInput:     required=['comment', 'id', 'name', 'value']   optional=[]
+DocumentRecord: required=['document_id', 'item_id', 'scores'] optional=[]
+DatasetItem:    required=['document_id', 'golden', 'item_id'] optional=[]
+```
+`ScoreInput.comment` is declared **`NotRequired[str | None]`** and appears in **`__required_keys__`**; `__optional_keys__` is **empty**. Under postponed evaluation of annotations the annotation is a *string* at class-creation time, so `NotRequired` is never detected. **`__required_keys__` does not mean what it says here.**
+
+**Why this matters beyond one guard.** **[[DEBT-43]]** states the rule this session has been applying everywhere: *"for every field the guard protects, derive BOTH obligations mechanically — presence from `__required_keys__`, value type from `typing.get_type_hints(T)`."* **The presence half is unsound.** It has been producing correct results **by luck**: `DocumentRecord` and `DatasetItem` happen to have no `NotRequired` fields. `ScoreInput` does, and it is the first type where the mechanism was pointed at a `NotRequired` field.
+
+⚠️ **The live landmine.** `langfuse_adapter.py:138` still reads `sorted(DocumentRecord.__required_keys__)`, and `test_record_run_preconditions.py:773` still parametrizes over it. **Add a single `NotRequired` field to `DocumentRecord` and the guard immediately starts rejecting records that legitimately omit it** — a production regression, fail-closed but a real outage, arriving from a change that looks entirely safe. The "type-driven ratchet" that FU-01.3-D installed to make schema changes safe would itself be the thing that breaks on the next schema change.
+
+**The sound derivation, and why it works:** `get_type_hints(T)` filtered on `hint is str` (the existing `_str_fields`). `NotRequired[str | None]` resolves to `str | None`, which **is not** `str`, so an optional field is excluded **correctly** — for the right reason, not by coincidence. The FO-2 implementer collapsed presence + type into one loop over that derivation rather than use `__required_keys__`, and mirrored a production-side `_str_annotated_field_names` in `langfuse_adapter.py` (src must not import test code). **That deviation from the brief was correct and is endorsed.**
+
+**Required follow-up (not done here — it is a production change on a guard carrying a live QA stamp):**
+1. Replace `__required_keys__` at `langfuse_adapter.py:138` and the parametrize at `test_record_run_preconditions.py:773` with the `get_type_hints`-based derivation, so `DocumentRecord`'s guard stops being correct-by-luck.
+2. **Amend DEBT-43's rule**: presence must be derived from `get_type_hints` + a `NotRequired` check that works under postponed annotations (`typing.get_type_hints(T, include_extras=True)` and inspecting for `NotRequired`), **never** from `__required_keys__` while `from __future__ import annotations` is in effect.
+3. Add a pin, in the shape of M13: assert `__required_keys__` does **not** match the sound derivation for `ScoreInput`, so if a future Python or typing version fixes the behaviour, the mismatch surfaces deliberately instead of silently changing the guard's meaning.
+
+🔗 This is the **fifth** scope of the [[DEBT-40]] / [[DEBT-43]] / [[DEBT-47]] / PROCESS-AMENDMENT family — and the first where the *instrument itself* was faulty rather than merely aimed too narrowly. Every prior member was "the right tool applied to too small a target"; this one is "the tool reports the wrong answer and nothing noticed, because the two types it was first pointed at had no optional fields."
