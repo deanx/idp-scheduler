@@ -15,7 +15,7 @@ from idp_regression.platform.errors import ExperimentRecordFailedError
 from idp_regression.platform.langfuse_adapter import LangfuseAdapter
 from idp_regression.platform.scoring import field_score_name, prompt_score_name, score_id
 from idp_regression.platform.types import DocumentRecord, RunMetadata, ScoreInput
-from tests.platform._type_pins import _str_fields, _StrFieldProbe
+from tests.platform._type_pins import _required_fields, _str_fields, _StrFieldProbe
 
 _SENTINEL_SCORE_FIELD_MARKER = "SENTINEL-SCORE-FIELD-do-not-leak-6f1a4c"
 
@@ -598,6 +598,29 @@ def test_str_fields_of_score_input_is_id_name_value() -> None:
     assert _str_fields(ScoreInput) == ["id", "name", "value"]
 
 
+def test_m13_drift_pin_scoreinput_required_keys_is_unsound_today() -> None:
+    """DEBT-49's M13-shape pin. `ScoreInput.__required_keys__` currently
+    mis-derives `comment` (declared `NotRequired[str | None]`) as
+    required, because `from __future__ import annotations` makes
+    `NotRequired` invisible to that mechanism at class-creation time
+    (verified live: `ScoreInput.__required_keys__ ==
+    frozenset({'comment', 'id', 'name', 'value'})`, `__optional_keys__`
+    empty). This test pins that CURRENT, UNSOUND state deliberately: if a
+    future Python/typing release fixes `NotRequired` detection under
+    postponed annotations, `__required_keys__` would start agreeing with
+    `_required_fields` here, this assertion would flip to failing, and
+    that drift would surface as a loud, investigatable test failure
+    instead of silently changing what any code relying on
+    `__required_keys__` means. (No production code in this module uses
+    `__required_keys__` any more -- `_require_record_shape`'s
+    `DocumentRecord` presence loop now derives from
+    `_required_field_names`, ITS `ScoreInput` value loop and
+    `_require_run_metadata_shape`'s `RunMetadata` loop both derive from
+    `_str_annotated_field_names` -- so this pin exists purely to keep the
+    UNSOUNDNESS itself visible, not to protect a live code path.)"""
+    assert ScoreInput.__required_keys__ != frozenset(_required_fields(ScoreInput))
+
+
 @pytest.mark.parametrize("field_name", _str_fields(ScoreInput))
 def test_score_field_wrong_type_raises_typed_error_before_any_sdk_call(field_name: str) -> None:
     """THE KILLING TEST for FO-2 (DEBT-48): parametrized over the
@@ -764,22 +787,33 @@ def test_a_non_dict_score_raises_typed_error_before_any_sdk_call() -> None:
 # defect"): (1) validate EVERY record at the very TOP of record_run,
 # before any subscript of any record -- the :409-before-:426 seam is now
 # physically impossible; (2) isinstance(record, dict) is the guard's
-# FIRST statement; (3) required keys are read from
-# DocumentRecord.__required_keys__ (verified ['document_id', 'item_id',
-# 'scores']), not hand-enumerated, so a fourth escape is structurally
-# unavailable. The seven anchor tests above are left untouched.
+# FIRST statement; (3) required keys are read from `_required_fields
+# (DocumentRecord)` (DEBT-49's sound derivation -- verified
+# ['document_id', 'item_id', 'scores'], and NOT
+# `DocumentRecord.__required_keys__`, which is unsound under postponed
+# annotations for any TypedDict carrying a `NotRequired` field; see
+# DEBT-49 and `_type_pins._required_fields`'s docstring), not
+# hand-enumerated, so a fourth escape is structurally unavailable. The
+# seven anchor tests above are left untouched.
 
 
-@pytest.mark.parametrize("missing_key", sorted(DocumentRecord.__required_keys__))
+@pytest.mark.parametrize("missing_key", _required_fields(DocumentRecord))
 def test_record_missing_any_required_key_raises_typed_error_before_any_sdk_call(
     missing_key: str,
 ) -> None:
-    """Part (3) of the structural fix: parametrized over
-    DocumentRecord.__required_keys__, NOT a hand-written list -- a new
-    required field on the TypedDict auto-generates its own case here.
-    Two of these three keys (document_id, scores) already had a
-    hand-written anchor test above; item_id did not -- proof that
-    hand-enumeration is exactly the gap this parametrization closes."""
+    """Part (3) of the structural fix: parametrized over the SOUND
+    presence derivation (`_required_fields`, DEBT-49), NOT
+    `DocumentRecord.__required_keys__` and NOT a hand-written list -- a
+    new required field on the TypedDict auto-generates its own case
+    here. `DocumentRecord` has no `NotRequired` field today, so
+    `_required_fields(DocumentRecord) == sorted(DocumentRecord.
+    __required_keys__)` and this parametrize is unchanged in practice;
+    the point is that it would NOT silently start rejecting a
+    legitimately-absent field the day one is added, the way the old
+    `__required_keys__` parametrize would have (DEBT-49). Two of these
+    three keys (document_id, scores) already had a hand-written anchor
+    test above; item_id did not -- proof that hand-enumeration is
+    exactly the gap this parametrization closes."""
     adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
     full_record: dict[str, Any] = {
         "item_id": "item-1",
@@ -1051,4 +1085,131 @@ def test_record_field_wrong_type_raises_typed_error_before_any_sdk_call(field_na
         # not just reasoning about it in a comment.
         assert _SENTINEL_DOCUMENT_ID_MARKER not in message
     _assert_no_score_sentinel_leaked(message)
+    _assert_zero_platform_writes(http_client, tracing_client)
+
+
+# --- FO-1 (DEBT-48): `RunMetadata`'s three `str` fields (action_id,
+# action_version, golden_version) were used straight from the caller's
+# dict with NO presence or type check. Pre-fix behaviour, observed by
+# running these tests against the unfixed adapter: a missing key raises a
+# bare `KeyError` (not the Protocol's promised typed error, types.py
+# PlatformAdapter.record_run docstring), and it raises only while
+# building the `record_experiment(...)` call's `metadata={...}` dict
+# literal -- deep inside record_run, AFTER every other precondition
+# (record shape, item_id dedup/cache match, A3 run_id derivation) has
+# already passed, not at a guarded boundary. A non-string value doesn't
+# raise at all: it lands in the run's platform metadata and record_run
+# returns success (INV-04: a run with `action_version=None` is
+# indistinguishable from a good one).
+
+_SENTINEL_METADATA_VALUE_MARKER = "SENTINEL-METADATA-VALUE-do-not-leak-4b8e2d"
+
+
+def test_metadata_missing_any_str_field_raises_typed_error_before_any_sdk_call() -> None:
+    """Anchor case (Atchim precedent, DEBT-44): a single hand-picked
+    missing key, generalised by the parametrized test right below --
+    kept as its own test so a reviewer scanning anchors sees this
+    boundary exists without having to run the parametrize."""
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    records: list[DocumentRecord] = [_record("item-1", "doc-0")]
+    bad_metadata: Any = {"action_id": "a", "golden_version": "g"}  # missing action_version
+
+    with pytest.raises(ExperimentRecordFailedError, match="action_version"):
+        adapter.record_run(
+            dataset_name="ds",
+            run_name="r",
+            run_id="run-1",
+            records=records,
+            metadata=bad_metadata,
+        )
+
+    _assert_zero_platform_writes(http_client, tracing_client)
+
+
+@pytest.mark.parametrize("missing_key", _str_fields(RunMetadata))
+def test_metadata_missing_any_field_raises_typed_error_parametrized(missing_key: str) -> None:
+    """THE KILLING TEST for FO-1: parametrized over `RunMetadata`'s
+    `str`-annotated fields (`_str_fields`, DEBT-40/43/47's mechanism) --
+    NOT a hand-written `["action_id", "action_version",
+    "golden_version"]` list -- so a future scalar field on `RunMetadata`
+    auto-generates its own missing-key case here. Before the fix this
+    parametrize is RED on all three legs with an untyped `KeyError`, not
+    `ExperimentRecordFailedError`."""
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    records: list[DocumentRecord] = [_record("item-1", "doc-0")]
+    full_metadata: dict[str, Any] = {
+        "action_id": "a",
+        "action_version": "v",
+        "golden_version": "g",
+    }
+    del full_metadata[missing_key]
+
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        adapter.record_run(
+            dataset_name="ds",
+            run_name="r",
+            run_id="run-1",
+            records=records,
+            metadata=cast(RunMetadata, full_metadata),
+        )
+
+    assert missing_key in str(excinfo.value)
+    _assert_zero_platform_writes(http_client, tracing_client)
+
+
+@pytest.mark.parametrize("field_name", _str_fields(RunMetadata))
+def test_metadata_field_wrong_type_raises_typed_error_before_any_sdk_call(
+    field_name: str,
+) -> None:
+    """The value-side twin of the missing-key test above -- before the
+    fix, a non-string metadata value sails straight through: no raise,
+    `run_experiment_calls == 1`, and the malformed value lands in the
+    experiment's run-level metadata (a WRITE, not a fail-closed miss --
+    the same class of escalation FU-01.3-G's `document_id` fix closed for
+    `DocumentRecord`)."""
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    records: list[DocumentRecord] = [_record("item-1", "doc-0")]
+    bad_metadata: dict[str, Any] = {
+        "action_id": "a",
+        "action_version": "v",
+        "golden_version": "g",
+    }
+    bad_metadata[field_name] = [_SENTINEL_METADATA_VALUE_MARKER]  # wrong TYPE, not missing
+
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        adapter.record_run(
+            dataset_name="ds",
+            run_name="r",
+            run_id="run-1",
+            records=records,
+            metadata=cast(RunMetadata, bad_metadata),
+        )
+
+    message = str(excinfo.value)
+    assert field_name in message
+    # INV-02: name the field, never the offending value.
+    assert _SENTINEL_METADATA_VALUE_MARKER not in message
+    _assert_zero_platform_writes(http_client, tracing_client)
+
+
+def test_metadata_not_a_dict_raises_typed_error_before_any_sdk_call() -> None:
+    """A `metadata` that isn't even a dict (e.g. a bare string) -- mirrors
+    `test_record_not_a_dict_raises_typed_error_before_any_sdk_call`
+    above. Before the fix this reaches the `metadata["action_id"]`
+    subscript inside the `record_experiment(...)` call and raises an
+    untyped `TypeError: string indices must be integers`."""
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    records: list[DocumentRecord] = [_record("item-1", "doc-0")]
+    bad_metadata: Any = "action_id action_version golden_version"
+
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        adapter.record_run(
+            dataset_name="ds",
+            run_name="r",
+            run_id="run-1",
+            records=records,
+            metadata=bad_metadata,
+        )
+
+    assert "not a dict" in str(excinfo.value)
     _assert_zero_platform_writes(http_client, tracing_client)

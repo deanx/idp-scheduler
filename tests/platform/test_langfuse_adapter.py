@@ -15,7 +15,7 @@ invented ``items`` key.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
@@ -26,9 +26,14 @@ from idp_regression.platform.errors import (
     ScoreWriteFailedError,
     TransportError,
 )
-from idp_regression.platform.langfuse_adapter import LangfuseAdapter, make_platform
+from idp_regression.platform.langfuse_adapter import (
+    _VALID_RUN_STATUSES,
+    LangfuseAdapter,
+    make_platform,
+)
 from idp_regression.platform.scoring import RUN_LEVEL_TRACE_SENTINEL, score_id, trace_id
 from idp_regression.platform.types import DatasetItem
+from idp_regression.platform.types import RunStatus as _RunStatus
 from tests.platform._type_pins import _str_fields
 
 
@@ -220,6 +225,62 @@ def test_get_dataset_items_fetch_failure_raises_typed_error() -> None:
 
     with pytest.raises(DatasetFetchFailedError):
         adapter.get_dataset("spike-01")
+
+
+# --- FO-8 (DEBT-48): `ExperimentItem.dataset_id` (`tracing.py`, declared
+# `Any` -- the SDK's real contract is a string id) is cached from
+# `body.get("id")` on the `GET /api/public/v2/datasets/{name}` response
+# with NO type/presence check. Pre-fix, a body without a valid string
+# `id` (missing, non-str, or empty) gives every cache entry `None` (or
+# whatever the body's `id` was) -> every `ExperimentItem(dataset_id=None)`
+# in `record_run` -> an experiment whose items carry NO dataset linkage,
+# while `get_dataset` itself returns successfully and the structural
+# check in `record_experiment` (item count / trace_id / dataset_run_id)
+# never looks at `dataset_id` at all. That's the ADR-0005 #9 failure mode
+# (a run invisible/unlinked in the Experiments tab) reported as a clean
+# run. `_str_fields`/`get_type_hints` do not apply here -- `dataset_id`
+# is `Any` on `ExperimentItem`, not a `str`-annotated `TypedDict` field --
+# so this gets its own `isinstance(str)` + non-empty guard at the fetch
+# site, raising `DatasetFetchFailedError` before any dataset-items page
+# is even requested.
+
+
+def test_get_dataset_missing_id_raises_typed_error_before_any_items_fetch() -> None:
+    body = _v2_dataset_response(None)
+    del body["id"]
+    client = FakeHttpClient({("GET", "/api/public/v2/datasets/spike-01"): (200, body)})
+    adapter = LangfuseAdapter(client=client)
+
+    with pytest.raises(DatasetFetchFailedError, match="id"):
+        adapter.get_dataset("spike-01")
+
+    # No dataset-items page was ever requested -- the guard must fire
+    # BEFORE the paginated fetch, not merely before the caller notices.
+    assert client.calls == [("GET", "/api/public/v2/datasets/spike-01", None)]
+
+
+def test_get_dataset_non_string_id_raises_typed_error_before_any_items_fetch() -> None:
+    body = _v2_dataset_response(None)
+    body["id"] = 12345  # wrong TYPE, not missing
+    client = FakeHttpClient({("GET", "/api/public/v2/datasets/spike-01"): (200, body)})
+    adapter = LangfuseAdapter(client=client)
+
+    with pytest.raises(DatasetFetchFailedError, match="id"):
+        adapter.get_dataset("spike-01")
+
+    assert client.calls == [("GET", "/api/public/v2/datasets/spike-01", None)]
+
+
+def test_get_dataset_empty_string_id_raises_typed_error_before_any_items_fetch() -> None:
+    body = _v2_dataset_response(None)
+    body["id"] = ""  # a str, but not a usable id -- the "non-empty" half of the guard
+    client = FakeHttpClient({("GET", "/api/public/v2/datasets/spike-01"): (200, body)})
+    adapter = LangfuseAdapter(client=client)
+
+    with pytest.raises(DatasetFetchFailedError, match="id"):
+        adapter.get_dataset("spike-01")
+
+    assert client.calls == [("GET", "/api/public/v2/datasets/spike-01", None)]
 
 
 def test_get_dataset_malformed_item_raises_typed_error_not_key_error() -> None:
@@ -495,6 +556,98 @@ def test_mark_run_status_failure_raises_typed_error() -> None:
             action_version="v",
             golden_version="g",
         )
+
+
+# --- FO-3 (DEBT-48): `RunStatus = Literal["aborted", "complete"]`
+# enforced nowhere -- pre-fix, `mark_run_status` POSTs any string
+# verbatim as the marker value, and ADR-0004 #14's marker is exactly
+# what a reader keys on: an off-allowlist value would read as "valid"
+# forever. Mirrors FO-4's fix exactly: `frozenset(get_args(RunStatus))`
+# (never hand-written), the module's own typed error
+# (`RunStatusWriteFailedError` -- this function's only existing typed
+# error, reused rather than introducing a second error type for the
+# same call), plus the M13 drift pin. The sweep also flagged this same
+# call's `run_id`/`action_id`/`action_version`/`golden_version` (all
+# declared `str`) as interpolated into a `comment` that IS written --
+# checked below via the method's own declared-type hints
+# (`typing.get_type_hints(LangfuseAdapter.mark_run_status)`), not a
+# hand-written parameter list.
+
+
+def test_m13_drift_pin_valid_run_statuses_is_derived_from_the_literal() -> None:
+    """Looks tautological today; fires the moment `RunStatus` is widened
+    and `_VALID_RUN_STATUSES` has drifted to a hand-written value that
+    wasn't updated -- the FO-4/`_VALID_GATES` pattern verbatim."""
+    assert frozenset(get_args(_RunStatus)) == _VALID_RUN_STATUSES
+
+
+def test_mark_run_status_rejects_an_unrecognised_status_value() -> None:
+    # Pre-fix behaviour: this sailed through verbatim into the
+    # platform-bound `run_status` marker score -- POSTed with HTTP 200
+    # and no raise at all.
+    client = FakeHttpClient({("POST", "/api/public/scores"): (200, {"id": "x"})})
+    adapter = LangfuseAdapter(client=client)
+
+    with pytest.raises(RunStatusWriteFailedError, match="status"):
+        adapter.mark_run_status(
+            "run-1",
+            "NOT_A_STATUS",  # type: ignore[arg-type]
+            action_id="a",
+            action_version="v",
+            golden_version="g",
+        )
+
+    assert client.calls == []
+
+
+def test_mark_run_status_rejected_status_error_never_echoes_the_offending_value() -> None:
+    # INV-02: the message names the parameter, never interpolates a
+    # value that could carry extracted content.
+    offending = "TOTALLY_UNEXPECTED_SENSITIVE_LOOKING_STATUS"
+    client = FakeHttpClient({("POST", "/api/public/scores"): (200, {"id": "x"})})
+    adapter = LangfuseAdapter(client=client)
+
+    with pytest.raises(RunStatusWriteFailedError) as excinfo:
+        adapter.mark_run_status(
+            "run-1",
+            offending,  # type: ignore[arg-type]
+            action_id="a",
+            action_version="v",
+            golden_version="g",
+        )
+
+    assert offending not in str(excinfo.value)
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("field_name", ["run_id", "action_id", "action_version", "golden_version"])
+def test_mark_run_status_rejects_a_non_string_str_declared_param(field_name: str) -> None:
+    """THE KILLING TEST: before the fix, none of these four `str`-declared
+    parameters were checked -- a non-string value is silently formatted
+    into `comment` (an f-string tolerates anything) and POSTed as HTTP
+    200, no raise. Parametrized over the four names the sweep listed,
+    not asserted against `typing.get_type_hints` directly in the test
+    (that derivation lives in production, `mark_run_status` itself) --
+    the four-name list here is what a NEW `str` parameter on the method
+    would NOT auto-extend, which is an accepted, explicitly-scoped
+    limitation of testing a function signature rather than a TypedDict
+    (there is no `get_type_hints`-free way to enumerate "callers of this
+    parametrize" without duplicating the method's own signature)."""
+    client = FakeHttpClient({("POST", "/api/public/scores"): (200, {"id": "x"})})
+    adapter = LangfuseAdapter(client=client)
+    kwargs: dict[str, Any] = {
+        "run_id": "run-1",
+        "status": "aborted",
+        "action_id": "a",
+        "action_version": "v",
+        "golden_version": "g",
+    }
+    kwargs[field_name] = ["not", "a", "string"]  # wrong TYPE, never a synthesised value
+
+    with pytest.raises(RunStatusWriteFailedError, match=field_name):
+        adapter.mark_run_status(kwargs.pop("run_id"), kwargs.pop("status"), **kwargs)
+
+    assert client.calls == []
 
 
 def test_make_platform_dispatches_on_platform_env(monkeypatch: pytest.MonkeyPatch) -> None:

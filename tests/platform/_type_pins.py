@@ -11,7 +11,32 @@ exists to stop.
 
 from __future__ import annotations
 
-from typing import NotRequired, TypedDict, get_type_hints
+from typing import NotRequired, TypedDict, get_origin, get_type_hints
+
+
+def _required_fields(td: type) -> list[str]:
+    """DEBT-49 -- sound PRESENCE derivation, robust to `NotRequired` under
+    postponed annotations. Mirrors production's `_required_field_names`
+    (`langfuse_adapter.py`), kept as a separate copy for the same reason
+    `_str_fields` is: production code must not import from `tests/`.
+
+    `TypedDict.__required_keys__` MIS-DERIVES every `NotRequired` field as
+    required when `from __future__ import annotations` is in effect
+    (verified live, this repo, Python 3.13.5: `ScoreInput.__required_keys__`
+    includes `'comment'` even though it is declared
+    `NotRequired[str | None]`) -- the annotation is a string at class-
+    creation time, so `NotRequired` is never detected by that mechanism.
+    NEVER use `__required_keys__` for a presence check while that import is
+    active in this codebase.
+
+    The fix: resolve each field via `get_type_hints(td, include_extras=True)`
+    (which keeps the `NotRequired[...]` wrapper visible, unlike the
+    extras-stripped form `_str_fields` uses for its VALUE-type check) and
+    exclude any field whose resolved hint's origin is `typing.NotRequired`.
+    This is presence-only -- it says nothing about a field's value type,
+    which is `_str_fields`'s separate job for the `str`-typed subset."""
+    hints = get_type_hints(td, include_extras=True)
+    return sorted(name for name, hint in hints.items() if get_origin(hint) is not NotRequired)
 
 
 def _str_fields(td: type) -> list[str]:

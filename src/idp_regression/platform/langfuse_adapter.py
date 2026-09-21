@@ -21,7 +21,7 @@ import random
 import time
 import urllib.parse
 from collections.abc import Callable
-from typing import Any, Literal, cast, get_type_hints
+from typing import Any, Literal, NotRequired, cast, get_args, get_origin, get_type_hints
 
 from idp_regression.platform.errors import (
     DatasetFetchFailedError,
@@ -41,6 +41,7 @@ from idp_regression.platform.types import (
     DocumentRecord,
     PlatformAdapter,
     RunMetadata,
+    RunStatus,
     ScoreInput,
 )
 
@@ -72,7 +73,54 @@ def _str_annotated_field_names(td: type) -> list[str]:
     return sorted(name for name, hint in get_type_hints(td).items() if hint is str)
 
 
+def _required_field_names(td: type) -> list[str]:
+    """DEBT-49 — sound PRESENCE derivation for a TypedDict, robust to
+    ``NotRequired`` under postponed annotations. Production-side
+    counterpart of ``tests/platform/_type_pins.py::_required_fields``
+    (kept as a separate copy, deliberately, same reason as
+    ``_str_annotated_field_names`` above: production code must not
+    import from ``tests/``).
+
+    ``TypedDict.__required_keys__`` is UNSOUND on this repo's Python
+    (3.13.5) with ``from __future__ import annotations`` in effect — it
+    mis-derives every ``NotRequired`` field as required, because the
+    annotation is a bare *string* at class-creation time and
+    ``NotRequired`` is therefore never detected by that mechanism
+    (verified live: ``ScoreInput.__required_keys__ ==
+    frozenset({'comment', 'id', 'name', 'value'})``, with
+    ``__optional_keys__`` empty, even though ``comment`` is declared
+    ``NotRequired[str | None]``). ``DocumentRecord`` (this function's
+    first caller) has no ``NotRequired`` field today, which is exactly
+    why the old ``sorted(DocumentRecord.__required_keys__)`` call one
+    level down used to look correct — it was correct BY LUCK, and would
+    have silently started rejecting a legitimately-absent field the
+    moment one was added (DEBT-49). NEVER use ``__required_keys__`` for
+    a presence check anywhere in this module while postponed annotations
+    are in effect.
+
+    The fix: resolve every field via ``get_type_hints(td,
+    include_extras=True)`` — which, unlike ``_str_annotated_field_names``
+    above, deliberately KEEPS the ``NotRequired[...]`` wrapper visible —
+    and exclude any field whose resolved hint's origin is
+    ``typing.NotRequired``. This is presence-only: it says nothing about
+    a field's value TYPE (that remains ``_str_annotated_field_names``'s
+    separate job for the ``str``-typed subset), so a non-``str`` required
+    field — e.g. ``DocumentRecord.scores: list[ScoreInput]`` — still gets
+    its presence checked here even though it would never appear in a
+    ``str``-fields-only derivation. Collapsing the two into one loop
+    would silently drop that presence check, which is exactly the "keep
+    them separate" instruction this function exists to honour."""
+    hints = get_type_hints(td, include_extras=True)
+    return sorted(name for name, hint in hints.items() if get_origin(hint) is not NotRequired)
+
+
 _RUN_STATUS_SCORE_NAME = "run_status"
+
+#: FO-3 (DEBT-48): the recognised ``RunStatus`` marker values, derived
+#: from the Literal itself (never hand-written) — mirrors FO-4's
+#: ``_VALID_GATES`` in ``scoring.py`` verbatim. Widening ``RunStatus`` to
+#: a third value automatically widens this set too.
+_VALID_RUN_STATUSES: frozenset[str] = frozenset(get_args(RunStatus))
 
 #: Hard cap on dataset-items pages fetched per get_dataset() call (REG-04,
 #: F-3) -- generous for any real golden set, but stops an untrusted/bogus
@@ -97,6 +145,21 @@ _DEFAULT_SCORE_WRITE_BACKOFF_CAP_SECONDS = 8.0
 #: that attribute is unsafe to use here).
 _SCORE_STR_FIELDS = _str_annotated_field_names(ScoreInput)
 
+#: DEBT-49: the SOUND presence derivation for ``DocumentRecord`` — computed
+#: ONCE, from the declared type (see ``_required_field_names``), and reused
+#: by ``_require_record_shape``'s presence loop below. Verified today:
+#: ``["document_id", "item_id", "scores"]`` (identical to
+#: ``sorted(DocumentRecord.__required_keys__)`` for as long as
+#: ``DocumentRecord`` carries no ``NotRequired`` field — the two derivations
+#: diverge, correctly, the day one is added).
+_DOCUMENT_RECORD_REQUIRED_FIELDS = _required_field_names(DocumentRecord)
+
+#: FO-1 (DEBT-48): the `str`-obligated fields of ``RunMetadata`` -- computed
+#: ONCE, reused by ``_require_run_metadata_shape`` below. All three of
+#: ``RunMetadata``'s fields are plain ``str`` (no ``NotRequired`` member
+#: today), so this single derivation covers both presence and value type.
+_RUN_METADATA_STR_FIELDS = _str_annotated_field_names(RunMetadata)
+
 
 def _require_record_shape(record: DocumentRecord) -> None:
     """FU-01.3-B / QA-01 F-1 / REG-09 (widened by FU-01.3-D): validate a
@@ -118,11 +181,16 @@ def _require_record_shape(record: DocumentRecord) -> None:
          ``"x" not in record`` on a ``str`` silently does substring
          semantics, the same trap already patched one level down for
          non-dict scores (REG-09's seventh anchor case).
-      2. Required keys are read from ``DocumentRecord.__required_keys__``
-         (verified ``{'document_id', 'item_id', 'scores'}``), not
-         hand-enumerated, so a new required field on the TypedDict
-         auto-generates its own guard here -- three consecutive
-         hand-written attempts enumerated a subset of that list (0 for 3).
+      2. Required keys are read from ``_required_field_names(DocumentRecord)``
+         (DEBT-49's sound derivation — verified ``['document_id',
+         'item_id', 'scores']`` — and NOT
+         ``DocumentRecord.__required_keys__``, which is unsound under
+         postponed annotations for any TypedDict carrying a
+         ``NotRequired`` field; see ``_required_field_names``'s
+         docstring), not hand-enumerated, so a new required field on
+         the TypedDict auto-generates its own guard here -- three
+         consecutive hand-written attempts enumerated a subset of that
+         list (0 for 3).
       3. ``item_id``'s VALUE (not just its presence) is checked -- a
          non-string ``item_id`` would otherwise sail past the key check
          and later blow up ``set(record_item_ids)`` with an untyped
@@ -135,7 +203,7 @@ def _require_record_shape(record: DocumentRecord) -> None:
     """
     if not isinstance(record, dict):
         raise ExperimentRecordFailedError("record_run: a record is not a dict (malformed input)")
-    for key in sorted(DocumentRecord.__required_keys__):
+    for key in _DOCUMENT_RECORD_REQUIRED_FIELDS:
         if key not in record:
             if key == "document_id":
                 raise ExperimentRecordFailedError("record_run: a record is missing 'document_id'")
@@ -193,6 +261,42 @@ def _require_record_shape(record: DocumentRecord) -> None:
                     f"record_run: a score for document_id={document_id!r} is missing "
                     f"or has a non-string {key!r}"
                 )
+
+
+def _require_run_metadata_shape(metadata: RunMetadata) -> None:
+    """FO-1 (DEBT-48): ``RunMetadata``'s three ``str`` fields
+    (``action_id``/``action_version``/``golden_version``) used to be
+    subscripted directly out of the caller-supplied dict while building
+    the ``record_experiment(...)`` call's ``metadata={...}`` argument --
+    no presence or type check anywhere before that point. A missing key
+    raised a bare ``KeyError`` (not the Protocol's promised typed error,
+    ``types.py`` ``PlatformAdapter.record_run`` docstring); a non-string
+    value didn't raise at ALL -- it landed in the run's platform metadata
+    and ``record_run`` returned success. INV-04 says every completed run
+    records this metadata; a run with ``action_version=None`` was
+    indistinguishable from a good one.
+
+    Same structural fix as ``_require_record_shape``: ``isinstance(dict,
+    ...)`` first (a ``str``'s ``in`` does substring semantics), then keys
+    derived from the DECLARED TYPE (``_RUN_METADATA_STR_FIELDS`` /
+    ``_str_annotated_field_names(RunMetadata)``) rather than hand-listed
+    -- a future scalar field on ``RunMetadata`` auto-generates its own
+    check here. Called at the top of ``record_run``, before any
+    subscript of ``metadata`` and before any SDK/HTTP call.
+
+    INV-02: the message names the FIELD only, never the offending value.
+    """
+    if not isinstance(metadata, dict):
+        raise ExperimentRecordFailedError("record_run: metadata is not a dict (malformed input)")
+    # `key` is a runtime str, not a literal, so RunMetadata's TypedDict
+    # subscript restriction doesn't apply (same cast pattern as the score
+    # loop above).
+    metadata_as_dict = cast(dict[str, Any], metadata)
+    for key in _RUN_METADATA_STR_FIELDS:
+        if key not in metadata_as_dict or not isinstance(metadata_as_dict[key], str):
+            raise ExperimentRecordFailedError(
+                f"record_run: metadata is missing or has a non-string {key!r}"
+            )
 
 
 def _body_snippet_for_error(body: Any) -> str:
@@ -273,6 +377,22 @@ class LangfuseAdapter:
         if not isinstance(body, dict):
             raise DatasetFetchFailedError("get_dataset returned an unexpected body shape")
         dataset_id = body.get("id")
+        if not isinstance(dataset_id, str) or not dataset_id:
+            # FO-8 (DEBT-48): `ExperimentItem.dataset_id` (tracing.py,
+            # declared `Any` -- the SDK's real contract is a string id)
+            # is cached from this value with NO check anywhere else in
+            # this module. Unchecked, every cache entry (and every
+            # ExperimentItem record_run later builds from it) could
+            # carry `None` or an empty string -- an experiment whose
+            # items carry no dataset linkage, while THIS call still
+            # returns successfully and the structural check in
+            # record_experiment never looks at dataset_id at all. That
+            # is the ADR-0005 #9 failure mode (a run invisible/unlinked
+            # in the Experiments tab) reported as a clean run. Raised
+            # BEFORE the paginated dataset-items fetch -- no further
+            # network call for a dataset response that is already
+            # unusable.
+            raise DatasetFetchFailedError("get_dataset: dataset response is missing a valid 'id'")
         schema = body.get("expectedOutputSchema")
 
         items = self._fetch_all_dataset_items(name, encoded_name, dataset_id)
@@ -544,6 +664,13 @@ class LangfuseAdapter:
                 "get_dataset(dataset_name) first, in this same run"
             )
 
+        # FO-1 (DEBT-48): validate metadata's shape here too, at the very
+        # TOP of record_run alongside the record-shape loop below -- it
+        # used to be subscripted only much later, while building the
+        # record_experiment(...) call's metadata dict, deep past every
+        # other precondition.
+        _require_run_metadata_shape(metadata)
+
         # FU-01.3-D / QA-01 re-audit F-1 (REG-09 widened): validate EVERY
         # record's shape here, at the very TOP of record_run, before ANY
         # subscript of ANY record below -- the seam where
@@ -659,6 +786,32 @@ class LangfuseAdapter:
         action_version: str,
         golden_version: str,
     ) -> None:
+        # FO-3 (DEBT-48): `RunStatus` was enforced nowhere -- any string
+        # POSTed verbatim as ADR-0004 #14's marker value, which a reader
+        # keys on; an off-allowlist value read as "valid" forever.
+        # Mirrors FO-4's fix exactly: the valid set is derived from the
+        # Literal itself (`_VALID_RUN_STATUSES`, module level), never
+        # hand-written, and this reuses the module's own existing typed
+        # error for this call rather than introducing a second one.
+        # Same sweep finding, same call: run_id/action_id/action_version/
+        # golden_version (all declared `str`) are interpolated into
+        # `comment` below, which IS written -- unchecked until now.
+        # Derived from THIS method's own declared type hints
+        # (`typing.get_type_hints`), not a hand-written parameter list,
+        # so a future `str` parameter on this signature auto-extends the
+        # check. `locals()` here captures exactly the bound parameters
+        # (nothing else has been assigned yet).
+        if status not in _VALID_RUN_STATUSES:
+            # INV-02: name the parameter, never interpolate the value.
+            raise RunStatusWriteFailedError(
+                "mark_run_status: status must be one of the recognised run_status values"
+            )
+        local_values = locals()
+        for name, hint in get_type_hints(LangfuseAdapter.mark_run_status).items():
+            if hint is str and not isinstance(local_values.get(name), str):
+                # INV-02: name the parameter, never interpolate the value.
+                raise RunStatusWriteFailedError(f"mark_run_status: {name!r} must be a string")
+
         comment = (
             f"action_id={action_id} action_version={action_version} "
             f"golden_version={golden_version}"
