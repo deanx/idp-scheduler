@@ -21,7 +21,7 @@ import random
 import time
 import urllib.parse
 from collections.abc import Callable
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, get_type_hints
 
 from idp_regression.platform.errors import (
     DatasetFetchFailedError,
@@ -46,6 +46,32 @@ from idp_regression.platform.types import (
 
 logger = logging.getLogger(__name__)
 
+
+def _str_annotated_field_names(td: type) -> list[str]:
+    """FO-2 (DEBT-48/40/43/47) — derive a TypedDict's `str`-obligated field
+    names from the DECLARED TYPE, never hand-listed. Production-side
+    counterpart of ``tests/platform/_type_pins.py::_str_fields`` (kept as a
+    separate copy, deliberately: production code must not import from
+    ``tests/``).
+
+    ⚠️ Why this does NOT also use ``ScoreInput.__required_keys__`` for a
+    separate presence check, as the DocumentRecord guard does above:
+    on this repo's Python (3.13.5) + ``from __future__ import annotations``,
+    ``TypedDict.__required_keys__`` mis-derives ``NotRequired`` fields as
+    required — e.g. ``ScoreInput.__required_keys__`` includes ``"comment"``
+    even though it is declared ``NotRequired[str | None]`` (verified live:
+    ``ScoreInput.__required_keys__ == frozenset({'id', 'name', 'value',
+    'comment'})``). Using it here would make the guard reject every score
+    that omits ``comment`` — a real regression, not a hardening. This
+    function sidesteps that bug entirely: ``get_type_hints`` (no
+    ``include_extras``) resolves ``NotRequired[str | None]`` to ``str |
+    None``, which is not ``str``, so ``comment`` is excluded by the same
+    ``hint is str`` filter regardless of the required/optional mislabel —
+    presence AND type are checked together, in one pass, over exactly the
+    fields this filter identifies."""
+    return sorted(name for name, hint in get_type_hints(td).items() if hint is str)
+
+
 _RUN_STATUS_SCORE_NAME = "run_status"
 
 #: Hard cap on dataset-items pages fetched per get_dataset() call (REG-04,
@@ -61,6 +87,15 @@ _MAX_DATASET_PAGES = 500
 _DEFAULT_SCORE_WRITE_MAX_ATTEMPTS = 3
 _DEFAULT_SCORE_WRITE_BACKOFF_BASE_SECONDS = 1.0
 _DEFAULT_SCORE_WRITE_BACKOFF_CAP_SECONDS = 8.0
+
+#: FO-2 (DEBT-48): the `str`-obligated fields of ``ScoreInput`` -- computed
+#: ONCE, from the declared type (see ``_str_annotated_field_names``), and
+#: reused by ``_require_record_shape``'s score-loop below. Verified today:
+#: ``["id", "name", "value"]`` -- ``comment`` is excluded because it is
+#: NOT `str` (it's `NotRequired[str | None]`, i.e. `str | None`), never
+#: because of ``__required_keys__`` (see that function's docstring for why
+#: that attribute is unsafe to use here).
+_SCORE_STR_FIELDS = _str_annotated_field_names(ScoreInput)
 
 
 def _require_record_shape(record: DocumentRecord) -> None:
@@ -132,14 +167,32 @@ def _require_record_shape(record: DocumentRecord) -> None:
             "'scores' value (expected a list of score dicts)"
         )
     for score in scores:
-        if not isinstance(score, dict) or "id" not in score:
+        # FO-2 (DEBT-48/40/43/47): this used to hand-enumerate "id" and
+        # "name" only, omitting "value" (declared `str` on `ScoreInput`,
+        # four lines below the guard FU-01.3-G fixed for `DocumentRecord`)
+        # -- the identical hand-enumeration defect one level down. Now
+        # derived from `_SCORE_STR_FIELDS` (the declared type, via
+        # `_str_annotated_field_names`), covering presence AND value type
+        # for every `str`-obligated field in one pass -- a future scalar
+        # field on `ScoreInput` auto-generates its own check here, the
+        # same structural fix DoD (3) applied to `DocumentRecord`.
+        if not isinstance(score, dict):
             raise ExperimentRecordFailedError(
-                f"record_run: a score for document_id={document_id!r} is missing 'id'"
+                f"record_run: a score for document_id={document_id!r} is not a dict "
+                "(malformed input)"
             )
-        if "name" not in score:
-            raise ExperimentRecordFailedError(
-                f"record_run: a score for document_id={document_id!r} is missing 'name'"
-            )
+        score_as_dict = cast(dict[str, Any], score)
+        for key in _SCORE_STR_FIELDS:
+            # INV-02: name the FIELD only, never interpolate the value --
+            # a score value is a verdict literal but is treated as
+            # sensitive here, mirroring `document_id`'s guard above.
+            # (`cast` above: `key` is a runtime str, not a literal, so
+            # ScoreInput's TypedDict subscript restriction doesn't apply.)
+            if key not in score_as_dict or not isinstance(score_as_dict[key], str):
+                raise ExperimentRecordFailedError(
+                    f"record_run: a score for document_id={document_id!r} is missing "
+                    f"or has a non-string {key!r}"
+                )
 
 
 def _body_snippet_for_error(body: Any) -> str:
@@ -315,6 +368,23 @@ class LangfuseAdapter:
                     raise DatasetFetchFailedError(
                         "malformed dataset item: 'document_id' is not a string"
                     )
+                if not isinstance(golden, dict):
+                    # FO-7 third leg (DEBT-48): `golden` (`raw_item
+                    # ["expectedOutput"]`) had NO isinstance/type check
+                    # anywhere in this module -- the committed CT-05
+                    # schema guards `expectedOutput` on WRITE, never on
+                    # READ, so a malformed platform item flowed straight
+                    # through into the DatasetItem and back out. Type-only
+                    # guard, deliberately NOT schema validation on read
+                    # (a larger design decision, out of scope here). Must
+                    # raise BEFORE `items.append` and BEFORE
+                    # `self._item_cache[item_id] = dataset_id` below, same
+                    # placement as its `item_id`/`document_id` siblings.
+                    # INV-02: name the field only, never the value.
+                    raise DatasetFetchFailedError(
+                        "malformed dataset item: 'golden' (expectedOutput) is not an object"
+                    )
+                golden = cast(Any, golden)  # narrowed to dict[Any, Any] by isinstance above
                 items.append(
                     {"item_id": item_id, "document_id": document_id, "golden": golden}
                 )

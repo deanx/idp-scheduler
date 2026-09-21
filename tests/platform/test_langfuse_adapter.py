@@ -333,6 +333,51 @@ def test_get_dataset_non_string_item_id_raises_typed_error_not_a_silent_pass_thr
     assert marker not in message
 
 
+def test_get_dataset_non_dict_golden_raises_typed_error_not_a_silent_pass_through() -> None:
+    """FO-7 third leg (DEBT-48): ``golden = raw_item["expectedOutput"]``
+    had NO ``isinstance(dict)`` check anywhere in ``get_dataset`` -- the
+    committed CT-05 schema guards ``expectedOutput`` on WRITE, never on
+    READ, so a malformed platform item flowed straight through: stored
+    into the ``DatasetItem`` and returned as-is, past both ``items.append``
+    and the ``_item_cache`` write. Unlike its ``item_id``/``document_id``
+    siblings, ``golden`` is not a `str` field (it's a nested `Golden`
+    TypedDict), so `_str_fields`/`get_type_hints` do not apply -- this is
+    a type-only guard (``isinstance(dict)``), deliberately NOT schema
+    validation on read (out of scope, a larger design decision).
+
+    INV-02: the marker carried by the bad golden value must never leak
+    into the message -- same style as the `document_id`/`item_id`
+    twins above."""
+    marker = "SENTINEL-DATASET-GOLDEN-do-not-leak-2a71fd"
+    client = FakeHttpClient(
+        {
+            ("GET", "/api/public/v2/datasets/spike-01"): (200, _v2_dataset_response(None)),
+            ("GET", "/api/public/dataset-items?datasetName=spike-01"): (
+                200,
+                _dataset_items_page(
+                    [
+                        {
+                            "id": "item-1",
+                            "input": {"document_id": "doc-0"},
+                            "expectedOutput": [marker],  # wrong TYPE, not missing
+                        }
+                    ],
+                    page=1,
+                    total_pages=1,
+                ),
+            ),
+        }
+    )
+    adapter = LangfuseAdapter(client=client)
+
+    with pytest.raises(DatasetFetchFailedError) as excinfo:
+        adapter.get_dataset("spike-01")
+
+    message = str(excinfo.value)
+    assert "golden" in message
+    assert marker not in message
+
+
 def test_str_fields_of_dataset_item_is_document_id_and_item_id() -> None:
     """The `DatasetItem` counterpart of `DocumentRecord`'s own production
     pin (`test_str_fields_of_document_record_is_document_id_and_item_id`

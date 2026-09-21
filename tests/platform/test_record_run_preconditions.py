@@ -17,6 +17,8 @@ from idp_regression.platform.scoring import field_score_name, prompt_score_name,
 from idp_regression.platform.types import DocumentRecord, RunMetadata, ScoreInput
 from tests.platform._type_pins import _str_fields, _StrFieldProbe
 
+_SENTINEL_SCORE_FIELD_MARKER = "SENTINEL-SCORE-FIELD-do-not-leak-6f1a4c"
+
 _METADATA: RunMetadata = {"action_id": "a", "action_version": "v", "golden_version": "g"}
 
 
@@ -168,6 +170,48 @@ def test_precondition_passes_and_records_when_item_ids_match_exactly() -> None:
 # --- task_failed raise (:235-238) --------------------------------------
 
 
+class _ScoresExplodeOnSubscript(dict):  # type: ignore[type-arg]
+    """DEBT-39 re-fixture (FO-2, 2026-09-21): the two tests below used to
+    give the task a well-shaped ``scores`` list except for a score missing
+    ``"value"`` — that fixture stopped exercising the task_failed path the
+    moment ``_require_record_shape`` started checking ``"value"`` (FO-2's
+    fix), because the record now gets rejected at the PRECONDITION and
+    never reaches the task at all. This is exactly the silent hollowing
+    DEBT-39's comment existed to prevent, so the fixture is re-built
+    deliberately rather than reflex-patched.
+
+    Reuses the SAME ``.get()``-vs-``__getitem__`` split already exercised
+    by ``_ExplodesOnDictAccess`` below (Atchim S-2): ``_require_record_shape``
+    reads ``record.get("scores")`` and, further down, ``record.get("scores",
+    [])`` for the run_id derivation check — both bypass an overridden
+    ``__getitem__`` and see a fully well-formed scores list, so the record
+    passes shape validation AND the A3 run_id-derivation precondition
+    cleanly (``run_experiment_calls`` reaches 1, unlike the sibling
+    precondition tests in this file). The task body, however, subscripts
+    ``record["scores"]`` directly — which this override raises on — so
+    it's the task's own catch-all that fires, which is what these two
+    tests exist to cover."""
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "scores":
+            raise RuntimeError("simulated task-only failure")
+        return super().__getitem__(key)
+
+
+def _task_only_failure_record() -> Any:
+    return _ScoresExplodeOnSubscript(
+        item_id="item-1",
+        document_id="doc-0",
+        scores=[
+            {
+                "id": score_id(run_id="run-1", document_id="doc-0", score_name="gate"),
+                "name": "gate",
+                "value": "PASS",
+            }
+        ],
+    )
+
+
 def test_task_failed_raises_experiment_record_failed_and_skips_score_writes() -> None:
     """When the total task's defense-in-depth catch fires for ANY item,
     record_run must raise (not silently proceed) and must NOT write any
@@ -182,28 +226,8 @@ def test_task_failed_raises_experiment_record_failed_and_skips_score_writes() ->
     )
     adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
     adapter._cached_dataset_name = "ds"  # noqa: SLF001
-    # A record with a well-shaped ``scores`` list (passes the FU-01.3-B
-    # shape precondition and the run_id derivation check) but the score
-    # dict is missing "value" — the task's dict comprehension over
-    # `score["value"]` will KeyError, triggering task_failed. (Before
-    # FU-01.3-B this used a record missing "scores" entirely, but that
-    # now raises earlier, from the shape precondition itself — REG-09.)
-    # DEBT-39: this fixture passes only because `_require_record_shape`
-    # does not check "value" today — the moment it does, this record
-    # would be rejected at the PRECONDITION and never reach the task,
-    # silently hollowing out what this test means to cover. A future
-    # "value" check must re-fixture this test deliberately, not by
-    # reflex-adding "value" here.
-    malformed: Any = {
-        "item_id": "item-1",
-        "document_id": "doc-0",
-        "scores": [
-            {
-                "id": score_id(run_id="run-1", document_id="doc-0", score_name="gate"),
-                "name": "gate",
-            }
-        ],
-    }
+    # See `_ScoresExplodeOnSubscript`'s docstring above (DEBT-39 re-fixture).
+    malformed = _task_only_failure_record()
 
     with pytest.raises(ExperimentRecordFailedError, match="task caught an unexpected exception"):
         adapter.record_run(
@@ -225,21 +249,8 @@ def test_task_failed_output_is_the_fixed_constant() -> None:
     adapter = LangfuseAdapter(client=_FakeHttpClient(), tracing_client=tracing_client)
     adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
     adapter._cached_dataset_name = "ds"  # noqa: SLF001
-    # See the sibling test above (REG-09): a well-shaped scores list with
-    # a score missing "value" still trips the task's own catch-all.
-    # DEBT-39: same dependency as the sibling test above — this fixture
-    # passes only because `_require_record_shape` does not check "value"
-    # today; a future "value" check must re-fixture this deliberately.
-    malformed: Any = {
-        "item_id": "item-1",
-        "document_id": "doc-0",
-        "scores": [
-            {
-                "id": score_id(run_id="run-1", document_id="doc-0", score_name="gate"),
-                "name": "gate",
-            }
-        ],
-    }
+    # See `_ScoresExplodeOnSubscript`'s docstring above (DEBT-39 re-fixture).
+    malformed = _task_only_failure_record()
 
     with pytest.raises(ExperimentRecordFailedError):
         adapter.record_run(
@@ -545,6 +556,81 @@ def test_score_missing_name_raises_typed_error_before_any_sdk_call() -> None:
     message = str(excinfo.value)
     assert "doc-0" in message
     _assert_no_score_sentinel_leaked(message)
+    _assert_zero_platform_writes(http_client, tracing_client)
+
+
+def test_score_missing_value_raises_typed_error_before_any_sdk_call() -> None:
+    """FO-2 (DEBT-48): the third anchor, closing the pre-existing gap next
+    to `test_score_missing_id_...` / `test_score_missing_name_...` above --
+    `_require_record_shape` hand-enumerated ``"id"``/``"name"`` and omitted
+    ``"value"`` (declared ``str`` on ``ScoreInput``, four lines below the
+    guard FU-01.3-G fixed for `DocumentRecord`). Before the fix this is the
+    RED leg: no raise, `run_experiment_calls == 1`, `http_client.calls`
+    non-empty -- a score missing "value" reaches the SDK and the wire."""
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    bad_score: Any = {"id": _SENTINEL_SCORE_ID, "name": _SENTINEL_SCORE_NAME}
+    records: list[DocumentRecord] = [
+        {"item_id": "item-1", "document_id": "doc-0", "scores": [bad_score]}
+    ]
+
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        adapter.record_run(
+            dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+        )
+
+    message = str(excinfo.value)
+    assert "doc-0" in message
+    _assert_no_score_sentinel_leaked(message)
+    _assert_zero_platform_writes(http_client, tracing_client)
+
+
+def test_str_fields_of_score_input_is_id_name_value() -> None:
+    """FO-2 production-shape pin, mirroring
+    `test_str_fields_of_document_record_is_document_id_and_item_id` above
+    and `test_str_fields_of_dataset_item_is_document_id_and_item_id` in
+    `test_langfuse_adapter.py` -- a probe-only pin cannot catch a mutation
+    that mis-scopes `_str_fields` BY NAME, since `_StrFieldProbe`'s field
+    names never collide with `ScoreInput`'s. `comment` is deliberately
+    excluded: it is declared `NotRequired[str | None]`, and `get_type_hints`
+    resolves that to `str | None` (not `str`), so the `hint is str` filter
+    excludes it regardless of presence -- the direct equality assertion
+    below is what makes a silent drop of a parametrize leg visible."""
+    assert _str_fields(ScoreInput) == ["id", "name", "value"]
+
+
+@pytest.mark.parametrize("field_name", _str_fields(ScoreInput))
+def test_score_field_wrong_type_raises_typed_error_before_any_sdk_call(field_name: str) -> None:
+    """THE KILLING TEST for FO-2 (DEBT-48): parametrized over the
+    `str`-annotated fields of `typing.get_type_hints(ScoreInput)` -- NOT a
+    hand-written `["id", "name"]` pair -- so a future scalar field on
+    `ScoreInput` auto-generates its own wrong-type-value case here, the
+    value-side twin of `test_record_field_wrong_type_raises_typed_error_
+    before_any_sdk_call` above (which does the same for `DocumentRecord`).
+    Before the fix this parametrize has exactly one RED leg (`value`): no
+    raise, `run_experiment_calls == 1`, `http_client.calls` non-empty --
+    the fail-open write FO-2 describes (a non-str value written to the
+    span AND POSTed with `dataType: CATEGORICAL`). `id`/`name` are
+    already covered by the pre-existing hand-written anchors above; this
+    test generalises them, it does not replace them."""
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    bad_score: dict[str, Any] = {
+        "id": score_id(run_id="run-1", document_id="doc-0", score_name="gate"),
+        "name": "gate",
+        "value": "PASS",
+    }
+    bad_score[field_name] = [_SENTINEL_SCORE_FIELD_MARKER]  # wrong TYPE, never a synthesised value
+    records: list[DocumentRecord] = [
+        {"item_id": "item-1", "document_id": "doc-0", "scores": [bad_score]}
+    ]
+
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        adapter.record_run(
+            dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+        )
+
+    message = str(excinfo.value)
+    assert "doc-0" in message
+    assert _SENTINEL_SCORE_FIELD_MARKER not in message
     _assert_zero_platform_writes(http_client, tracing_client)
 
 

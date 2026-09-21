@@ -44,6 +44,30 @@ EXPECTED_SENTINEL = "SENTINEL-EXPECTED-4f8c1e"
 ACTUAL_SENTINEL = "SENTINEL-ACTUAL-9b2d7a"
 
 
+class _ScoresExplodeOnSubscript(dict):  # type: ignore[type-arg]
+    """DEBT-39 twin, found live (FO-2 fix round, 2026-09-21): this
+    scenario used to give the task a well-shaped ``scores`` list except
+    for a score missing ``"value"`` — that stopped exercising the task's
+    real-KeyError path the moment ``_require_record_shape`` started
+    checking ``"value"`` (FO-2's fix in ``langfuse_adapter.py``), because
+    the record is now rejected at the PRECONDITION and never reaches the
+    real SDK task at all (this test regressed from ``FlushFailedError``
+    to ``ExperimentRecordFailedError`` the moment that guard landed).
+    Same ``.get()``-vs-``__getitem__`` split already used in
+    ``tests/platform/test_record_run_preconditions.py``'s own DEBT-39
+    re-fixture: ``_require_record_shape`` reads via ``record.get(...)``
+    (bypasses this override, sees a well-formed scores list, passes
+    shape validation and the run_id derivation check), while the real
+    task body subscripts ``record["scores"]`` directly (raises here) —
+    so it's a genuine exception inside the REAL SDK task, in this
+    isolated subprocess, exactly as this scenario's docstring promises."""
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "scores":
+            raise RuntimeError("simulated task-only failure")
+        return super().__getitem__(key)
+
+
 class _RecordingHttpClient:
     def __init__(self) -> None:
         self.bodies: list[Any] = []
@@ -109,24 +133,26 @@ def main() -> None:
     elif scenario == "failure":
         # A well-shaped "scores" list (passes the FU-01.3-B shape
         # precondition / REG-09 and the run_id derivation check) but the
-        # score dict is missing "value" -> a genuine KeyError inside the
-        # REAL task, in this isolated subprocess. (Before FU-01.3-B this
-        # used a record missing "scores" entirely, but that now raises
-        # earlier from the precondition itself, before the task ever
-        # runs, and would never reach this scenario's real-SDK span.)
+        # record itself explodes on ``record["scores"]`` subscript access
+        # -- a genuine RuntimeError inside the REAL task, in this
+        # isolated subprocess. See `_ScoresExplodeOnSubscript`'s
+        # docstring above (DEBT-39 twin, found live): a score missing
+        # "value" no longer reaches here at all -- it's rejected at the
+        # precondition now that FO-2 made "value" a checked field.
         records = [
-            {
-                "item_id": "item-1",
-                "document_id": "doc-1",
-                "scores": [
+            _ScoresExplodeOnSubscript(
+                item_id="item-1",
+                document_id="doc-1",
+                scores=[
                     {
                         "id": score_id(
                             run_id=f"run-{scenario}", document_id="doc-1", score_name="gate"
                         ),
                         "name": "gate",
+                        "value": "PASS",
                     }
                 ],
-            }
+            )
         ]
     else:
         raise SystemExit(f"unknown scenario: {scenario!r}")
