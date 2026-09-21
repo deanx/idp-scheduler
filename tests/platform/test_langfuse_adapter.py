@@ -21,6 +21,7 @@ import pytest
 
 from idp_regression.platform.errors import (
     DatasetFetchFailedError,
+    PlatformConfigurationError,
     RunStatusWriteFailedError,
     ScoreWriteFailedError,
     TransportError,
@@ -303,11 +304,13 @@ def test_make_platform_dispatches_on_platform_env(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("LANGFUSE_HOST", "https://example.invalid")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "distinctive-pub-9f3a")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "distinctive-secret-2c71")
-    # The SDK's own base_url resolution prioritizes LANGFUSE_BASE_URL over
-    # the explicit `host=` constructor arg when both are present -- an
-    # ambient .env (sourced for the live-integration gate) can leak it in.
-    # Isolate this test from that so it asserts the FACTORY's wiring, not
-    # whatever else happens to be in the process environment.
+    # Isolation, not a dodge (Atchim R-1): this test's job is the FACTORY's
+    # host/key wiring, not the LANGFUSE_HOST/LANGFUSE_BASE_URL split-brain
+    # -- that has its own dedicated tests below. An ambient .env (sourced
+    # for the live-integration gate) can leak LANGFUSE_BASE_URL in and
+    # change what the SDK resolves `_base_url` to regardless of the
+    # explicit `host=` arg; unset it here so this test only ever asserts
+    # what make_platform() itself did with LANGFUSE_HOST.
     monkeypatch.delenv("LANGFUSE_BASE_URL", raising=False)
 
     adapter = make_platform()
@@ -338,6 +341,65 @@ def test_make_platform_raises_on_unknown_platform(monkeypatch: pytest.MonkeyPatc
 
     with pytest.raises(ValueError):
         make_platform()
+
+
+# --- Atchim R-1 PIN (2026-09-20, new REG -- coordinator records the row):
+# LANGFUSE_HOST is the only variable CLAUDE.md's External services table
+# documents, but the langfuse SDK's own base_url resolution prioritizes
+# LANGFUSE_BASE_URL over the explicit `host=` constructor arg. An operator
+# (or an ambient .env) setting both to DIFFERENT values would silently
+# split traffic: the raw-REST client authenticates against LANGFUSE_HOST,
+# the SDK client authenticates (same credentials) against
+# LANGFUSE_BASE_URL -- a credential reaching a host the operator never
+# named (same class as REG-07, arriving via env instead of a 3xx), and a
+# run's traces/scores split across two platform instances with no marker
+# (a silent variant of DEBT-28). Fail closed, before either client is
+# constructed.
+
+
+def test_make_platform_raises_when_langfuse_base_url_disagrees_with_langfuse_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PLATFORM", "langfuse")
+    monkeypatch.setenv("LANGFUSE_HOST", "https://intended.invalid")
+    monkeypatch.setenv("LANGFUSE_BASE_URL", "https://elsewhere.invalid")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pub")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
+
+    with pytest.raises(PlatformConfigurationError) as excinfo:
+        make_platform()
+
+    message = str(excinfo.value)
+    # INV-02: names the two variable NAMES only -- never their values (a
+    # URL can embed a credential, e.g. https://user:pass@host).
+    assert "LANGFUSE_HOST" in message
+    assert "LANGFUSE_BASE_URL" in message
+    assert "intended.invalid" not in message
+    assert "elsewhere.invalid" not in message
+
+
+@pytest.mark.parametrize("base_url_env", [None, "https://example.invalid"])
+def test_make_platform_resolves_both_clients_to_the_same_host_when_unset_or_equal(
+    monkeypatch: pytest.MonkeyPatch, base_url_env: str | None
+) -> None:
+    """Sanity: the R-1 fail-closed check isn't always-raising -- when
+    LANGFUSE_BASE_URL is unset, or set but equal to LANGFUSE_HOST, both
+    the raw-REST client and the SDK client resolve to the SAME host."""
+    monkeypatch.setenv("PLATFORM", "langfuse")
+    monkeypatch.setenv("LANGFUSE_HOST", "https://example.invalid")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pub")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
+    if base_url_env is None:
+        monkeypatch.delenv("LANGFUSE_BASE_URL", raising=False)
+    else:
+        monkeypatch.setenv("LANGFUSE_BASE_URL", base_url_env)
+
+    adapter = make_platform()
+
+    http_client = adapter._client  # noqa: SLF001
+    sdk_client = adapter._tracing_client  # noqa: SLF001
+    assert http_client._host == "https://example.invalid"  # noqa: SLF001
+    assert sdk_client._base_url == "https://example.invalid"  # type: ignore[attr-defined]  # noqa: SLF001
 
 
 # --- /test gap-fill: ScoreWriteFailedError (langfuse_adapter.py:178) -------

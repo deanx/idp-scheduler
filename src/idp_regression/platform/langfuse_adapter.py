@@ -26,6 +26,7 @@ from typing import Any, Literal, cast
 from idp_regression.platform.errors import (
     DatasetFetchFailedError,
     ExperimentRecordFailedError,
+    PlatformConfigurationError,
     RunStatusWriteFailedError,
     ScoreWriteFailedError,
     TracingNotConfiguredError,
@@ -558,11 +559,36 @@ def make_platform() -> PlatformAdapter:
     host = os.environ["LANGFUSE_HOST"]
     public_key = os.environ["LANGFUSE_PUBLIC_KEY"]
     secret_key = os.environ["LANGFUSE_SECRET_KEY"]
+
+    # Atchim PIN 2026-09-20 (new REG): the langfuse SDK's own base_url
+    # resolution prioritizes LANGFUSE_BASE_URL over the explicit `host=`
+    # constructor arg below -- if it's set and disagrees with
+    # LANGFUSE_HOST (the only variable CLAUDE.md's External services
+    # table documents), the SDK client would silently authenticate
+    # against a host the operator never named via LANGFUSE_HOST, split
+    # traffic across two platform instances with no marker (DEBT-28-like),
+    # and leak credentials to an undeclared host (REG-07's class, arriving
+    # via env instead of a 3xx). Fail closed, before either client is
+    # constructed. Names only in the message -- never the values, since a
+    # URL can embed a credential (INV-02).
+    base_url_override = os.environ.get("LANGFUSE_BASE_URL")
+    if base_url_override is not None and base_url_override != host:
+        raise PlatformConfigurationError(
+            "make_platform: LANGFUSE_BASE_URL is set and disagrees with LANGFUSE_HOST -- "
+            "refusing to construct a platform client that would silently split traffic "
+            "and credentials across two hosts. Unset LANGFUSE_BASE_URL or make it match "
+            "LANGFUSE_HOST."
+        )
+
     client = UrllibHttpClient(host=host, public_key=public_key, secret_key=secret_key)
 
     from langfuse import Langfuse  # local import: confine the SDK to this factory
 
-    sdk_client = Langfuse(host=host, public_key=public_key, secret_key=secret_key)
+    # base_url=host, belt-and-braces alongside the fail-closed check above:
+    # passing it explicitly makes the SDK resolve to `host` regardless of
+    # LANGFUSE_BASE_URL's env precedence, for the (already-refused-if-
+    # disagreeing) case where it's unset or equal.
+    sdk_client = Langfuse(host=host, base_url=host, public_key=public_key, secret_key=secret_key)
     return cast(
         PlatformAdapter,
         LangfuseAdapter(client=client, tracing_client=cast(ExperimentRunner, sdk_client)),

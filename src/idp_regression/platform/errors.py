@@ -50,3 +50,14 @@ class TransportError(PlatformError):
     """The raw-REST transport failed before an HTTP status was even
     returned (timeout, connection error) — R7. Callers map this to their
     own typed error (``DatasetFetchFailedError``, etc.)."""
+
+
+class PlatformConfigurationError(PlatformError):
+    """``make_platform()`` refused to construct an adapter because its own
+    configuration is contradictory or missing (fail-closed, before any
+    network call). Distinct from a credential simply being absent
+    (DEBT-30, a bare ``KeyError`` today) -- this is for a case where the
+    env DOES resolve, just to two different, conflicting things (the
+    LANGFUSE_HOST / LANGFUSE_BASE_URL split-brain, Atchim PIN 2026-09-20).
+    The message names variable NAMES only, never their values -- a URL
+    can embed a credential (INV-02)."""

@@ -235,6 +235,18 @@ def test_task_catch_all_catches_more_than_just_key_error() -> None:
                 raise RuntimeError("simulated non-KeyError failure")
             return super().__getitem__(key)
 
+    # Atchim S-2: this test survives the FU-01.3-B shape guard ONLY
+    # because that guard reads `record.get("scores")`, and CPython's
+    # `dict.get` does NOT route through an overridden `__getitem__` --
+    # so the RuntimeError trap below is never sprung by
+    # `_require_record_shape`, and this record instead reaches the task
+    # (whose body DOES subscript `record["scores"]` directly, springing
+    # it there, which is what this test means to exercise). If the guard
+    # is ever rewritten to use `record["scores"]` instead of `.get(...)`,
+    # this test's meaning silently changes -- it would then be pinning
+    # the PRECONDITION's catch, not the task's, and would need a new
+    # docstring (or a new fixture that doesn't rely on this
+    # implementation detail).
     malformed = _ExplodesOnDictAccess(item_id="item-1", document_id="doc-0", scores=[])
 
     with pytest.raises(ExperimentRecordFailedError):
@@ -546,4 +558,45 @@ def test_record_missing_document_id_raises_typed_error_before_any_sdk_call() -> 
             dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
         )
 
+    _assert_zero_platform_writes(http_client, tracing_client)
+
+
+def test_record_missing_the_scores_key_entirely_raises_typed_error_before_any_sdk_call() -> None:
+    """Atchim R-2 / M2: distinct from `"scores": None` above -- the KEY
+    itself absent. `record.get("scores")` must default to something that
+    is NOT a list (None), never `record.get("scores", [])` -- a `[]`
+    default would let a record with no "scores" key at all sail past this
+    guard, reach `run_experiment` (breaking the `run_experiment_calls ==
+    0` property DoD (a) requires), and stay typed only by accident via
+    the task's own catch-all."""
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    bad_record: Any = {"item_id": "item-1", "document_id": "doc-0"}  # no "scores" key at all
+    records: list[DocumentRecord] = [bad_record]
+
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        adapter.record_run(
+            dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+        )
+
+    assert "doc-0" in str(excinfo.value)
+    _assert_zero_platform_writes(http_client, tracing_client)
+
+
+def test_a_non_dict_score_raises_typed_error_before_any_sdk_call() -> None:
+    """Atchim R-2 / M1: a non-dict entry in `scores` (e.g. an int) must
+    also raise -- the guard's `isinstance(score, dict)` leg has nothing
+    pinning it today. Deliberately a non-str (5, not "5"): a str score
+    would pass a naive `"id" not in score` check via substring semantics
+    instead of exercising the isinstance leg."""
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    records: list[DocumentRecord] = [
+        {"item_id": "item-1", "document_id": "doc-0", "scores": [5]}  # type: ignore[typeddict-item]
+    ]
+
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        adapter.record_run(
+            dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+        )
+
+    assert "doc-0" in str(excinfo.value)
     _assert_zero_platform_writes(http_client, tracing_client)
