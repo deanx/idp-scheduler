@@ -110,7 +110,7 @@ def _required_field_names(td: type) -> list[str]:
     ``str``-fields-only derivation. Collapsing the two into one loop
     would silently drop that presence check, which is exactly the "keep
     them separate" instruction this function exists to honour."""
-    hints = get_type_hints(td, include_extras=True)
+    hints = get_type_hints(td)
     return sorted(name for name, hint in hints.items() if get_origin(hint) is not NotRequired)
 
 

@@ -432,7 +432,8 @@ S-01.1 (Classifier & gate)  ────────────┘ (no deps; st
   - [ ] Observability: N/A (spike — no runtime component; pinned timeout/retry/status values feed S-01.4's runtime telemetry)
   - [ ] ASM-01 status updated (allowlist values now pinned, not just "mitigated by configurable mechanism")
   - [ ] Spike result recorded (a section in ASSUMPTIONS.md or a short spike note referenced from ASM-01)
-  - [ ] Time-box: half a day
+  - [ ] **Trigger-model questions answered and recorded (T-01.6.6, discovery only — no watcher designed or built):** version-listing API existence + shape; floating/`latest` submit support; published-version timestamp/ordering. Plus the user's (a)-vs-(b) ambiguity resolved in writing.
+  - [ ] Time-box: half a day (T-01.6.6 is +1 pt of discovery inside the same live-access window, not an extension of the box)
   - [ ] Reviewed by Atchim (the pinned values feed a High-risk adapter)
   - [ ] Zangado audit at `/qa` (verifies the fixture is scrubbed and the allowlist is config-driven)
 - **Tasks:**
@@ -440,6 +441,16 @@ S-01.1 (Classifier & gate)  ────────────┘ (no deps; st
   - T-01.6.2 — Observe terminal-status enum across several executions; record terminal vs success sets — est: 3 — owner: Dengoso
   - T-01.6.3 — Measure representative execution wall-clock; pin `IDP_EXECUTION_TIMEOUT_SECONDS` default — est: 2 — owner: Dengoso
   - T-01.6.4 — Capture redacted raw-IDP fixture for CT-01 (scrubbed per NFR N19) — est: 3 — owner: Dengoso
+  - **T-01.6.6 — NEW (user request 2026-09-21): DISCOVERY ONLY — answer the trigger questions while live-org access is open. Build nothing. — est: 1 — owner: Dengoso**
+    - **Why this is discovery and not work.** The system today is **entirely pull-based and externally triggered**: `run_eval` is started by a human or by CI on a prompt-change PR, then it pulls the golden set from Langfuse, pulls extractions from IDP (`submit` → `poll`), classifies in-process, and pushes one run record back. **There are no webhooks, events or subscriptions anywhere in the design** (verified by grep across `docs/adr/` and `docs/design/`, 2026-09-21). Consequence the user should hear stated plainly: **the safety net only catches changes that go through a PR.** An action version published directly in Anypoint, outside the repo workflow, is invisible to this tool.
+    - The app already holds **half** of any future watcher: every run records `action_version` into `RunMetadata` (INV-04), so *"what did we last certify?"* is already answerable from Langfuse. The missing half is *"what is published right now?"*, which needs an Anypoint API **this app has never called** — the only endpoint it knows is `POST /organizations/{org}/actions/{id}/versions/{v}/executions` on `idp-rt.{region}` (the **runtime** plane; listing is a management-plane concern whose existence and shape are unverified).
+    - **Answer these three while the org is open, and record the answers in the spike note. Do NOT design or implement a watcher.**
+      1. Is there a management API that **lists an action's versions**, and what does it return (ids, timestamps, a published/draft flag)?
+      2. Does submitting support a **floating/`latest` version**, or is an explicit version always required? *(If floating exists, detection is nearly free: submit one document, read back which version answered, compare to the last certified `action_version`.)*
+      3. Does a published version carry a **timestamp or monotonic ordering** that can be compared against a previously recorded one?
+    - **Why the answers matter — a cost asymmetry.** A *listing* call is one cheap metadata request; a *regression run* costs **N document extractions** of real IDP quota. So "just run it nightly" detects with the expensive instrument what a metadata call would detect cheaply — unless listing turns out not to exist, in which case a low-frequency scheduled run may be the only option. These three answers decide between **cheap metadata watcher** / **scheduled full run** / **not feasible — stay with CI-on-PR**.
+    - ⚠️ **Scope fence.** Anything built on these answers is **Epic-level, not MVP**. The IDP action id is already the only critical path; this task adds *questions*, not work, and must not become a second one.
+    - ⚠️ **Open ambiguity for the user to resolve before any of this is designed** — *"trigger the checks after an IDP prompt execution"* has two very different readings, and they are different products: **(a) regression gate** — a prompt/action version *changes*, so re-run the golden set against it (the current design's purpose; the watcher above serves this); **(b) production monitoring** — a *live production extraction* runs and we want to judge that output as it happens. **(b) is not this product**: there is no golden for an arbitrary production document, so the classifier has nothing to compare against; it would be drift/confidence monitoring, a different Epic with a different data model. Resolve which is meant before scoping.
   - T-01.6.5 — Update ASM-01 + DATA-MODEL-01 §5 config defaults — est: 2 — owner: Soneca (ASM-01) / Dengoso (observations)
 
 ## Definition of Ready (re-scope 2026-09-19)
@@ -597,7 +608,7 @@ Dengoso batch estimate, 2026-09-18. Story-points on the Fibonacci scale (1/2/3/5
 | T-01.5.3 | 3 | Enable form mode, perform EX-C1-1/EX-C1-2 interactions, capture screenshots — moderate manual exploration |
 | T-01.5.4 | 2 | Record verdict in spike doc (Dengoso result capture; Soneca owns ADR update) — small |
 | T-01.5.5 | 1 | Hand self-hosting obligations + Langfuse credential registration to Mestre — coordination hand-off |
-| **S-01.6** | **12** | |
+| **S-01.6** | **13** (was 12; +1 for T-01.6.6 trigger-model discovery, added 2026-09-21) | |
 | T-01.6.1 | 2 | Confirm IDP credentials configured by Mestre + gain live-org access — mostly a blocker gate |
 | T-01.6.2 | 3 | Observe terminal-status enum across several executions + record terminal vs success sets — moderate empirical |
 | T-01.6.3 | 2 | Measure representative execution wall-clock + pin `IDP_EXECUTION_TIMEOUT_SECONDS` default — small observation |

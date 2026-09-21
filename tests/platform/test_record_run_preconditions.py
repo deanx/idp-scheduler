@@ -11,8 +11,12 @@ from typing import Any, cast
 
 import pytest
 
+from idp_regression.platform import langfuse_adapter as _langfuse_adapter_module
 from idp_regression.platform.errors import ExperimentRecordFailedError
-from idp_regression.platform.langfuse_adapter import LangfuseAdapter
+from idp_regression.platform.langfuse_adapter import (
+    _DOCUMENT_RECORD_REQUIRED_FIELDS,
+    LangfuseAdapter,
+)
 from idp_regression.platform.scoring import field_score_name, prompt_score_name, score_id
 from idp_regression.platform.types import DocumentRecord, RunMetadata, ScoreInput
 from tests.platform._type_pins import _required_fields, _str_fields, _StrFieldProbe
@@ -795,6 +799,44 @@ def test_a_non_dict_score_raises_typed_error_before_any_sdk_call() -> None:
 # DEBT-49 and `_type_pins._required_fields`'s docstring), not
 # hand-enumerated, so a fourth escape is structurally unavailable. The
 # seven anchor tests above are left untouched.
+
+
+def test_required_fields_extracts_presence_including_non_str_fields_from_a_probe_type() -> None:
+    """Required A (fix-round finding, /test TDD gate 2026-09-21): pins
+    `_required_fields` ITSELF against `_StrFieldProbe` -- a shape with a
+    required `int` (`count_field`) and a required `list[str]`
+    (`list_field`) alongside its `str` fields, so the presence
+    derivation is proven to include NON-str required fields, not just
+    the `str`-typed subset `_str_fields` returns. Before this test,
+    `_required_fields` had no probe-level pin at all -- only
+    `DocumentRecord` (whose one non-str required field is `scores`)
+    exercised it indirectly, and that indirection is exactly what let a
+    mutation collapsing the presence derivation onto the `str`-only
+    filter survive undetected (the identical trap DEBT-49's fix was
+    written to avoid)."""
+    assert _required_fields(_StrFieldProbe) == [
+        "count_field",
+        "field_a",
+        "field_b",
+        "field_c",
+        "list_field",
+    ]
+
+
+def test_production_drift_pin_document_record_required_fields_matches_the_type() -> None:
+    """Required A production drift pin (M13-analogue, fix-round finding):
+    `langfuse_adapter._DOCUMENT_RECORD_REQUIRED_FIELDS` (the module-level
+    constant `_require_record_shape`'s presence loop actually reads) must
+    equal the SAME sound derivation this test file already trusts for its
+    own parametrize below. Tautological today -- production and the type
+    genuinely agree -- but it fires the moment either the production
+    constant collapses onto a `str`-only derivation (the DEBT-49 trap,
+    reintroduced) or reverts to the unsound `sorted(DocumentRecord.
+    __required_keys__)` call DEBT-49 replaced, closing the two-independent-
+    copies gap between this file's `_required_fields` and production's
+    `_required_field_names` -- nothing asserted they agreed before this
+    pin existed."""
+    assert _DOCUMENT_RECORD_REQUIRED_FIELDS == _required_fields(DocumentRecord)
 
 
 @pytest.mark.parametrize("missing_key", _required_fields(DocumentRecord))
