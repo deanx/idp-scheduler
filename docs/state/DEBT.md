@@ -120,3 +120,64 @@ The convenience argument is real but secondary: all three edits are test-file-on
 ---
 
 > ⏰ **DEBT-45 — hard deadline recorded (QA-01 re-audit #4, Zangado).** `Secrets: ⚠️` has now stood for **two consecutive audits**. Ruling: acceptable for S-01.3 to stay Done **for one more audit, not indefinitely**, on the predicate that (a) the working tree is clean, (b) the historical hit is triaged and verified non-credential, and (c) the fingerprint entry is a **human** decision blocked on nobody but the human — *"and that is the part that must not drift."* **If DEBT-45 is still open at S-01.4's `/qa`, it is an S-01.4 Done-blocker.** S-01.3 is not the story whose Done depends on the secret gate's definition; **T-01.4.10 / S-01.4 is.** It is a five-line `.gitleaks.toml` fingerprint entry.
+
+---
+
+## DEBT-48 — repo-wide fail-open sweep (FO-1 … FO-9): nine gaps of the F-1 class, dispositioned
+
+**Status:** open (umbrella) · **Origin:** orchestrator-run read-only sweep, 2026-09-21, executed *concurrently* with FU-01.3-G · **Impact: High** (one member is the CI gate itself)
+
+**Why this exists.** F-1 (re-audit #3) was found by one lookup on a declared type. **DEBT-43** asks for that method to be generalised, and every pass until now had been scoped to one function or one directory — which is the very failure DEBT-40/43/47 describe. So the method was applied **once, systematically**: every declared structured type in `src/` (26 types across 23 files), every field, every trust-boundary crossing, classified VALIDATED / UNVALIDATED-fail-closed / **UNVALIDATED-fail-open**.
+
+**The answer was not zero.** Besides F-1 itself, **eight** further fail-open gaps. Two are the same *structural* mistake as F-1, verbatim: **FO-2** hand-enumerates `ScoreInput`'s keys one level *below* the code FU-01.3-G fixed, and **FO-7** is F-1's own defect at its upstream entry point.
+
+⚠️ **Provenance, stated honestly.** Rows below are the sweep agent's findings. **Independently verified by the orchestrator: FO-5** (read `gate.py:333-350`, confirmed the fall-through) and **FO-7's `item_id` leg** (confirmed `get_type_hints(DatasetItem)`'s `str` fields are exactly `['document_id','item_id']` and only the first is guarded). **The other seven are unverified by a second pair of eyes** and must be re-derived by whoever picks them up — do not treat this table as confirmed fact.
+
+| ID | Gap | Owning story | Disposition (DEBT-46 intake) |
+|---|---|---|---|
+| **FO-5** | `overall_gate` falls through to `"PASS"` for any verdict outside the six `VerdictLiteral` values (`classifier/gate.py:333-350`). Public API taking a caller-supplied map; the realistic path is **extension** — add a seventh verdict, forget the two tuples, and the CI gate goes green. **Fail-open toward PASS on the one function whose job is to be trusted.** | **S-01.1** | ✅ **CARDED** on S-01.1's ledger; **in implementation now**. Zangado independently sized it **Major** |
+| **FO-7** | `DatasetItem`: `document_id` ✅ fixed by FU-01.3-G; **`item_id` unguarded**; **`golden` unverified** | S-01.3 | ✅ **CARDED as FU-01.3-I**, in implementation now. ⚠️ The `golden` `isinstance(dict)` leg was **explicitly not probed** by the audit and is **not** claimed safe — re-derive before closing |
+| **FO-2** | `_require_record_shape` hand-enumerates `ScoreInput`'s `"id"`/`"name"` and **omits `"value"`** (declared `str`), four lines below the guard FU-01.3-G fixed. Non-str value → written to the span **and** POSTed with `dataType: CATEGORICAL` | S-01.3 | ⏭️ **CARD NEXT — highest priority of the remainder.** `_str_fields` applies verbatim to `ScoreInput`, so it is cheap now. Atchim instance #2 recommended sequencing it *immediately, not batched* — a reviewer standing at the fixed guard is looking straight at it |
+| **FO-1** | `RunMetadata.action_id`/`action_version`/`golden_version` (all `str`) unvalidated for presence **or** type; land as the run's metadata and `record_run` returns success. A missing key raises a bare `KeyError`, not the Protocol's promised typed error | S-01.3 / S-01.4 | ⏭️ **CARD.** INV-04 says every completed run records this metadata; a run with `action_version=None` is indistinguishable from a good one |
+| **FO-3** | `RunStatus = Literal["aborted","complete"]` enforced nowhere; `mark_run_status` POSTs any string verbatim as the marker value | S-01.3 | ⏭️ **CARD.** ADR-0004 #14's marker is what a reader keys on; an off-allowlist value reads as valid forever |
+| **FO-4** | `build_score_inputs(gate=...)` accepts anything for `Literal["PASS","FAIL"]`; goes verbatim into the `gate` score value — the per-document CI verdict | S-01.3 | ⏭️ **CARD.** Pairs naturally with FO-5: same Literal-unenforced class, the two ends of the same verdict |
+| **FO-8** | `ExperimentItem.dataset_id` (declared `Any`; the SDK's contract is a string id) from `body.get("id")` with no check → every item can carry `None`, producing an experiment with no dataset linkage while the structural check passes | S-01.3 | ⏭️ **CARD.** This is the ADR-0005 #9 failure mode (a run invisible/unlinked in the Experiments tab) reported as a clean run |
+| **FO-6** | `Dataset.expected_output_schema` returned verbatim, no `isinstance` — a platform body carrying a string/list yields a `Dataset` violating its own declared type | S-01.4 | ⏭️ **CARD (latent).** Consumer is the orchestrator's `schema_drift` comparison (ADR-0005 #8), which does not exist yet |
+| **FO-9** | `LANGFUSE_HOST` (and `IDP_REGION`/`IDP_ORG_ID`) have no scheme/format validation; credentials are sent to whatever host the env names. **Note the asymmetry:** the same module fails closed on a `LANGFUSE_BASE_URL` split-brain and both transports refuse cross-host redirects — the env path is the one unguarded leg of that same threat | S-01.4 / T-01.4.10 | ⏭️ **CARD** alongside **DEBT-45**; same threat family (a credential reaching a host the caller did not choose — REG-07/REG-10's class) |
+
+**Common shape, worth stating once:** six of the nine are **a declaration written and never enforced** — three `Literal`s (`RunStatus`, `gate`, `VerdictLiteral`) and several `str`s that exist only as type hints. `mypy` cannot catch them because the values arrive at runtime from an API, an env var, or a caller; the type is documentation that nothing reads. That is the generalisation of **DEBT-43**, and it is why the `_str_fields`/`get_args` mechanism matters beyond the one guard it was built for.
+
+**What the sweep also showed, and it is not all bad news:** `normalize()` (`adapter/normalize.py`) and the IDP OAuth/submit/poll path (`adapter/idp_client.py`) are **thoroughly validated** — every declared field checked, allowlists held as config rather than literals, timing config range-checked at construction *and* at env-parse. The gaps are oversight in one package, not an absence of rigour in the project.
+
+---
+
+## 🚧 DEBT-45 — BLOCKED ON A HUMAN DECISION (recorded 2026-09-21)
+
+**This is the only item in the current set that an agent cannot close.** It is not blocked on effort, analysis or sequencing — it is blocked on a person choosing a security posture. Recorded here in a state where that choice is one word.
+
+**The situation.** `gitleaks git .` reports **1** leak over full history: a **test-fixture literal** at `tests/platform/test_langfuse_adapter.py:305`, committed in `353549d`, renamed in the working tree by FU-01.3-D DoD (h) but **immutable in history**. Verified across three audits: it matches **no** value in the gitignored `.env`, and `.env` is untracked. **Not a credential; no rotation required.** The working tree and staged scans are clean.
+
+**Why it cannot be closed by working harder.** DoD (h)'s exit condition (*"re-run `gitleaks git .` and confirm 0 leaks"*) is **unsatisfiable without rewriting published history**. Atchim ruled **T-01.4.10 leg 1's blocking-full-history definition is itself the defect**, on four counts: its verdict depends on the past rather than the change under review; any historical finding is permanently un-closeable except by a destructive operation (*"a control whose only remedy is a destructive operation is not a control"*); it is O(history) on every PR; and it conflates *"does this PR introduce a secret"* with *"does history contain one"*, whose answer is **rotation**, not a red build.
+
+⚠️ **And the obvious fix does not work.** Zangado tested the recommended **merge-base scoping** and it **does not clear this branch**: merge-base is `d3d1444`, **129 commits back**, so `353549d` sits *inside this PR's own range*. A diff-scoped blocking gate goes red exactly like the full-history one. **The fingerprint entry is therefore load-bearing, not a nicety.**
+
+### The decision, with the mechanism already verified
+
+⚠️ **Correction to the earlier recommendation, found by dry-running it (orchestrator, 2026-09-21):** the proposed `.gitleaks.toml` `[allowlist] fingerprints = [...]` **fails to load** on gitleaks 8.30.1 — `"[[allowlists]] must contain at least one check for: commits, paths, regexes, or stopwords"`. Fingerprints are **not** a `.gitleaks.toml` feature in this version. **The working mechanism is a `.gitleaksignore` file**, tested end-to-end: full history → `no leaks found`, and `gitleaks protect --staged` → still armed. Had the earlier five-line recommendation been applied as written, the gate would have been silently broken rather than fixed.
+
+**Ready to apply — `.gitleaksignore` at the repo root:**
+```
+# DEBT-45 — one triaged historical test-fixture literal.
+# Committed in 353549d, renamed in the working tree by FU-01.3-D DoD (h)
+# but immutable in history. Verified NOT a credential: matches no value
+# in the gitignored .env, which is untracked. No rotation required.
+# A fingerprint pins exactly one commit x file x line x rule — it cannot
+# blind a future commit, another line, or the same line in a later commit.
+# DO NOT replace with a tests/ path allowlist.
+353549d18af0f2128e5323d104b42a5bf292fcb0:tests/platform/test_langfuse_adapter.py:generic-api-key:305
+```
+
+**Also needs deciding (T-01.4.10 leg 1's definition):** blocking gate scoped to **merge-base…HEAD** *plus* `gitleaks protect --staged` at pre-commit, with **full-history as a separate, non-blocking scheduled audit** against this triaged baseline. ⛔ **Never** a `paths = ['''tests/''']` allowlist — both reviewers were emphatic that it blinds the gate on the highest-risk file class in the repo, since a captured fixture is exactly how a real value gets committed by accident. ⛔ **No history rewriting.** Squash-merge is a side effect of a merge mode, **not a control** — it does not survive a cherry-pick, a fork, or a clone that already has `353549d`.
+
+### Deadline (Zangado, re-audit #4)
+`Secrets: ⚠️` has stood for **two consecutive audits**. Acceptable for S-01.3 to stay Done **for one more audit, not indefinitely**. **If DEBT-45 is still open at S-01.4's `/qa`, it is an S-01.4 Done-blocker** — S-01.3 is not the story whose Done depends on the secret gate's definition; **T-01.4.10 / S-01.4 is.**
