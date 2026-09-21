@@ -110,7 +110,7 @@ def _required_field_names(td: type) -> list[str]:
     ``str``-fields-only derivation. Collapsing the two into one loop
     would silently drop that presence check, which is exactly the "keep
     them separate" instruction this function exists to honour."""
-    hints = get_type_hints(td)
+    hints = get_type_hints(td, include_extras=True)
     return sorted(name for name, hint in hints.items() if get_origin(hint) is not NotRequired)
 
 
@@ -154,11 +154,22 @@ _SCORE_STR_FIELDS = _str_annotated_field_names(ScoreInput)
 #: diverge, correctly, the day one is added).
 _DOCUMENT_RECORD_REQUIRED_FIELDS = _required_field_names(DocumentRecord)
 
-#: FO-1 (DEBT-48): the `str`-obligated fields of ``RunMetadata`` -- computed
-#: ONCE, reused by ``_require_run_metadata_shape`` below. All three of
-#: ``RunMetadata``'s fields are plain ``str`` (no ``NotRequired`` member
-#: today), so this single derivation covers both presence and value type.
+#: FO-1 (DEBT-48): the `str`-obligated (VALUE-type) fields of
+#: ``RunMetadata`` -- computed ONCE, reused by
+#: ``_require_run_metadata_shape`` below for its VALUE-type loop only.
 _RUN_METADATA_STR_FIELDS = _str_annotated_field_names(RunMetadata)
+
+#: Required B (fix-round finding, MY-25): the SOUND presence derivation for
+#: ``RunMetadata`` -- computed ONCE, reused by
+#: ``_require_run_metadata_shape``'s PRESENCE loop below. Deliberately a
+#: SEPARATE derivation from ``_RUN_METADATA_STR_FIELDS`` even though both
+#: produce the same three names today (every ``RunMetadata`` field is
+#: currently plain ``str``) -- collapsing presence onto the `str`-only
+#: derivation is exactly the mutation (MY-25) that let a hypothetical
+#: required non-`str` field (e.g. ``attempt: int``) go unchecked for
+#: presence, the identical ``DocumentRecord.scores``-class trap DEBT-49
+#: fixed one guard over.
+_RUN_METADATA_REQUIRED_FIELDS = _required_field_names(RunMetadata)
 
 
 def _require_record_shape(record: DocumentRecord) -> None:
@@ -241,9 +252,14 @@ def _require_record_shape(record: DocumentRecord) -> None:
         # -- the identical hand-enumeration defect one level down. Now
         # derived from `_SCORE_STR_FIELDS` (the declared type, via
         # `_str_annotated_field_names`), covering presence AND value type
-        # for every `str`-obligated field in one pass -- a future scalar
-        # field on `ScoreInput` auto-generates its own check here, the
-        # same structural fix DoD (3) applied to `DocumentRecord`.
+        # for every `str`-obligated field in one pass -- a future
+        # `str`-annotated field on `ScoreInput` auto-generates its own
+        # check here, the same structural fix DoD (3) applied to
+        # `DocumentRecord`. (This single-loop presence+type combination is
+        # sound here only because every one of `ScoreInput`'s REQUIRED
+        # fields -- `id`/`name`/`value` -- is also `str`-annotated; a
+        # required non-`str` field would need the same two-derivation
+        # split `_require_run_metadata_shape` uses below.)
         if not isinstance(score, dict):
             raise ExperimentRecordFailedError(
                 f"record_run: a score for document_id={document_id!r} is not a dict "
@@ -276,13 +292,25 @@ def _require_run_metadata_shape(metadata: RunMetadata) -> None:
     records this metadata; a run with ``action_version=None`` was
     indistinguishable from a good one.
 
-    Same structural fix as ``_require_record_shape``: ``isinstance(dict,
-    ...)`` first (a ``str``'s ``in`` does substring semantics), then keys
-    derived from the DECLARED TYPE (``_RUN_METADATA_STR_FIELDS`` /
-    ``_str_annotated_field_names(RunMetadata)``) rather than hand-listed
-    -- a future scalar field on ``RunMetadata`` auto-generates its own
-    check here. Called at the top of ``record_run``, before any
-    subscript of ``metadata`` and before any SDK/HTTP call.
+    Required B (fix-round finding, MY-25): this used to derive BOTH
+    presence and value-type from ``_RUN_METADATA_STR_FIELDS`` /
+    ``_str_annotated_field_names(RunMetadata)`` in one loop -- sound only
+    by coincidence, because every ``RunMetadata`` field happens to be
+    ``str`` today. A required NON-``str`` field (e.g. a future
+    ``attempt: int``) would never appear in that ``str``-only derivation,
+    so its PRESENCE would go unchecked entirely -- the identical
+    ``DocumentRecord.scores`` trap ``_require_record_shape`` above is
+    already structured to avoid, via its own two-derivation split. Same
+    fix here, same structural reason: presence is derived from
+    ``_RUN_METADATA_REQUIRED_FIELDS`` (``_required_field_names(
+    RunMetadata)``, DEBT-49's sound derivation -- includes every required
+    field regardless of value type), and value type is checked
+    separately, only for the ``str``-obligated subset
+    (``_RUN_METADATA_STR_FIELDS`` / ``_str_annotated_field_names(
+    RunMetadata)``). ``isinstance(dict, ...)`` remains the guard's FIRST
+    statement (a ``str``'s ``in`` does substring semantics), same as
+    ``_require_record_shape``. Called at the top of ``record_run``,
+    before any subscript of ``metadata`` and before any SDK/HTTP call.
 
     INV-02: the message names the FIELD only, never the offending value.
     """
@@ -292,10 +320,20 @@ def _require_run_metadata_shape(metadata: RunMetadata) -> None:
     # subscript restriction doesn't apply (same cast pattern as the score
     # loop above).
     metadata_as_dict = cast(dict[str, Any], metadata)
+    for key in _RUN_METADATA_REQUIRED_FIELDS:
+        # PRESENCE only -- covers every required field, `str`-obligated or
+        # not (MY-25's fix: a required non-`str` field must be caught
+        # here even though it never reaches the value-type loop below).
+        if key not in metadata_as_dict:
+            raise ExperimentRecordFailedError(f"record_run: metadata is missing {key!r}")
     for key in _RUN_METADATA_STR_FIELDS:
-        if key not in metadata_as_dict or not isinstance(metadata_as_dict[key], str):
+        # VALUE TYPE only, for the `str`-obligated subset -- presence for
+        # these fields was already guaranteed by the loop above (every
+        # `str`-obligated `RunMetadata` field is also required today), so
+        # this subscript cannot raise `KeyError`.
+        if not isinstance(metadata_as_dict[key], str):
             raise ExperimentRecordFailedError(
-                f"record_run: metadata is missing or has a non-string {key!r}"
+                f"record_run: metadata has a non-string {key!r}"
             )
 
 
@@ -808,7 +846,14 @@ class LangfuseAdapter:
             )
         local_values = locals()
         for name, hint in get_type_hints(LangfuseAdapter.mark_run_status).items():
-            if hint is str and not isinstance(local_values.get(name), str):
+            # Suggestion (fix-round finding): `get_type_hints` includes the
+            # signature's `return` annotation -- today it resolves to
+            # `NoneType`, so `hint is str` already filters it out, but a
+            # future `-> str` on this signature would otherwise make
+            # `local_values.get("return")` resolve to `None` and raise
+            # unconditionally on every call. `name != "return"` guards
+            # against that regardless of the return annotation.
+            if name != "return" and hint is str and not isinstance(local_values.get(name), str):
                 # INV-02: name the parameter, never interpolate the value.
                 raise RunStatusWriteFailedError(f"mark_run_status: {name!r} must be a string")
 

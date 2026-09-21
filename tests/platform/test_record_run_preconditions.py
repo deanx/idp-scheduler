@@ -627,10 +627,11 @@ def test_m13_drift_pin_scoreinput_required_keys_is_unsound_today() -> None:
 
 @pytest.mark.parametrize("field_name", _str_fields(ScoreInput))
 def test_score_field_wrong_type_raises_typed_error_before_any_sdk_call(field_name: str) -> None:
-    """THE KILLING TEST for FO-2 (DEBT-48): parametrized over the
-    `str`-annotated fields of `typing.get_type_hints(ScoreInput)` -- NOT a
-    hand-written `["id", "name"]` pair -- so a future scalar field on
-    `ScoreInput` auto-generates its own wrong-type-value case here, the
+    """THE KILLING TEST for FO-2 (DEBT-48): parametrized over the VALUE-TYPE
+    derivation -- `_str_fields`, the `str`-annotated fields of
+    `typing.get_type_hints(ScoreInput)` -- NOT a hand-written `["id",
+    "name"]` pair -- so a future `str`-annotated field on `ScoreInput`
+    auto-generates its own wrong-type-value case here, the
     value-side twin of `test_record_field_wrong_type_raises_typed_error_
     before_any_sdk_call` above (which does the same for `DocumentRecord`).
     Before the fix this parametrize has exactly one RED leg (`value`): no
@@ -801,26 +802,60 @@ def test_a_non_dict_score_raises_typed_error_before_any_sdk_call() -> None:
 # seven anchor tests above are left untouched.
 
 
+_STR_FIELD_PROBE_REQUIRED_FIELDS = [
+    "count_field",
+    "field_a",
+    "field_b",
+    "field_c",
+    "list_field",
+]
+
+
 def test_required_fields_extracts_presence_including_non_str_fields_from_a_probe_type() -> None:
-    """Required A (fix-round finding, /test TDD gate 2026-09-21): pins
-    `_required_fields` ITSELF against `_StrFieldProbe` -- a shape with a
+    """Required A (fix-round finding, /test TDD gate 2026-09-21): pins the
+    TEST-SIDE `_required_fields` against `_StrFieldProbe` -- a shape with a
     required `int` (`count_field`) and a required `list[str]`
-    (`list_field`) alongside its `str` fields, so the presence
-    derivation is proven to include NON-str required fields, not just
-    the `str`-typed subset `_str_fields` returns. Before this test,
+    (`list_field`) alongside its `str` fields, so the presence derivation
+    is proven to include NON-str required fields, not just the
+    `str`-typed subset `_str_fields` returns. Before this test,
     `_required_fields` had no probe-level pin at all -- only
     `DocumentRecord` (whose one non-str required field is `scores`)
     exercised it indirectly, and that indirection is exactly what let a
     mutation collapsing the presence derivation onto the `str`-only
     filter survive undetected (the identical trap DEBT-49's fix was
-    written to avoid)."""
-    assert _required_fields(_StrFieldProbe) == [
-        "count_field",
-        "field_a",
-        "field_b",
-        "field_c",
-        "list_field",
-    ]
+    written to avoid). This is the TEST copy's own pin -- the PRODUCTION
+    copy gets its own probe pin right below, because `DocumentRecord`
+    alone (no `NotRequired` field today) cannot distinguish the sound
+    derivation from either `sorted(DocumentRecord.__required_keys__)`
+    (the pre-DEBT-49 revert) or a dropped `include_extras=True` -- both
+    produce a BYTE-IDENTICAL result to the sound derivation for
+    `DocumentRecord` specifically, a genuine equivalent-mutant trap that
+    only a shape carrying a `NotRequired` field (like this probe) can
+    expose."""
+    assert _required_fields(_StrFieldProbe) == _STR_FIELD_PROBE_REQUIRED_FIELDS
+
+
+def test_production_required_field_names_matches_the_sound_derivation_on_a_probe_type() -> None:
+    """Required A production probe pin (fix-round finding): calls
+    PRODUCTION's `_required_field_names` directly (not the precomputed
+    `_DOCUMENT_RECORD_REQUIRED_FIELDS` constant) against `_StrFieldProbe`.
+    This is the assertion that actually kills mutations (2) and (3) from
+    the fix-round finding -- reverting `_required_field_names`'s body to
+    `sorted(td.__required_keys__)`, or dropping its `include_extras=True`
+    -- neither of which the `DocumentRecord`-only drift pin below can
+    distinguish (verified: both mutations reproduce `DocumentRecord`'s
+    correct output byte-for-byte, since `DocumentRecord` has no
+    `NotRequired` field to mis-derive). `_StrFieldProbe.__required_keys__`
+    mis-derives `optional_field` as required (verified live:
+    `sorted(_StrFieldProbe.__required_keys__) == ['count_field',
+    'field_a', 'field_b', 'field_c', 'list_field', 'optional_field']`,
+    the same postponed-annotations unsoundness DEBT-49 documents for
+    `ScoreInput.comment`) -- exactly the shape that makes both reverts
+    observable."""
+    assert (
+        _langfuse_adapter_module._required_field_names(_StrFieldProbe)
+        == _STR_FIELD_PROBE_REQUIRED_FIELDS
+    )
 
 
 def test_production_drift_pin_document_record_required_fields_matches_the_type() -> None:
@@ -836,7 +871,7 @@ def test_production_drift_pin_document_record_required_fields_matches_the_type()
     copies gap between this file's `_required_fields` and production's
     `_required_field_names` -- nothing asserted they agreed before this
     pin existed."""
-    assert _DOCUMENT_RECORD_REQUIRED_FIELDS == _required_fields(DocumentRecord)
+    assert _required_fields(DocumentRecord) == _DOCUMENT_RECORD_REQUIRED_FIELDS
 
 
 @pytest.mark.parametrize("missing_key", _required_fields(DocumentRecord))
@@ -1050,12 +1085,13 @@ def test_str_fields_of_document_record_is_document_id_and_item_id() -> None:
 @pytest.mark.parametrize("field_name", _str_fields(DocumentRecord))
 def test_record_field_wrong_type_raises_typed_error_before_any_sdk_call(field_name: str) -> None:
     """THE KILLING TEST for REG-09's reopened row (QA-01 re-audit #3 F-1).
-    Parametrized over the `str`-annotated fields of
-    `typing.get_type_hints(DocumentRecord)` -- NOT a hand-written
-    `item_id`/`document_id` pair -- so a future scalar field on
-    DocumentRecord auto-generates its own wrong-type-value case here, the
-    value-side twin of `test_record_missing_any_required_key_raises_...`
-    above (which does the same for PRESENCE over `__required_keys__`).
+    Parametrized over the VALUE-TYPE derivation -- `_str_fields`, the
+    `str`-annotated fields of `typing.get_type_hints(DocumentRecord)` --
+    NOT a hand-written `item_id`/`document_id` pair -- so a future
+    `str`-annotated field on DocumentRecord auto-generates its own
+    wrong-type-value case here, the value-side twin of
+    `test_record_missing_any_required_key_raises_...` above (which does
+    the same for PRESENCE, over the sound `_required_fields` derivation).
     Before the fix this parametrize has exactly one RED leg
     (`document_id`): no raise, `run_experiment_calls == 1`,
     `http_client.calls` non-empty -- the fail-open write QA-01 found.
@@ -1168,15 +1204,24 @@ def test_metadata_missing_any_str_field_raises_typed_error_before_any_sdk_call()
     _assert_zero_platform_writes(http_client, tracing_client)
 
 
-@pytest.mark.parametrize("missing_key", _str_fields(RunMetadata))
+@pytest.mark.parametrize("missing_key", _required_fields(RunMetadata))
 def test_metadata_missing_any_field_raises_typed_error_parametrized(missing_key: str) -> None:
-    """THE KILLING TEST for FO-1: parametrized over `RunMetadata`'s
-    `str`-annotated fields (`_str_fields`, DEBT-40/43/47's mechanism) --
-    NOT a hand-written `["action_id", "action_version",
-    "golden_version"]` list -- so a future scalar field on `RunMetadata`
-    auto-generates its own missing-key case here. Before the fix this
-    parametrize is RED on all three legs with an untyped `KeyError`, not
-    `ExperimentRecordFailedError`."""
+    """THE KILLING TEST for FO-1: parametrized over `RunMetadata`'s SOUND
+    presence derivation (`_required_fields`, DEBT-49's mechanism -- the
+    same one `_require_run_metadata_shape`'s PRESENCE loop now reads via
+    production's `_required_field_names`) -- NOT a hand-written
+    `["action_id", "action_version", "golden_version"]` list -- so a
+    future required field on `RunMetadata`, `str`-annotated or not,
+    auto-generates its own missing-key case here. Before the FO-1 fix
+    this parametrize is RED on all three legs with an untyped `KeyError`,
+    not `ExperimentRecordFailedError`. Required B (fix-round finding):
+    this used to be parametrized over `_str_fields(RunMetadata)` --
+    identical today because every `RunMetadata` field happens to be
+    `str`, but that coincidence is exactly what let `_require_run_
+    metadata_shape` check presence off the `str`-only derivation
+    (`_RUN_METADATA_STR_FIELDS`) and silently miss a future non-`str`
+    required field (MY-25, `attempt: int`); `_required_fields` is the
+    presence-correct derivation regardless of a field's value type."""
     adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
     records: list[DocumentRecord] = [_record("item-1", "doc-0")]
     full_metadata: dict[str, Any] = {
@@ -1197,6 +1242,48 @@ def test_metadata_missing_any_field_raises_typed_error_parametrized(missing_key:
 
     assert missing_key in str(excinfo.value)
     _assert_zero_platform_writes(http_client, tracing_client)
+
+
+def test_require_run_metadata_shape_checks_presence_of_a_non_str_required_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MY-25 regression pin (Required B, fix-round finding): a required
+    NON-`str` field's PRESENCE must still be checked, even though
+    `_require_run_metadata_shape`'s VALUE-type loop only ever looks at
+    `str`-annotated fields. `RunMetadata` has no non-`str` field today,
+    so this pins the MECHANISM directly by monkeypatching production's
+    presence-derivation constant (`_RUN_METADATA_REQUIRED_FIELDS`) to
+    include a simulated `attempt` field that `_RUN_METADATA_STR_FIELDS`
+    does NOT carry -- exactly the shape a real `attempt: int` addition to
+    `RunMetadata` would produce. Before the Required B fix,
+    `_require_run_metadata_shape` derived presence from `_RUN_METADATA_
+    STR_FIELDS` alone (FO-1's original, `str`-scoped loop), so this
+    simulated non-`str` field's absence sailed through with no raise --
+    the identical `DocumentRecord.scores`-class trap `_require_record_
+    shape` was already fixed against (DEBT-49), reproduced one guard
+    over. Calls the REAL production function directly (not through
+    `record_run`), so this is white-box by design -- the point is to pin
+    `_require_run_metadata_shape`'s internal presence source, not observe
+    it indirectly through a `RunMetadata` shape that cannot carry the
+    case."""
+    monkeypatch.setattr(
+        _langfuse_adapter_module,
+        "_RUN_METADATA_REQUIRED_FIELDS",
+        sorted([*_langfuse_adapter_module._RUN_METADATA_STR_FIELDS, "attempt"]),
+    )
+    metadata_missing_attempt: dict[str, Any] = {
+        "action_id": "a",
+        "action_version": "v",
+        "golden_version": "g",
+        # "attempt" deliberately absent -- simulates a required non-str
+        # field that only the PRESENCE derivation (not the str-value
+        # derivation) is aware of.
+    }
+
+    with pytest.raises(ExperimentRecordFailedError, match="attempt"):
+        _langfuse_adapter_module._require_run_metadata_shape(
+            cast(RunMetadata, metadata_missing_attempt)
+        )
 
 
 @pytest.mark.parametrize("field_name", _str_fields(RunMetadata))

@@ -455,11 +455,12 @@ def test_str_fields_of_dataset_item_is_document_id_and_item_id() -> None:
 def test_get_dataset_field_wrong_type_raises_typed_error_not_a_silent_pass_through(
     field_name: str,
 ) -> None:
-    """THE KILLING TEST (FU-01.3-I load-bearing bullet): parametrized
-    over the `str`-annotated fields of `typing.get_type_hints(DatasetItem)`
-    -- NOT a hand-written `item_id`/`document_id` pair -- so a future
-    scalar field on `DatasetItem` auto-generates its own wrong-type-value
-    case here. Mirrors `test_record_field_wrong_type_raises_typed_error_
+    """THE KILLING TEST (FU-01.3-I load-bearing bullet): parametrized over
+    the VALUE-TYPE derivation -- `_str_fields`, the `str`-annotated fields
+    of `typing.get_type_hints(DatasetItem)` -- NOT a hand-written
+    `item_id`/`document_id` pair -- so a future `str`-annotated field on
+    `DatasetItem` auto-generates its own wrong-type-value case here.
+    Mirrors `test_record_field_wrong_type_raises_typed_error_
     before_any_sdk_call` in `test_record_run_preconditions.py`, the same
     generalization applied to the OTHER trust boundary. Before FU-01.3-I
     this parametrize has exactly one RED leg (`item_id`): no raise, an

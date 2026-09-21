@@ -245,3 +245,40 @@ The real risk is not the ~1 point of double-counting. It is the **opposite** out
 
 > ### 🧾 Estimation-pass bookkeeping note (2026-09-21)
 > The S-01.4/S-01.6 **inline** `est: TBD` markers were stale, not missing — the Estimates table at `SPEC-01:578` has carried per-task numbers since 2026-09-19. **The orchestrator misread the story body as authoritative and told the user the last MVP story had never been estimated. It had.** Recorded because it is the same *scope-narrower-than-the-class* error as [[DEBT-40]]/[[DEBT-43]]/[[DEBT-47]] — the instrument (reading the story body) was narrower than the class (the whole spec file), and a correct answer inside that scope read as a complete one. ⚠️ **The same drift remains on S-01.1/S-01.2/S-01.3's inline markers (37 of them)** — harmless now that those stories are Done, but it is what made the misreading plausible. Sync them when any of those stories is next touched.
+
+---
+
+## 📌 BACKLOG-01 — Automatic trigger: fire validation after a new prompt executes at IDP
+
+**Status:** open, **investigation carded (T-01.6.6), nothing designed or built** · **Origin:** user requirement, 2026-09-21 · **Assumption:** [[ASM-06]] · **Scope: Epic-level, post-UC-01 — explicitly NOT MVP**
+
+> *"We need to find a way to trigger the validation after a new prompt completes its execution at IDP."*
+
+**The gap, stated without softening.** Today nothing triggers anything. The system is a **pull-based batch runner** started by a human or by CI on a prompt-change PR. There are **no webhooks, events or subscriptions anywhere in the design** — verified by grep across `docs/adr/` and `docs/design/`, 2026-09-21. **So the safety net only catches prompt changes that go through a PR.** A version published and executed directly in Anypoint is invisible.
+
+**What is NOT the gap — worth stating, because it is the intuitive worry and it is already solved.** There is no latency or hand-off problem between IDP and the scoring half. `IDPClient.extract()` is `submit` → `poll until terminal status`; the moment it returns, `classify()` runs on that output **in the same call stack**, then `overall_gate()`, then `build_score_inputs()`, then one batched `record_run()`. The numbers are produced milliseconds after the execution completes. The coupling is **temporal, not architectural** — no callback from IDP is needed for *that* half. The only missing piece there is the loop itself, which is **S-01.4** (`orchestration/` contains only `__init__.py`), already designed and estimated at 49 pts.
+
+**So the ask reduces to exactly one thing: what starts `run_eval`.**
+
+**Half the mechanism already exists.** Every run records `action_version` into `RunMetadata` (**INV-04**), so *"what did we last certify?"* is already a query against Langfuse. Only *"what is published / what just ran?"* is missing — and that needs an Anypoint **management-plane** API this app has never called. The single endpoint it knows is on `idp-rt.{region}` (the **runtime** plane). **The shape and even the existence of a listing or notification API are unverified and were deliberately not guessed at.**
+
+**Investigation — carded as `T-01.6.6`, discovery only, inside S-01.6's existing live-access window:**
+1. Is there a management API that **lists an action's versions**, and what does it return (ids, timestamps, published/draft flag)?
+2. Does submitting support a **floating/`latest`** version? *(If yes, detection is nearly free: submit one document, read back which version answered, compare to the last certified `action_version` — no listing API required.)*
+3. Does a published version carry a **timestamp or monotonic ordering** comparable to a previously recorded one?
+4. **Is there any push mechanism at all** — Anypoint notifications, CloudHub/Runtime Manager alerts, an event stream? *(If a push exists, it beats all polling designs and changes the answer entirely.)*
+
+**⚠️ The cost asymmetry that decides the design.** A listing call is **one cheap metadata request**; a regression run costs **N document extractions** of real IDP quota and money. "Just run it nightly" therefore detects with the expensive instrument what a metadata call would catch cheaply — *unless* listing does not exist, in which case a low-frequency scheduled run may genuinely be the only option. The answers decide between:
+
+| Outcome | Design |
+|---|---|
+| Push mechanism exists | **Event-driven** — strictly best, no polling, no quota burn |
+| Listing API exists | **Cheap metadata watcher** — poll versions, run the regression only on change |
+| Floating `latest` exists | **Near-free detection** — one probe extraction reveals the live version |
+| None of the above | **Scheduled full run**, low frequency, priced against quota — or stay with CI-on-PR |
+
+**⚠️ Ambiguity the user must resolve before any design work.** *"After a new prompt completes its execution"* reads two ways, and they are **different products**:
+- **(a) A new action *version* was published and run** → re-run the golden set against it. **This product.** The watcher above serves it.
+- **(b) A *production document* was extracted** → judge that output live. **NOT this product.** The classifier compares an extraction against a **known-good golden for that specific document**; an arbitrary production document has none, so there is nothing to compare against. That is drift/confidence monitoring — a different Epic with a different data model. Building (b) is not an extension of this system; it is a new one.
+
+**⚠️ Scope fence.** Nothing here is MVP. The published IDP action id is already the **only** critical path; this must not become a second one. `T-01.6.6` adds *questions* answerable while the org is already open — it adds no build work and does not extend S-01.6's half-day time-box.
