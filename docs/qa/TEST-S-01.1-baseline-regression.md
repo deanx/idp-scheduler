@@ -2,12 +2,35 @@
 
 **Status:** ✅ PASSED
 **Source:** /test gap-fill (Atchim TDD gate)
-**Date:** 2026-09-18
-**Commit:** 1d50e978b4f94e76d123577b04789bdfb40ae1f4  <!-- HEAD of feat/S-01.1-baseline-regression after the /test gap-fill + /implement Scenario-B fix. Stamp file is a working-tree docs artifact (uncommitted, per the established docs/state pattern — the state log + this stamp are the source of truth). -->
+**Date:** 2026-09-21 (re-stamp — FO-5)
+**Commit (reviewed code):** `6d525ef` (FO-5). **Stamp commit:** `ab0734d`+ (this file). ⚠️ `/qa` freshness: git corroboration returns the stamp commit because `docs/qa/` is in the `Files:` set — expected, not stale; a stamp cannot record its own SHA. Falsifiable check: `git diff --stat 6d525ef HEAD -- src/idp_regression/classifier/` must be empty. Original stamp commit, superseded: 1d50e978b4f94e76d123577b04789bdfb40ae1f4  <!-- HEAD of feat/S-01.1-baseline-regression after the /test gap-fill + /implement Scenario-B fix. Stamp file is a working-tree docs artifact (uncommitted, per the established docs/state pattern — the state log + this stamp are the source of truth). -->
 **Author:** alex@divinocosta.com.br  <!-- solo mode — raw git config user.email -->
-**Atchim TDD gate:** PASSED
+**Atchim TDD gate:** PASSED (2026-09-21, Opus 5, fresh instance per DEBT-44 — it had seen none of these diffs). **0 findings against S-01.1.**
+
+**Scope of this re-stamp — FO-5, `6d525ef`.** `overall_gate` (`classifier/gate.py`) fell through to `return "PASS"` for any verdict outside the six `VerdictLiteral` values, at **both** the top-level and the per-row site inside a `detail` entry. Not reachable via `classify()` (pure, emits only the six) but `overall_gate` is **public API** taking a caller-supplied `VerdictMap`, and the realistic path is extension — add a seventh verdict, forget the two tuples, and the CI gate goes green on it. **Fail-open toward PASS on the one function whose entire job is to be trusted.**
+
+**RED reproduced independently, in the claimed shape.** The reviewer's first attempt via pytest was inconclusive (the module fails to *collect* pre-fix, which is red but says nothing about behaviour), so it drove the pre-fix function directly:
+```
+top-level unknown verdict  -> RETURNED: 'PASS'   <-- NO RAISE
+unknown row verdict        -> RETURNED: 'PASS'   <-- NO RAISE
+control (wrong_value,crit) -> RETURNED: 'FAIL'
+```
+**Silent `"PASS"` at both sites, with a control proving the function was otherwise working** — a true fail-open, not a broken fixture. Post-fix both raise `MalformedActualError`, and INV-02 holds: neither `match_key` nor the value appears in the message.
+
+**The drift pin survived adversarial falsification.** The reviewer built a four-scenario matrix specifically to break it:
+```
+GREEN | A baseline
+GREEN | B production hand-written, Literal unchanged   [honest negative]
+GREEN | C Literal extended, production DERIVED
+RED   | D Literal extended + production hand-written   [pin fires]
+```
+Its note: *"this is the first stamp cycle in this story where the headline mechanism claim survived my attempt to falsify it."* The valid set derives from `frozenset(get_args(VerdictLiteral))` — not a hand-written tuple (DEBT-40/43/47).
+
+**Accepted honest-negative, documented in the test's own words:** replacing the derived set with a today-equivalent literal survives, and `test_gate.py:211` says so explicitly. Do not let anyone claim it is covered.
 **Independence:** ✅ structural (different models) — implementer Dengoso (sonnet) reviewed by Atchim (opus). SPEC-01 risk level is **high** (driven by ADR-0001/0002/0004), so the high-risk Done gate requires structural reviewer independence; sonnet ≠ opus satisfies it. S-01.1 itself depends only on the Low-risk ADR-0003.
-**Static:** ✅ clean — `uv run mypy src/idp_regression/classifier tests/classifier` (strict) → 0 issues / 11 files; `uv run ruff check` → All checks passed. Pyright LSP `reportMissingImports` is a known src-path config gap (DEBT-06), not the gate of record — mypy is the configured static-analysis gate per CLAUDE.md `## Tooling`.
+**Static:** ✅ clean (2026-09-21 re-verification) — `uv run mypy src/idp_regression/classifier tests/classifier` → 0 issues / **11 files**; `ruff check .` → clean; `tests/classifier` → **103 passed**. ⚠️ **Rigor profile changed to `prototype` on 2026-09-21** (user decision, `ab0734d`) — **this stamp predates nothing and waives nothing**: `Risk level: high` still requires a `/test` stamp because `/qa` reads risk from the SPEC header, not the profile.
+
+**Superseded original static line:** `uv run mypy src/idp_regression/classifier tests/classifier` (strict) → 0 issues / 11 files; `uv run ruff check` → All checks passed. Pyright LSP `reportMissingImports` is a known src-path config gap (DEBT-06), not the gate of record — mypy is the configured static-analysis gate per CLAUDE.md `## Tooling`.
 
 ## Files (Dengoso's record — repo-relative, git-independent)
 src/idp_regression/classifier/__init__.py, src/idp_regression/classifier/types.py, src/idp_regression/classifier/canonical.py, src/idp_regression/classifier/gate.py, tests/classifier/test_classify.py, tests/classifier/test_gate.py, tests/classifier/test_tables.py, tests/classifier/test_validation.py, tests/classifier/test_edge_matrix.py, tests/classifier/test_classify_contract.py, tests/classifier/test_performance.py, pyproject.toml (+pytest-benchmark dev dep, mypy/ruff/pytest config), uv.lock (pytest-benchmark pin)
@@ -92,7 +115,8 @@ Branch `feat/S-01.1-baseline-regression`. ADR-0003 is risk:Low; the SPEC-01 DoD 
 - **DEBT-10 (new, from /test Atchim)** — prompts-vs-fields `answer`-presence asymmetry: actual fields/table cells require `value` present, but actual prompts require only a dict (not `answer`). This is intentional (a missing `answer` → `missing` verdict is valid), but if the team wants strict golden/actual symmetry on prompts it's a separate behavior-change story. Dunga to track.
 - **DEBT-11 (new, from /test Atchim)** — `tests/classifier/test_performance.py:47` comment says "half the rows match, half are new (exercise match + new_line)" but `_build_actual` makes all 500 rows match (no new_line path under benchmark). Stale comment; the perf gate is still validly measured. Update the comment or split rows half-and-half.
 - **cosmetic** — test_validation.py missing trailing newline (Atchim suggestion, ruff doesn't enforce).
-- **gitleaks** binary not installed locally — recorded as tool-absent (the classifier is pure with no secret surface; hygiene-only). Flag to Mestre if a real gitleaks gate is required before `/qa`.
+- ~~**gitleaks** binary not installed locally — recorded as tool-absent~~ ⚠️ **STALE, corrected 2026-09-21.** `gitleaks 8.30.1` **is** installed (confirmed by the user's own `brew` output and by the independent gate, which flagged this note as out of date). Current state: `gitleaks git .` is **clean** as of `ee9770e`, which added a `.gitleaksignore` fingerprint baselining the one triaged historical test-fixture hit at `353549d` (**DEBT-45**, verified not a credential across four audits). The detector was proven **still armed** after that entry by planting a secret of the same shape and confirming it is caught. The remaining work is not the tool but the **gate definition** — T-01.4.10 leg 1 must move to merge-base scope with full history as a scheduled non-blocking audit, because merge-base scoping alone does **not** clear this branch.
 
 ## History
+- `/test gap-fill (Atchim TDD gate)` on 2026-09-21 at `ab0734d`: ✅ **PASSED** — re-stamp after **FO-5** (`6d525ef`) closed the `overall_gate` fail-open. Gated by a **fresh instance** (DEBT-44). Previous stamp was stale from 2026-09-18: `classifier/gate.py` changed and nothing re-stamped it, so S-01.1 sat marked Done with no backing stamp until this one.
 - `/implement (Atchim code review TDD gate)` on 2026-09-18 at `f90a0915a27495e10f946de5eceeb234678d2d3d`: ✅ PASSED — the original S-01.1 /implement stamp (Atchim 2-round review, 76 tests, structural sonnet≠opus, static clean). Superseded by this /test stamp after /test found the prompt-level N22 gap (Scenario B) and /implement fixed it (commit 1d50e978). The /qa rigor gate blocked on the /implement-sourced stamp (high-risk spec requires a /test-sourced stamp); this stamp resolves that.
