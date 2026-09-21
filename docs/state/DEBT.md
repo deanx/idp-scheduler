@@ -316,3 +316,55 @@ The claim came from an estimation pass inferring shared ownership from adjacent 
 **History deliberately NOT rewritten.** The branch's commits are wrong in their *messages*, not in their *content* — the final tree is correct (559 passed, `include_extras=True` restored, pins in place). Rewriting published history to fix a message is the destructive remedy this project already rejected for DEBT-45's gitleaks hit, and the same reasoning applies. This row is the record; the commits stay.
 
 🔗 Sibling of [[DEBT-46]] (a routed item with no owner) and [[DEBT-51]] (a duty with two owners). All three are *bookkeeping that diverged from reality* — and this one is the sharpest, because the divergence was introduced by the person writing the record.
+
+---
+
+## 🔴 DEBT-53 — `NotRequired[str]` is conflated with required `str`: DEBT-49's landmine, inside DEBT-49's own fix
+
+**Status:** open, **latent — no current field triggers it** · **Origin:** QA audit F-2, 2026-09-21 (Zangado) · **Verified independently by the orchestrator** · **Impact: High when it fires**
+
+**Measured**, not inferred:
+```python
+class Probe(TypedDict):
+    a: str
+    b: NotRequired[str]        # optional
+    c: NotRequired[str | None]
+    d: int
+
+_str_annotated_field_names(Probe) -> ['a', 'b']   # ⚠️ 'b' wrongly included
+```
+`_str_annotated_field_names` (`langfuse_adapter.py`) and its test twin `_str_fields` (`tests/platform/_type_pins.py`) call `get_type_hints(td)` **without `include_extras=True`**, so `NotRequired[str]` collapses to plain `str` and is treated as a **required** obligation.
+
+**Two consumers conflate that list with presence:**
+- `_require_record_shape`'s score loop — a future `NotRequired[str]` on `ScoreInput` makes the guard **reject every score that legitimately omits it.** That is **DEBT-49's "live landmine" shape verbatim**, reproduced *inside the fix written to eliminate it*.
+- `_require_run_metadata_shape`'s value loop subscripts unguarded — a future `NotRequired[str]` on `RunMetadata` escapes as a bare **`KeyError`** (REG-09's untyped-escape family).
+
+**Why nothing fires today, and why that is not reassuring.** `ScoreInput.comment` is `NotRequired[str | None]`, which resolves to `str | None` — not `str` — so it is excluded **by luck, not by design**. The moment anyone writes `NotRequired[str]` (no `| None`) on either type, the guard breaks.
+
+**Seventh overclaim, in production source:** the docstring claiming this derivation *"sidesteps that bug entirely"* is false. It sidesteps it only for the annotation shapes that happen to exist right now.
+
+**Fix (with F-5 folded in):** derive with `include_extras=True`; treat `get_origin(hint) is NotRequired` as **optional-typed** (type-check only *if present*); split the score loop the way the metadata loop now is; pin it with a probe carrying a **`NotRequired[str]`** field driven through a shared `_require_shape(td, value)` — the debt the stamp already carries. Also **F-5**: `mark_run_status` hand-writes `status: Literal["aborted","complete"]` four lines under a comment saying "never hand-written", while `_VALID_RUN_STATUSES` derives from `types.RunStatus`. One-token fix. **Atchim ruling: widen REG-09.**
+
+⚠️ **This is the sixth member of the DEBT-40/43/47/49/52 family, and the most pointed:** the previous record was "fixed one guard, reintroduced it one guard over." This one is *fixed the instrument, and the replacement instrument has the same flaw on a different axis.*
+
+---
+
+## DEBT-54 — register lag: DEBT-43 still prescribes the unsound instrument
+
+**Status:** open (docs) · **Origin:** QA audit F-3, 2026-09-21 · **Impact: Med — the written rule points the next guard author at the broken tool**
+
+**DEBT-49's row still reads `Status: open`** with follow-ups 1–3 outstanding. Items **1** (`8455a39`) and **3** (`test_m13_drift_pin_scoreinput_required_keys_is_unsound_today`) are **done**. **Item 2 is genuinely open, and it is the one that matters:** **DEBT-43's rule text still prescribes *"presence from `__required_keys__`"*** — the derivation **proven unsound** by DEBT-49. Until amended, the written rule sends the next guard author to the instrument this session spent the day proving broken.
+
+Also lagging: **DEBT-48's FO-7 row** says "Third leg now confirmed open … CARD as the third leg" while the sweep-status block says all three closed; **FO-2's row** says "CLOSED" and "⏭️ CARD NEXT" in the same cell; **`docs/qa/NFR-01.md:4`** still says `Rigor profile: standard`.
+
+---
+
+## DEBT-55 — the `prototype` profile has no matrix, so "recorded, never dropped" is unenforceable
+
+**Status:** open (process) · **Origin:** QA audit F-6, 2026-09-21 · **Impact: Med**
+
+`CLAUDE.md ## Rigor` names the profile but **defines no matrix** of what `prototype` turns off. Without one the profile is a label: the invariant *"every gate the profile turns off must be recorded"* cannot be applied mechanically, because nothing states which gates those are.
+
+**The auditor's recommendation, worth taking:** write the matrix, **plus two per-path overrides**, because a project-wide profile that flattens the product's own gate to the same rigor as a docstring is the wrong shape for a product whose value is being a gate:
+1. **The verdict path runs at `full` on every change** — `classifier/gate.py` (`overall_gate`) and `platform/scoring.py` (`build_score_inputs`'s gate value): fresh-instance stamp with mutation, never a skipped re-gate.
+2. **A fix round that touches `src/` never qualifies for `re-gate skipped`, at any profile.** (F-1 was the first casualty of the missing rule, within hours of the profile change.)

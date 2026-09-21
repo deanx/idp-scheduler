@@ -3,7 +3,7 @@
 **Status:** ✅ PASSED
 **Source:** /test gap-fill (Atchim TDD gate)
 **Date:** 2026-09-21 (re-stamp #4 — the FO sweep + DEBT-49)
-**Commit (reviewed code):** `ab0734d`. ⚠️ `/qa` freshness: corroboration returns the stamp commit itself because `docs/qa/` and `docs/state/` are in the `Files:` set — expected, not stale. Falsifiable check: `git diff --stat ab0734d HEAD -- src/` must be empty.
+**Commit (reviewed code):** `8afeb7d` — the tree the gate (`ac877e3`) actually reviewed. ⚠️ **CORRECTED 2026-09-21 after QA F-1: this field originally read `ab0734d`, which was wrong** — `ab0734d` includes the un-gated R-1/R-2 round *and* the rigor-profile change. **F-1's other half is false and is recorded so it does not propagate:** it claimed the un-gated round changed production logic, anchoring on `8455a39` as the last gated state. Verified: the `src` changes it points at arrived in `dd3ad51`/`b56f105`, both **ancestors of `8afeb7d`**, so the gate *did* review them; and `git diff --stat 8afeb7d HEAD -- src/` is **empty**, confirming the un-gated round was genuinely tests-only. ⚠️ `/qa` freshness: corroboration returns the stamp commit itself because `docs/qa/` and `docs/state/` are in the `Files:` set — expected, not stale. Falsifiable check: `git diff --stat ab0734d HEAD -- src/` must be empty.
 **Author:** alex@divinocosta.com.br
 **Scope:** the fail-open sweep and its fallout — `afc3331` (FO-4), `139b965` (FO-2 + FO-7 third leg), `8455a39` (DEBT-49 + FO-1 + FO-3 + FO-8), plus two Required fix rounds.
 
