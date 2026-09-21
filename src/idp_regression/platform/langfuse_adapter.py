@@ -889,6 +889,35 @@ class LangfuseAdapter:
             raise RunStatusWriteFailedError(f"mark_run_status failed with HTTP {resp_status}")
 
 
+def _validate_host_url(var_name: str, value: str) -> None:
+    """FO-9 (DEBT-48) -- fail closed on a malformed/unscoped host env var,
+    before it reaches either transport. Same threat family as the
+    LANGFUSE_BASE_URL split-brain guard and both transports' cross-host
+    redirect refusal: a credential reaching a host the caller did not
+    choose (REG-07/REG-10). Requires an ``http``/``https`` scheme, a
+    non-empty host component, and NO embedded userinfo (a host string can
+    itself carry a credential, e.g. ``https://user:pass@host`` -- a prior
+    probe confirmed that exact shape reaches this path).
+
+    INV-02: the error names ``var_name`` only, never ``value`` -- a
+    malformed host can be malformed *because* it embeds a credential.
+    """
+    parsed = urllib.parse.urlsplit(value)
+    is_valid = (
+        parsed.scheme in ("http", "https")
+        and bool(parsed.hostname)
+        and parsed.username is None
+        and parsed.password is None
+    )
+    if not is_valid:
+        raise PlatformConfigurationError(
+            f"make_platform: {var_name} is not a well-formed http(s) URL -- "
+            "refusing to send credentials to it. It must have an http:// or "
+            "https:// scheme, a non-empty host, and no embedded userinfo "
+            f"(credentials do not belong in {var_name})."
+        )
+
+
 def make_platform() -> PlatformAdapter:
     """Factory reading ``PLATFORM`` from env (ADR-0001). Assumes the caller
     already called ``load_dotenv()`` (INV-05 — this module never does).
@@ -902,6 +931,7 @@ def make_platform() -> PlatformAdapter:
     if platform != "langfuse":
         raise ValueError(f"unsupported PLATFORM: {platform!r}")
     host = os.environ["LANGFUSE_HOST"]
+    _validate_host_url("LANGFUSE_HOST", host)
     public_key = os.environ["LANGFUSE_PUBLIC_KEY"]
     secret_key = os.environ["LANGFUSE_SECRET_KEY"]
 

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# T-01.4.10 (DEBT-45) leg 2 -- blocking, client-side, pre-commit.
+#
+# Scans exactly what is about to be committed (the staged index), not
+# history and not the working tree. Installed via
+# scripts/install-git-hooks.sh, which points core.hooksPath at this
+# directory. The .gitleaksignore baseline (one triaged fixture-literal
+# fingerprint, DEBT-45) applies here too by gitleaks' own default.
+#
+# ⛔ Do not add a `paths` allowlist for tests/ to any gitleaks config used
+# by this hook -- see .gitleaksignore's header for why.
+set -euo pipefail
+
+if ! command -v gitleaks > /dev/null 2>&1; then
+    echo "pre-commit: gitleaks not found on PATH -- install it (e.g. 'brew install gitleaks')" >&2
+    echo "pre-commit: refusing to commit without the secret-scan gate" >&2
+    exit 1
+fi
+
+gitleaks git --staged . --no-banner --redact

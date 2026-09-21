@@ -737,6 +737,97 @@ def test_make_platform_raises_when_langfuse_base_url_disagrees_with_langfuse_hos
     assert "elsewhere.invalid" not in message
 
 
+# --- FO-9 (DEBT-48) -- LANGFUSE_HOST has no scheme/format validation, so
+# credentials are sent to whatever host the env names. The module already
+# fails closed on the LANGFUSE_BASE_URL/LANGFUSE_HOST split-brain above,
+# and both transports (raw-REST UrllibHttpClient and the langfuse SDK's
+# own client) refuse cross-host redirects -- LANGFUSE_HOST itself was the
+# one unguarded leg of that same threat (REG-07/REG-10's family: a
+# credential reaching a host the caller did not choose). INV-02 applies
+# here too: a malformed LANGFUSE_HOST can itself embed a credential
+# (https://user:pass@host), so the error names the variable, never its
+# value.
+
+
+@pytest.mark.parametrize(
+    "bad_host",
+    [
+        "not-a-url-at-all",
+        "ftp://example.invalid",
+        "//example.invalid",
+        "https:///no-host-component",
+        "example.invalid",
+        "javascript:alert(1)",
+        "",
+    ],
+)
+def test_make_platform_raises_on_malformed_langfuse_host(
+    monkeypatch: pytest.MonkeyPatch, bad_host: str
+) -> None:
+    monkeypatch.setenv("PLATFORM", "langfuse")
+    monkeypatch.setenv("LANGFUSE_HOST", bad_host)
+    monkeypatch.delenv("LANGFUSE_BASE_URL", raising=False)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pub")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
+
+    with pytest.raises(PlatformConfigurationError) as excinfo:
+        make_platform()
+
+    message = str(excinfo.value)
+    assert "LANGFUSE_HOST" in message
+    # INV-02 -- never echo the value, even a malformed/empty one, and even
+    # one carrying an embedded credential shape.
+    assert bad_host not in message or bad_host == ""
+
+
+def test_make_platform_raises_on_langfuse_host_with_embedded_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prior probe confirmed this exact shape (userinfo in the host URL)
+    reaches this path. It is syntactically a valid https:// URL, so this
+    is the mutation-relevant case for INV-02: the guard must not echo the
+    value even when it MISTAKENLY treats the host as acceptable-shaped
+    elsewhere -- and here it must be rejected outright, since a host that
+    embeds credentials is never one CLAUDE.md's External services table
+    names."""
+    monkeypatch.setenv("PLATFORM", "langfuse")
+    monkeypatch.setenv(
+        "LANGFUSE_HOST", "https://sneaky-user:sneaky-pass@example.invalid"
+    )
+    monkeypatch.delenv("LANGFUSE_BASE_URL", raising=False)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pub")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
+
+    with pytest.raises(PlatformConfigurationError) as excinfo:
+        make_platform()
+
+    message = str(excinfo.value)
+    assert "LANGFUSE_HOST" in message
+    assert "sneaky-user" not in message
+    assert "sneaky-pass" not in message
+
+
+@pytest.mark.parametrize(
+    "good_host",
+    [
+        "https://example.invalid",
+        "http://example.invalid",
+        "https://example.invalid:3000",
+        "https://cloud.langfuse.com",
+    ],
+)
+def test_make_platform_accepts_well_formed_langfuse_host(
+    monkeypatch: pytest.MonkeyPatch, good_host: str
+) -> None:
+    monkeypatch.setenv("PLATFORM", "langfuse")
+    monkeypatch.setenv("LANGFUSE_HOST", good_host)
+    monkeypatch.delenv("LANGFUSE_BASE_URL", raising=False)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pub")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
+
+    make_platform()  # must not raise
+
+
 @pytest.mark.parametrize("base_url_env", [None, "https://example.invalid"])
 def test_make_platform_resolves_both_clients_to_the_same_host_when_unset_or_equal(
     monkeypatch: pytest.MonkeyPatch, base_url_env: str | None
