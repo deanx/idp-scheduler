@@ -988,6 +988,12 @@ def test_record_field_wrong_type_raises_typed_error_before_any_sdk_call(field_na
         # the missing-document_id anchor case above.
         assert "doc-0" in message
     else:
+        # F-G2 (third DEBT-44 Atchim instance, /test TDD gate): INV-02
+        # has two clauses here and only the "never the value" half was
+        # pinned -- the "name the field" half was reasoned about in a
+        # comment and enforced nowhere. Mirrors the get_dataset twin's
+        # `assert "document_id" in message` below.
+        assert "document_id" in message
         # R-2 / M7: the marker carried by the bad document_id value must
         # never leak into the message -- pinning INV-02 for this guard,
         # not just reasoning about it in a comment.
