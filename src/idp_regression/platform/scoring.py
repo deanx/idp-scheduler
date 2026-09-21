@@ -17,10 +17,19 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from typing import Literal
+from typing import Literal, get_args
 
 from idp_regression.classifier.types import Golden, TableVerdict, Verdict, VerdictMap
 from idp_regression.platform.types import ScoreInput
+
+#: The per-document CI verdict published to the platform (FO-4). Named so
+#: the valid set below can be derived from it, never hand-written.
+GateLiteral = Literal["PASS", "FAIL"]
+
+# Derived from the declared type (not hand-enumerated, DEBT-40/43/47 /
+# mirrors classifier/gate.py's _VALID_VERDICTS, FO-5): a third gate value
+# added to GateLiteral is automatically accepted here.
+_VALID_GATES: frozenset[str] = frozenset(get_args(GateLiteral))
 
 # Pinned committed constant (ADR-0005 #5). NEVER regenerate or change this
 # value — doing so would silently change every score id already written.
@@ -67,7 +76,7 @@ def build_score_inputs(
     *,
     golden: Golden,
     verdicts: VerdictMap,
-    gate: Literal["PASS", "FAIL"],
+    gate: GateLiteral,
     run_id: str,
     document_id: str,
 ) -> list[ScoreInput]:
@@ -80,7 +89,19 @@ def build_score_inputs(
     entry — ``classify()`` always produces one for every golden ∪ actual
     key (CT-02), so a miss here is a caller bug, not a "missing" value to
     paper over (Atchim suggestion, scoring.py:121).
+
+    Raises ``ValueError`` if ``gate`` is not a recognised value (FO-4):
+    the type annotation is not enforced at runtime by Python, and this
+    value is the per-document CI verdict published to the platform — it
+    must never reach a score unchecked (mirrors FO-5 in
+    ``classifier/gate.py``'s ``overall_gate``).
     """
+    if gate not in _VALID_GATES:
+        # INV-02: name the parameter, never interpolate the offending value
+        # (it could carry extracted content — e.g. a caller passing golden
+        # content through the wrong parameter by mistake).
+        raise ValueError("gate must be one of the recognised gate values")
+
     scores: list[ScoreInput] = []
 
     for field_name in golden.get("fields", {}):

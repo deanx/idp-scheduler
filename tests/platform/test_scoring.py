@@ -4,8 +4,19 @@ from __future__ import annotations
 
 import re
 import uuid
+from typing import get_args
 
-from idp_regression.platform.scoring import NAMESPACE, prompt_score_name, score_id, trace_id
+import pytest
+
+from idp_regression.platform.scoring import (
+    _VALID_GATES,
+    NAMESPACE,
+    GateLiteral,
+    build_score_inputs,
+    prompt_score_name,
+    score_id,
+    trace_id,
+)
 
 
 def test_namespace_is_a_pinned_constant_uuid() -> None:
@@ -101,3 +112,83 @@ def test_trace_id_run_level_sentinel_for_run_status() -> None:
     run_level = trace_id(run_id="run-1", document_id="run")
     per_doc = trace_id(run_id="run-1", document_id="invoice-007.pdf")
     assert run_level != per_doc
+
+
+# --- FO-4: build_score_inputs(gate=...) must validate at runtime ------------
+#
+# Mirrors FO-5's fix (classifier/gate.py `overall_gate`, commit 6d525ef):
+# derive the valid set from the Literal itself, never a hand-written tuple
+# (DEBT-40/43/47), and fail loud on an unrecognised value instead of letting
+# it sail into the platform-bound `gate` score's `value` verbatim.
+
+_EMPTY_GOLDEN = {"fields": {}, "prompts": {}}
+
+
+def test_drift_pin_valid_gates_is_derived_from_the_literal_not_hand_written() -> None:
+    """The M13-analogue drift pin (FO-5's fix initially missed this). Looks
+    tautological today; it fires the moment GateLiteral is widened and
+    _VALID_GATES has drifted to a hand-written tuple that wasn't updated."""
+    assert frozenset(get_args(GateLiteral)) == _VALID_GATES
+
+
+@pytest.mark.parametrize("gate", get_args(GateLiteral))
+def test_build_score_inputs_accepts_every_legitimate_gate_value(gate: str) -> None:
+    scores = build_score_inputs(
+        golden=_EMPTY_GOLDEN,
+        verdicts={},
+        gate=gate,  # type: ignore[arg-type]
+        run_id="run-1",
+        document_id="invoice-007.pdf",
+    )
+    gate_score = next(s for s in scores if s["name"] == "gate")
+    assert gate_score["value"] == gate
+
+
+def test_build_score_inputs_rejects_an_unrecognised_gate_value() -> None:
+    # Pre-fix behaviour: this sailed through verbatim into the platform-bound
+    # `gate` score value — the per-document CI verdict published to Langfuse.
+    with pytest.raises(ValueError, match="gate"):
+        build_score_inputs(
+            golden=_EMPTY_GOLDEN,
+            verdicts={},
+            gate="NOT_A_GATE",  # type: ignore[arg-type]
+            run_id="run-1",
+            document_id="invoice-007.pdf",
+        )
+
+
+def test_build_score_inputs_rejects_lowercase_pass() -> None:
+    with pytest.raises(ValueError, match="gate"):
+        build_score_inputs(
+            golden=_EMPTY_GOLDEN,
+            verdicts={},
+            gate="pass",  # type: ignore[arg-type]
+            run_id="run-1",
+            document_id="invoice-007.pdf",
+        )
+
+
+def test_build_score_inputs_rejects_none_gate() -> None:
+    with pytest.raises(ValueError, match="gate"):
+        build_score_inputs(
+            golden=_EMPTY_GOLDEN,
+            verdicts={},
+            gate=None,  # type: ignore[arg-type]
+            run_id="run-1",
+            document_id="invoice-007.pdf",
+        )
+
+
+def test_build_score_inputs_rejected_gate_error_never_echoes_the_offending_value() -> None:
+    # INV-02: the message names the parameter, never interpolates a value
+    # that could carry extracted content.
+    offending = "TOTALLY_UNEXPECTED_SENSITIVE_LOOKING_VALUE"
+    with pytest.raises(ValueError) as exc_info:
+        build_score_inputs(
+            golden=_EMPTY_GOLDEN,
+            verdicts={},
+            gate=offending,  # type: ignore[arg-type]
+            run_id="run-1",
+            document_id="invoice-007.pdf",
+        )
+    assert offending not in str(exc_info.value)
