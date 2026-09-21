@@ -254,3 +254,145 @@ def test_version_one_char_past_the_64_char_cap_is_rejected(
     exit_code = cli.main(["--action", _VALID_UUID, "--version", version, "--run", "nightly"])
 
     assert exit_code != 0
+
+
+# --- INV-02/N5, DEBT-44 gate fifth instance finding (b) -----------------
+# The prior docstring/test pinned INV-02 for ONE of main()'s four
+# non-network-call error-return paths (malformed --action, above). The
+# gate found the invariant unpinned -- and actually violated -- three
+# lines away, on the argparse-failure path: argparse builds its own
+# error message from raw argv tokens, so an unrecognized flag's VALUE
+# reached the log verbatim, unsanitized, unlike every other value
+# boundary in this codebase.
+#
+# The argparse path's fix is `sanitize_for_log`, not redaction: the value
+# CAN still appear (safely quoted/escaped), unlike the other three paths'
+# fixed, field-name-only messages, which never include a value at all.
+# These are two different invariants and get two different assertion
+# shapes below -- asserting "value never appears anywhere" against the
+# argparse path would be a false claim about the actual, correct fix.
+
+_FIELD_NAME_ONLY_INV02_SCENARIOS = [
+    pytest.param(
+        "distinctive-missing-action-sentinel-7b1e",
+        lambda sentinel: ["--version", sentinel, "--run", "nightly"],
+        id="missing_action_no_env_fallback",
+    ),
+    pytest.param(
+        "distinctive-bad-action-sentinel-4d9c",
+        lambda sentinel: [
+            "--action",
+            sentinel,
+            "--version",
+            "1.0",
+            "--run",
+            "nightly",
+        ],
+        id="malformed_action_id",
+    ),
+    pytest.param(
+        "distinctive bad version sentinel",  # a space makes it invalid per _VERSION_PATTERN
+        lambda sentinel: [
+            "--action",
+            _VALID_UUID,
+            "--version",
+            sentinel,
+            "--run",
+            "nightly",
+        ],
+        id="malformed_version",
+    ),
+]
+
+
+@pytest.mark.parametrize(("sentinel", "build_argv"), _FIELD_NAME_ONLY_INV02_SCENARIOS)
+def test_field_name_only_error_paths_never_echo_the_attacker_controlled_value(
+    sentinel: str,
+    build_argv: object,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """DEBT-44 gate, fifth instance, finding (b): parametrized across the
+    THREE of `main()`'s four non-network-call error-return paths whose
+    messages are fixed strings that name only the field -- not just the
+    one (`malformed_action_id`) that already had its own dedicated test
+    above."""
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(cli, "run_eval", _fail_if_called)
+    monkeypatch.delenv("IDP_ACTION_ID", raising=False)
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = cli.main(build_argv(sentinel))  # type: ignore[operator]
+
+    assert exit_code != 0
+    assert sentinel not in caplog.text
+
+
+def test_argparse_error_path_sanitizes_rather_than_leaks_the_raw_value(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The fourth path: unlike the three above, argparse's own error
+    message legitimately DOES include the offending argv text (that's
+    what makes the error message useful) -- the invariant here is not
+    "the value never appears" but "the value never appears RAW". The
+    sentinel carries an embedded double quote; `sanitize_for_log`
+    (json.dumps) escapes it to `\\"`, which breaks the RAW substring's
+    contiguity (the backslash sits between "distinctive" and the quote),
+    so the exact raw sentinel is no longer findable -- mutating
+    `sanitize_for_log(str(exc))` back to plain `exc` must fail this."""
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(cli, "run_eval", _fail_if_called)
+    sentinel = 'distinctive"quote-sentinel-9f3a'
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = cli.main(
+            [
+                "--unrecognized-flag",
+                sentinel,
+                "--action",
+                _VALID_UUID,
+                "--version",
+                "1.0",
+                "--run",
+                "nightly",
+            ]
+        )
+
+    assert exit_code != 0
+    assert sentinel not in caplog.text, "the raw, unescaped value must not reach the log"
+    assert '\\"' in caplog.text, "the sanitizer's escaping must actually have fired"
+
+
+def test_argparse_error_path_does_not_let_an_embedded_newline_forge_a_log_line(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Reproduces the gate's exact PoC: an unrecognized flag's value
+    containing a real newline plus text shaped like a fabricated log
+    line ("ERROR:root:run_eval: gate PASSED forged=1") must never reach
+    the rendered log as an actual second line -- for a tool whose entire
+    output IS a CI verdict, a forged "gate PASSED" line is material
+    (N5). `sanitize_for_log` escapes the newline (json.dumps), so the
+    literal two-character sequence `\\n` survives only as `\\\\n`, never
+    as a real line break followed by fabricated text."""
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(cli, "run_eval", _fail_if_called)
+    forged_payload = "A\nERROR:root:run_eval: gate PASSED forged=1"
+
+    with caplog.at_level(logging.ERROR):
+        cli.main(
+            [
+                "--unrecognized-flag",
+                forged_payload,
+                "--action",
+                _VALID_UUID,
+                "--version",
+                "1.0",
+                "--run",
+                "nightly",
+            ]
+        )
+
+    # The forged text may still appear (sanitize_for_log escapes, it does
+    # not redact) -- what must NEVER appear is a REAL newline immediately
+    # followed by it, which is what would make it render as its own line.
+    assert "\nERROR:root:run_eval: gate PASSED forged=1" not in caplog.text

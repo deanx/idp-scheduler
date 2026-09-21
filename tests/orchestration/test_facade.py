@@ -2,7 +2,8 @@
 
 This slice builds ONLY the pre-run entry checks (ADR-0004 kickoff,
 S-01.4-KICKOFF.md "Do NOT build the run loop"): `load_dotenv()` first
-(INV-05), fail-closed credential construction (NFR N6, DEBT-30), and
+(INV-05), fail-closed credential VALIDATION with no client construction
+(NFR N6, DEBT-30 -- see `bootstrap.py`), and
 run-id/experiment-name composition (T-01.4.13, DEBT-19). The per-document
 run loop is T-01.4.2 onward and does not exist yet -- `run_eval` raises
 `NotImplementedError` once the pre-run checks pass, which is this

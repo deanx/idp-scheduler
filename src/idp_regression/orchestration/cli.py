@@ -8,20 +8,37 @@
 resolves `--action`'s `IDP_ACTION_ID` default (ADR-0004, INV-05) -- `main`
 is the outermost caller in this codebase, the one place the ADR's "first
 line of the script" DoD language literally applies. `run_eval` (the
-facade) ALSO calls `load_dotenv()` as its own first statement, since it
-is the direct caller of `make_platform()`/`make_idp_adapter()`; the
-second call is a harmless no-op (never overrides an already-set var --
-see `dotenv_support.load_dotenv`) and guarantees INV-05 holds for any
-caller of `run_eval`, not only this CLI.
+facade) ALSO calls `load_dotenv()` as its own first statement -- ⚠️
+corrected 2026-09-21 (DEBT-44 gate overclaim sweep): NOT because it is
+"the direct caller of `make_platform()`" (it no longer calls that
+function at all since the C-1/R-3 fix; see `facade.py`'s own corrected
+docstring), simply because INV-05 requires `load_dotenv()` before ANY
+credential read, and `run_eval` is a public function other callers may
+invoke directly, bypassing this CLI. The second call is a harmless no-op
+(never overrides an already-set var -- see `dotenv_support.load_dotenv`)
+and holds INV-05 for any caller of `run_eval`, not only this CLI.
 
 Argument validation (TP-31, ADR-0004 amendment 2026-09-19): `--version`
 is required with no env fallback (argparse enforces this, exit code 2);
 `--action` defaults to `IDP_ACTION_ID`, exit non-zero if neither is set;
 both are validated here (`action_id` UUID, `version`
 `^[A-Za-z0-9._-]{1,64}$`) before `run_eval` -- and therefore before any
-IDP/platform network call -- is ever entered. Error messages name only
-the field, never the (untrusted, possibly attacker-controlled) value
-(INV-02).
+IDP/platform network call -- is ever entered.
+
+INV-02 (message hygiene, corrected 2026-09-21 -- DEBT-44 gate, fifth
+instance, finding (b)): the three validation error messages this
+function writes itself (missing `--action`, malformed `--action`,
+malformed `--version`) name only the field, never the value -- they were
+already correct and are pinned that way. `argparse`'s OWN error message
+(the `_ArgumentParsingFailed` branch) is different: it is built by
+`argparse` from raw argv tokens and DOES embed attacker-controlled text
+(e.g. an unrecognized flag's value) -- an earlier version of this
+docstring claimed "never the value" for ALL error messages, which was
+false for this one path and, reproduced live, let a crafted argv value
+forge a second, fabricated log line via an embedded newline (N5). That
+path is now routed through `sanitize_for_log` like every other
+untrusted-value boundary in this codebase, so the value CAN appear, but
+never unescaped.
 """
 
 from __future__ import annotations
@@ -34,6 +51,7 @@ import sys
 import uuid
 from collections.abc import Sequence
 
+from idp_regression.adapter.transport import sanitize_for_log
 from idp_regression.orchestration.dotenv_support import load_dotenv
 from idp_regression.orchestration.facade import run_eval
 
@@ -84,7 +102,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = parser.parse_args(argv)
     except _ArgumentParsingFailed as exc:
-        logger.error("run_eval: %s", exc)
+        # DEBT-44 gate, fifth instance, finding (b) (2026-09-21, reproduced
+        # live): argparse's own error() builds its message from raw argv
+        # tokens (e.g. "unrecognized arguments: --x <value>"), so an
+        # unrecognized flag's VALUE is attacker-controlled text reaching
+        # this log line verbatim -- unlike every other error path in this
+        # function, none of which ever interpolates a value (INV-02).
+        # Route it through the same sanitize_for_log every other
+        # untrusted-value boundary in this codebase uses, so an embedded
+        # newline can't forge a second, fabricated log line (N5) -- e.g.
+        # a crafted value containing "\nERROR:root:run_eval: gate PASSED"
+        # must not render as a believable extra log entry.
+        logger.error("run_eval: invalid arguments: %s", sanitize_for_log(str(exc)))
         return 2
 
     action_id = args.action or os.environ.get("IDP_ACTION_ID")

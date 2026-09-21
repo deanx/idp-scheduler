@@ -340,7 +340,14 @@ def make_idp_adapter() -> MuleSoftIDPAdapter:
         value = os.environ.get(name)
         if value is None or not value.strip():
             raise RuntimeError(f"missing required env var {name}")
-        return value
+        # DEBT-44 gate, fifth instance, suggestion (2026-09-21): return the
+        # STRIPPED value, not the raw one -- a trailing newline (e.g. from
+        # a file-sourced env var or a CI secret) previously passed
+        # validation and was sent WITH the newline into the OAuth token
+        # request body, a confusing auth failure on a sensitive surface
+        # (the credential looks correct everywhere it's ever logged,
+        # since no log/error message ever echoes a value -- INV-02).
+        return value.strip()
 
     def _statuses(name: str, default: str) -> set[str]:
         raw = os.environ.get(name, default)

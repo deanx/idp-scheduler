@@ -60,14 +60,36 @@ def _triggers(workflow: dict[str, Any]) -> Any:
     return workflow.get("on", workflow.get(True))
 
 
-def _read_shell_script_excluding_comments(relpath: str) -> str:
-    """A shell script has no structured parser here the way a workflow
-    has `yaml.safe_load` -- but a `#`-prefixed line is unambiguously a
-    comment, so at minimum a claim that lives ONLY in a comment (the same
-    bypass class T1/T3 closed for the YAML files) should not satisfy an
-    assertion about what the script actually DOES."""
-    lines = _read(relpath).splitlines()
-    return "\n".join(line for line in lines if not line.strip().startswith("#"))
+def _shell_executed_lines(relpath: str) -> list[str]:
+    """Lines of a shell script that are actually EXECUTED, not merely
+    mentioned.
+
+    ⚠️ DEBT-44 gate, fifth instance, finding (a) (2026-09-21): the prior
+    version of this helper only stripped `#`-comment lines. That closed
+    the WRONG bypass class for leg 2 -- comments were never the mutant
+    here. The gate's M11/M13 mutants replaced a script's real
+    invocations with `echo "would run: <the exact substring this suite
+    checks for>"`. A comment-stripped read still finds the substring,
+    because it's sitting inside an EXECUTED `echo` statement's string
+    argument -- present in the text, never actually run as the command
+    it names. This helper additionally drops any line whose first shell
+    word is `echo`, so a token that lives only as an echoed string no
+    longer satisfies "this script does X"."""
+    import shlex
+
+    executed = []
+    for raw_line in _read(relpath).splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        try:
+            tokens = shlex.split(stripped, comments=False)
+        except ValueError:
+            tokens = stripped.split()
+        if tokens and tokens[0] == "echo":
+            continue
+        executed.append(stripped)
+    return executed
 
 
 class TestLeg1DiffScopedGate:
@@ -126,19 +148,35 @@ class TestLeg2PreCommitHook:
         assert hook.stat().st_mode & 0o111, "pre-commit hook must be executable"
 
     def test_hook_scans_staged_not_history_or_working_tree(self) -> None:
-        content = _read_shell_script_excluding_comments(".githooks/pre-commit")
-        assert "gitleaks git --staged" in content
+        """DEBT-44 gate, fifth instance, finding (a): M11 replaced this
+        hook's entire body with `echo "would run: gitleaks git --staged
+        . ; exit 1"` -- the substring survived, the scan didn't run.
+        `_shell_executed_lines` drops echo-only lines, so this now
+        requires the invocation as an actually-executed command."""
+        executed = _shell_executed_lines(".githooks/pre-commit")
+        assert any("gitleaks git --staged" in line for line in executed), (
+            "leg 2 must actually RUN gitleaks git --staged, not merely mention it"
+        )
 
     def test_hook_fails_closed_when_gitleaks_missing(self) -> None:
-        content = _read_shell_script_excluding_comments(".githooks/pre-commit")
-        assert "set -euo pipefail" in content
-        assert "command -v gitleaks" in content
-        assert "exit 1" in content
+        executed = _shell_executed_lines(".githooks/pre-commit")
+        assert any(line == "set -euo pipefail" for line in executed)
+        assert any("command -v gitleaks" in line for line in executed)
+        assert any(line == "exit 1" for line in executed), (
+            "the missing-gitleaks branch must actually fail the job (a bare `exit 1`), "
+            "not merely log it"
+        )
 
     def test_install_script_wires_hookspath(self) -> None:
-        content = _read_shell_script_excluding_comments("scripts/install-git-hooks.sh")
-        assert "core.hooksPath" in content
-        assert ".githooks" in content
+        """DEBT-44 gate, fifth instance, finding (a): M13 reduced this
+        script to its final `echo` line, deleting the real `git config
+        core.hooksPath .githooks` invocation -- leg 2 is then never wired
+        into any clone, and the prior comment-stripped-only check still
+        passed because both tokens survived inside that echo's string."""
+        executed = _shell_executed_lines("scripts/install-git-hooks.sh")
+        assert any(
+            "core.hooksPath" in line and ".githooks" in line for line in executed
+        ), "the hook path must actually be configured (git config core.hooksPath), not just echoed"
 
     def test_install_script_is_executable(self) -> None:
         script = REPO_ROOT / "scripts/install-git-hooks.sh"

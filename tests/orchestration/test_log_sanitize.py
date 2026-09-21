@@ -15,15 +15,20 @@ and `idp_regression.adapter.transport.sanitize_for_log`).
 
 from __future__ import annotations
 
-import json
-
 from idp_regression.adapter.errors import IDPExecutionFailedError
+from idp_regression.adapter.transport import sanitize_for_log
 from idp_regression.orchestration.log_sanitize import format_execution_failed_status_for_log
 
 
 def test_format_execution_failed_status_matches_sanitize_for_log() -> None:
+    """DEBT-44 gate, fifth instance, suggestion (2026-09-21): pin against
+    the SHARED `sanitize_for_log` function this module delegates to, not
+    a hardcoded `json.dumps` call -- if the sanitizer ever gains a length
+    cap or extra control-char stripping, a `json.dumps`-pinned test would
+    silently drift out of sync with what `format_execution_failed_status_for_log`
+    actually does, rather than following it."""
     exc = IDPExecutionFailedError("boom", status="FAILED")
-    assert format_execution_failed_status_for_log(exc) == json.dumps("FAILED")
+    assert format_execution_failed_status_for_log(exc) == sanitize_for_log("FAILED")
 
 
 def test_format_execution_failed_status_escapes_an_embedded_quote() -> None:
@@ -32,7 +37,7 @@ def test_format_execution_failed_status_escapes_an_embedded_quote() -> None:
     log line unescaped and could forge a trailing `key="value"` pair."""
     exc = IDPExecutionFailedError("boom", status='FAILED" forged="1')
     rendered = format_execution_failed_status_for_log(exc)
-    assert rendered == json.dumps('FAILED" forged="1')
+    assert rendered == sanitize_for_log('FAILED" forged="1')
     assert '\\"' in rendered
 
 

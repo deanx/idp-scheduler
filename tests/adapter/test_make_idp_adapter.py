@@ -149,3 +149,28 @@ def test_literal_zero_required_credential_is_not_falsely_rejected(
     _set_required_env(monkeypatch)
     monkeypatch.setenv(required_var, "0")
     make_idp_adapter()  # must not raise
+
+
+@pytest.mark.parametrize("required_var", list(_REQUIRED_ENV))
+def test_required_credential_is_stripped_of_surrounding_whitespace(
+    required_var: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DEBT-44 gate, fifth instance, suggestion (2026-09-21): a trailing
+    newline in a credential (e.g. an env var sourced from a file with a
+    trailing `\\n`, or a CI secret with a stray newline) previously
+    passed validation unstripped and was sent WITH the newline into the
+    OAuth token request body -- a confusing auth failure on a sensitive
+    surface, since the credential LOOKS correct in every log/error
+    message (which never echoes values, INV-02) but silently fails
+    server-side. `_require` now returns the stripped value, not the raw
+    one."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv(required_var, "  padded-credential-value  \n")
+    adapter = make_idp_adapter()
+    attr_name = {
+        "IDP_CLIENT_ID": "_client_id",
+        "IDP_CLIENT_SECRET": "_client_secret",
+        "IDP_REGION": "_region",
+        "IDP_ORG_ID": "_org_id",
+    }[required_var]
+    assert getattr(adapter, attr_name) == "padded-credential-value"

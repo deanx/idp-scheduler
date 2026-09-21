@@ -43,9 +43,17 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
     removed.
 
     `load_dotenv()` runs FIRST, before any credential is read or any SDK
-    client is constructed (ADR-0004 Flow step 1, INV-05) -- every
-    adapter/platform factory this function calls documents that it never
-    calls `load_dotenv()` itself; this function is that caller.
+    client is constructed (ADR-0004 Flow step 1, INV-05). ⚠️ Corrected
+    2026-09-21 (DEBT-44 gate overclaim sweep): this function does NOT
+    call `make_platform()` -- the ONE factory whose docstring explicitly
+    documents "the caller has already called `load_dotenv()`" -- since
+    the C-1/R-3 fix (this function validates credential presence directly
+    against `os.environ` via `bootstrap.validate_platform_credentials`,
+    never constructing a client). Neither `bootstrap.validate_platform_credentials`
+    nor `make_idp_adapter` documents a `load_dotenv()` contract of its
+    own; this function still calls `load_dotenv()` first regardless,
+    because INV-05 requires it be called before ANY credential read, not
+    only before an SDK client construction that no longer happens here.
 
     Callers are expected to have already validated `action_id` (UUID) and
     `version` (`^[A-Za-z0-9._-]{1,64}$`) at the CLI boundary
