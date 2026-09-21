@@ -28,6 +28,8 @@ from idp_regression.platform.errors import (
 )
 from idp_regression.platform.langfuse_adapter import LangfuseAdapter, make_platform
 from idp_regression.platform.scoring import RUN_LEVEL_TRACE_SENTINEL, score_id, trace_id
+from idp_regression.platform.types import DatasetItem
+from tests.platform._type_pins import _str_fields
 
 
 class FakeHttpClient:
@@ -283,6 +285,114 @@ def test_get_dataset_non_string_document_id_raises_typed_error_not_a_silent_pass
 
     message = str(excinfo.value)
     assert "document_id" in message
+    assert marker not in message
+
+
+def test_get_dataset_non_string_item_id_raises_typed_error_not_a_silent_pass_through() -> None:
+    """FU-01.3-I / QA-01 re-audit #4 F-1: the identical shape as the
+    ``document_id`` guard above, one boundary over. ``DatasetItem``
+    declares BOTH ``item_id: str`` and ``document_id: str`` (verified via
+    ``get_type_hints``); FU-01.3-G guarded only ``document_id`` and left
+    ``item_id`` unguarded. Before the fix this is fail-closed but
+    untyped: ``id: [..]``/``{..}`` reaches ``self._item_cache[item_id] =
+    dataset_id`` and raises a bare ``TypeError: unhashable type`` instead
+    of the typed ``DatasetFetchFailedError`` every other malformed-item
+    path in this module raises.
+
+    Mirrors the ``document_id`` twin's marker-based INV-02 pin: the bad
+    value carries a distinctive marker so the test proves the message
+    never interpolates the offending value, not just that some typed
+    error was raised."""
+    marker = "SENTINEL-DATASET-ITEM-ID-do-not-leak-6b8f31"
+    client = FakeHttpClient(
+        {
+            ("GET", "/api/public/v2/datasets/spike-01"): (200, _v2_dataset_response(None)),
+            ("GET", "/api/public/dataset-items?datasetName=spike-01"): (
+                200,
+                _dataset_items_page(
+                    [
+                        {
+                            "id": [marker],  # wrong TYPE, not missing
+                            "input": {"document_id": "doc-0"},
+                            "expectedOutput": {"fields": {}},
+                        }
+                    ],
+                    page=1,
+                    total_pages=1,
+                ),
+            ),
+        }
+    )
+    adapter = LangfuseAdapter(client=client)
+
+    with pytest.raises(DatasetFetchFailedError) as excinfo:
+        adapter.get_dataset("spike-01")
+
+    message = str(excinfo.value)
+    assert "item_id" in message
+    assert marker not in message
+
+
+def test_str_fields_of_dataset_item_is_document_id_and_item_id() -> None:
+    """The `DatasetItem` counterpart of `DocumentRecord`'s own production
+    pin (`test_str_fields_of_document_record_is_document_id_and_item_id`
+    in `test_record_run_preconditions.py`) -- a probe-only pin cannot
+    catch a mutation that mis-scopes `_str_fields` BY NAME, since
+    `_StrFieldProbe`'s field names never collide with `DatasetItem`'s.
+    The parametrize below would silently drop a leg under such a mutant
+    with no signal; this direct equality assertion is what makes that
+    silent drop visible."""
+    assert _str_fields(DatasetItem) == ["document_id", "item_id"]
+
+
+@pytest.mark.parametrize("field_name", _str_fields(DatasetItem))
+def test_get_dataset_field_wrong_type_raises_typed_error_not_a_silent_pass_through(
+    field_name: str,
+) -> None:
+    """THE KILLING TEST (FU-01.3-I load-bearing bullet): parametrized
+    over the `str`-annotated fields of `typing.get_type_hints(DatasetItem)`
+    -- NOT a hand-written `item_id`/`document_id` pair -- so a future
+    scalar field on `DatasetItem` auto-generates its own wrong-type-value
+    case here. Mirrors `test_record_field_wrong_type_raises_typed_error_
+    before_any_sdk_call` in `test_record_run_preconditions.py`, the same
+    generalization applied to the OTHER trust boundary. Before FU-01.3-I
+    this parametrize has exactly one RED leg (`item_id`): no raise, an
+    untyped `TypeError: unhashable type` instead. `document_id` was
+    already covered by the pre-existing hand-written anchor
+    `test_get_dataset_non_string_document_id_raises_typed_error_not_a_
+    silent_pass_through` above; this test does not replace that anchor,
+    it generalises it -- same stance for the new `item_id` anchor added
+    alongside it in this same round."""
+    marker = f"SENTINEL-DATASET-{field_name}-do-not-leak-1f8a63"
+    item: dict[str, Any] = {
+        "id": "item-1",
+        "input": {"document_id": "doc-0"},
+        "expectedOutput": {"fields": {}},
+    }
+    if field_name == "document_id":
+        item["input"]["document_id"] = [marker]  # wrong TYPE, not missing
+    else:
+        # DatasetItem.item_id is derived from the wire field "id" (not
+        # "item_id" — that name only exists after get_dataset normalizes
+        # the item), so this is the one field whose wire key differs from
+        # its DatasetItem name.
+        item["id"] = [marker]
+    client = FakeHttpClient(
+        {
+            ("GET", "/api/public/v2/datasets/spike-01"): (200, _v2_dataset_response(None)),
+            ("GET", "/api/public/dataset-items?datasetName=spike-01"): (
+                200,
+                _dataset_items_page([item], page=1, total_pages=1),
+            ),
+        }
+    )
+    adapter = LangfuseAdapter(client=client)
+
+    with pytest.raises(DatasetFetchFailedError) as excinfo:
+        adapter.get_dataset("spike-01")
+
+    message = str(excinfo.value)
+    assert field_name in message
     assert marker not in message
 
 

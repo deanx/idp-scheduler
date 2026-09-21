@@ -290,6 +290,20 @@ class LangfuseAdapter:
                     raise DatasetFetchFailedError(
                         f"malformed dataset item (missing {exc})"
                     ) from exc
+                if not isinstance(item_id, str):
+                    # FU-01.3-I / QA-01 re-audit #4 F-1: `DatasetItem`
+                    # declares TWO `str` fields (`item_id`, `document_id`)
+                    # -- FU-01.3-G guarded only `document_id` and left
+                    # this one, the identical shape, unguarded one
+                    # boundary over. Must raise BEFORE `items.append` and
+                    # BEFORE `self._item_cache[item_id] = dataset_id`
+                    # below, or a non-hashable `item_id` reaches the
+                    # cache assignment and raises an untyped `TypeError:
+                    # unhashable type` instead. INV-02: name the field
+                    # only, never the offending value.
+                    raise DatasetFetchFailedError(
+                        "malformed dataset item: 'item_id' is not a string"
+                    )
                 if not isinstance(document_id, str):
                     # FU-01.3-G / QA-01 re-audit #3 F-1 / REG-09
                     # (reopened): the OTHER trust boundary -- the golden

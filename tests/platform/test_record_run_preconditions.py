@@ -7,7 +7,7 @@ control-flow tests, not integration facts.
 
 from __future__ import annotations
 
-from typing import Any, NotRequired, TypedDict, cast, get_type_hints
+from typing import Any, cast
 
 import pytest
 
@@ -15,43 +15,9 @@ from idp_regression.platform.errors import ExperimentRecordFailedError
 from idp_regression.platform.langfuse_adapter import LangfuseAdapter
 from idp_regression.platform.scoring import field_score_name, prompt_score_name, score_id
 from idp_regression.platform.types import DocumentRecord, RunMetadata, ScoreInput
+from tests.platform._type_pins import _str_fields, _StrFieldProbe
 
 _METADATA: RunMetadata = {"action_id": "a", "action_version": "v", "golden_version": "g"}
-
-
-def _str_fields(td: type) -> list[str]:
-    """Extract the `str`-annotated field names of a TypedDict, sorted --
-    the SINGLE derivation both the real `document_id`/`item_id`
-    parametrize below and `_StrFieldProbe`'s dedicated pin (further down)
-    call through. Atchim R-4 (fresh DEBT-44 instance, FU-01.3-G fix
-    round): extracting this into a named, independently-testable function
-    is what makes the "type-driven, not a hand list in disguise" claim
-    PINNABLE -- `DocumentRecord` alone has only two `str` fields today,
-    so a hand-written `["item_id", "document_id"]` and a genuine
-    `get_type_hints` derivation are indistinguishable by any test that
-    only ever looks at `DocumentRecord`. `_str_fields` gives the claim a
-    second, structurally different subject (`_StrFieldProbe`) to be
-    tested against."""
-    return sorted(name for name, hint in get_type_hints(td).items() if hint is str)
-
-
-class _StrFieldProbe(TypedDict):
-    """A dedicated probe TypedDict for `_str_fields` -- deliberately NOT
-    shaped like `DocumentRecord` (three `str` fields, not two, plus a
-    `NotRequired[str]`, an `int`, and a `list[str]`) so the filter is
-    exercised on a shape a hand-written literal couldn't coincidentally
-    match. ⚠️ MUST stay MODULE-level: with `from __future__ import
-    annotations`, `get_type_hints` resolves forward-referenced
-    annotations against the DEFINING MODULE's globals -- a function-local
-    TypedDict has no such globals entry and `NotRequired` raises
-    `NameError` at resolution time."""
-
-    field_a: str
-    field_b: str
-    field_c: str
-    optional_field: NotRequired[str]
-    count_field: int
-    list_field: list[str]
 
 
 class _FakeItemResult:
