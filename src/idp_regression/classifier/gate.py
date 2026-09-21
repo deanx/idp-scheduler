@@ -8,7 +8,7 @@ I/O. The module never imports from ``adapter`` / ``platform`` /
 
 from __future__ import annotations
 
-from typing import Literal, cast
+from typing import Literal, cast, get_args
 
 from idp_regression.classifier.canonical import compare_value, match_key_form
 from idp_regression.classifier.types import (
@@ -23,8 +23,13 @@ from idp_regression.classifier.types import (
     RowVerdict,
     TableVerdict,
     Verdict,
+    VerdictLiteral,
     VerdictMap,
 )
+
+# Derived from the declared type (not hand-enumerated, DEBT-40/43/47): a
+# seventh verdict added to VerdictLiteral is automatically accepted here.
+_VALID_VERDICTS: frozenset[str] = frozenset(get_args(VerdictLiteral))
 
 # Prompt answers are free-form text (DATA-MODEL-01 §1 has no per-prompt type).
 _PROMPT_TYPE = "text"
@@ -337,14 +342,29 @@ def overall_gate(verdicts: VerdictMap) -> Literal["PASS", "FAIL"]:
     ``FAIL`` iff a ``missing`` or ``wrong_value`` verdict is ``critical: True``
     (BR2). ``wrong_format``, ``new_field``, ``new_line``, and any non-critical
     difference do not fail the gate (BR3).
+
+    Raises :class:`MalformedActualError` (FO-5) on a verdict string outside
+    ``VerdictLiteral`` — at the top level or inside a table's row detail —
+    rather than silently falling through to ``PASS``. This is public API
+    taking a caller-supplied :class:`VerdictMap`, so an extension that adds a
+    verdict without updating every comparison here must fail loud, not gate
+    green.
     """
-    for entry in verdicts.values():
+    for key, entry in verdicts.items():
         if entry["verdict"] == "detail":
+            for row in entry["rows"]:
+                if row["verdict"] not in _VALID_VERDICTS:
+                    raise MalformedActualError(
+                        f"table {key!r} row (column {row['column']!r}) has an "
+                        "unrecognised verdict"
+                    )
             # Table container: fail iff a critical block has a missing/wrong_value row.
             if entry["critical"] and any(
                 r["verdict"] in ("missing", "wrong_value") for r in entry["rows"]
             ):
                 return "FAIL"
+        elif entry["verdict"] not in _VALID_VERDICTS:
+            raise MalformedActualError(f"entry {key!r} has an unrecognised verdict")
         elif entry["verdict"] in ("missing", "wrong_value") and entry["critical"]:
             return "FAIL"
     return "PASS"
