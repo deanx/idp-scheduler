@@ -108,6 +108,15 @@ def _require_record_shape(record: DocumentRecord) -> None:
                 f"record_run: record for document_id={record.get('document_id')!r} "
                 f"is missing {key!r}"
             )
+    if not isinstance(record["document_id"], str):
+        # FU-01.3-G / QA-01 re-audit #3 F-1 / REG-09 (reopened): the
+        # first FAIL-OPEN member of this family. INV-02: name the FIELD
+        # only, never interpolate the value -- document_id itself IS the
+        # offending value here, unlike the item_id check below (which
+        # can safely name a document_id already known to be a str).
+        raise ExperimentRecordFailedError(
+            "record_run: a record has a non-string 'document_id'"
+        )
     document_id = record["document_id"]
     if not isinstance(record["item_id"], str):
         raise ExperimentRecordFailedError(
@@ -281,6 +290,17 @@ class LangfuseAdapter:
                     raise DatasetFetchFailedError(
                         f"malformed dataset item (missing {exc})"
                     ) from exc
+                if not isinstance(document_id, str):
+                    # FU-01.3-G / QA-01 re-audit #3 F-1 / REG-09
+                    # (reopened): the OTHER trust boundary -- the golden
+                    # schema (CT-05) guards `expectedOutput`, not
+                    # `input`, so a malformed platform item otherwise
+                    # flows in here and back out untyped (REG-04
+                    # family). INV-02: name the field only, never the
+                    # offending value.
+                    raise DatasetFetchFailedError(
+                        "malformed dataset item: 'document_id' is not a string"
+                    )
                 items.append(
                     {"item_id": item_id, "document_id": document_id, "golden": golden}
                 )

@@ -7,7 +7,7 @@ control-flow tests, not integration facts.
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any, NotRequired, TypedDict, cast, get_type_hints
 
 import pytest
 
@@ -17,6 +17,41 @@ from idp_regression.platform.scoring import field_score_name, prompt_score_name,
 from idp_regression.platform.types import DocumentRecord, RunMetadata, ScoreInput
 
 _METADATA: RunMetadata = {"action_id": "a", "action_version": "v", "golden_version": "g"}
+
+
+def _str_fields(td: type) -> list[str]:
+    """Extract the `str`-annotated field names of a TypedDict, sorted --
+    the SINGLE derivation both the real `document_id`/`item_id`
+    parametrize below and `_StrFieldProbe`'s dedicated pin (further down)
+    call through. Atchim R-4 (fresh DEBT-44 instance, FU-01.3-G fix
+    round): extracting this into a named, independently-testable function
+    is what makes the "type-driven, not a hand list in disguise" claim
+    PINNABLE -- `DocumentRecord` alone has only two `str` fields today,
+    so a hand-written `["item_id", "document_id"]` and a genuine
+    `get_type_hints` derivation are indistinguishable by any test that
+    only ever looks at `DocumentRecord`. `_str_fields` gives the claim a
+    second, structurally different subject (`_StrFieldProbe`) to be
+    tested against."""
+    return sorted(name for name, hint in get_type_hints(td).items() if hint is str)
+
+
+class _StrFieldProbe(TypedDict):
+    """A dedicated probe TypedDict for `_str_fields` -- deliberately NOT
+    shaped like `DocumentRecord` (three `str` fields, not two, plus a
+    `NotRequired[str]`, an `int`, and a `list[str]`) so the filter is
+    exercised on a shape a hand-written literal couldn't coincidentally
+    match. ⚠️ MUST stay MODULE-level: with `from __future__ import
+    annotations`, `get_type_hints` resolves forward-referenced
+    annotations against the DEFINING MODULE's globals -- a function-local
+    TypedDict has no such globals entry and `NotRequired` raises
+    `NameError` at resolution time."""
+
+    field_a: str
+    field_b: str
+    field_c: str
+    optional_field: NotRequired[str]
+    count_field: int
+    list_field: list[str]
 
 
 class _FakeItemResult:
@@ -489,6 +524,13 @@ def test_the_run_id_mismatch_error_names_only_document_id_and_score_name() -> No
 _SENTINEL_SCORE_ID = "SENTINEL-SCORE-ID-do-not-leak-9b1e4f"
 _SENTINEL_SCORE_NAME = "SENTINEL-SCORE-NAME-do-not-leak-2d7c8a"
 _SENTINEL_SCORE_VALUE = "SENTINEL-SCORE-VALUE-do-not-leak-5a3f19"
+#: Atchim R-2 (FU-01.3-G fix round, DEBT-44 fresh instance): a distinctive
+#: marker carried INSIDE a wrong-type value, so a test can assert INV-02
+#: is actually ENFORCED (message stays a constant string) rather than
+#: merely reasoned about in a comment. A non-string on purpose -- this is
+#: what's assigned to the `str`-annotated field under test.
+_SENTINEL_DOCUMENT_ID_MARKER = "SENTINEL-DOCUMENT-ID-do-not-leak-7c3a91"
+_SENTINEL_DOCUMENT_ID: Any = [_SENTINEL_DOCUMENT_ID_MARKER]
 
 
 def _assert_zero_platform_writes(
@@ -824,4 +866,131 @@ def test_shape_validation_covers_every_record_not_just_the_first() -> None:
         )
 
     assert "doc-1" in str(excinfo.value)
+    _assert_zero_platform_writes(http_client, tracing_client)
+
+
+# --- FU-01.3-G / QA-01 re-audit #3 F-1 / REG-09 (reopened): VALUE pins
+# become type-driven, exactly as DoD (3) of FU-01.3-D made PRESENCE pins
+# type-driven. `_require_record_shape` checked `item_id`'s value (:112)
+# but had NO equivalent check for `document_id`, though `types.py:65`
+# declares `document_id: str` -- a non-string `document_id` (None, 7,
+# ["doc"], {"k": "v"}) sailed past the guard, `score_id()` is an f-string
+# so it stringifies anything and the A3 derivation check passed, and the
+# score LANDED (1 HTTP call, 1 SDK call) -- `record_run` returned SUCCESS
+# on malformed input. Every prior REG-09 shape was Minor because it was
+# fail-closed; this is the first that WRITES.
+#
+# DEBT-42 S-2 prohibition still applies here: this parametrization only
+# DELETES a valid value's type (never synthesises a new valid value), so
+# the case is generated, never a guessed-valid replacement -- fail-loud
+# is still the feature.
+
+
+def test_str_fields_extracts_only_str_annotated_fields_from_a_probe_type() -> None:
+    """Atchim R-4 (fresh DEBT-44 instance): pins `_str_fields` ITSELF
+    against `_StrFieldProbe` -- a shape with THREE str fields (not two,
+    matching `DocumentRecord`'s own count by coincidence), a
+    `NotRequired[str]` (resolves to `str` via `get_type_hints`, so it
+    belongs in the result), an `int`, and a `list[str]` (both must be
+    excluded). Before this test, replacing `_str_fields`'s body with the
+    literal `["item_id", "document_id"]` passed the entire 496-test
+    suite (mutation (c) of the FU-01.3-G fix round, reported honestly) --
+    with only two str fields on `DocumentRecord`, "reads the type" and "a
+    hand list that happens to match today's shape" were indistinguishable
+    by any test that only ever exercised `DocumentRecord`. This probe
+    breaks that coincidence."""
+    assert _str_fields(_StrFieldProbe) == [
+        "field_a",
+        "field_b",
+        "field_c",
+        "optional_field",
+    ]
+
+
+def test_str_fields_of_document_record_is_document_id_and_item_id() -> None:
+    """The production-shape counterpart to the probe pin above -- a
+    probe-only pin cannot catch a mutation that mis-scopes `_str_fields`
+    BY NAME (e.g. `and name != "document_id"`, Atchim's own M4), since
+    `_StrFieldProbe`'s field names never collide with `DocumentRecord`'s.
+    `test_record_field_wrong_type_raises_typed_error_before_any_sdk_call`
+    below would silently drop a parametrize leg under that mutation (495
+    passed, no signal) -- this direct equality assertion is what makes
+    that silent drop visible."""
+    assert _str_fields(DocumentRecord) == ["document_id", "item_id"]
+
+
+@pytest.mark.parametrize("field_name", _str_fields(DocumentRecord))
+def test_record_field_wrong_type_raises_typed_error_before_any_sdk_call(field_name: str) -> None:
+    """THE KILLING TEST for REG-09's reopened row (QA-01 re-audit #3 F-1).
+    Parametrized over the `str`-annotated fields of
+    `typing.get_type_hints(DocumentRecord)` -- NOT a hand-written
+    `item_id`/`document_id` pair -- so a future scalar field on
+    DocumentRecord auto-generates its own wrong-type-value case here, the
+    value-side twin of `test_record_missing_any_required_key_raises_...`
+    above (which does the same for PRESENCE over `__required_keys__`).
+    Before the fix this parametrize has exactly one RED leg
+    (`document_id`): no raise, `run_experiment_calls == 1`,
+    `http_client.calls` non-empty -- the fail-open write QA-01 found.
+    `item_id` was already covered by the pre-existing hand-written anchor
+    `test_item_id_not_a_string_raises_typed_error_before_any_sdk_call`
+    above; this test does not replace that anchor, it generalises it.
+
+    The score id MUST be the real ``score_id(run_id, document_id,
+    score_name)`` derivation (not a sentinel) -- a sentinel id would trip
+    the unrelated A3 run_id-derivation precondition first (which DOES
+    interpolate `score_name` into its message, unlike INV-02's shape
+    guard), catching the malformed field by coincidence instead of
+    proving the actual defect: that nothing on the shape-validation path
+    ever looked at this field's type before writing.
+
+    Atchim R-2 (fresh DEBT-44 instance, M7): the `document_id` leg's bad
+    value MUST itself carry a distinctive, assertable marker
+    (`_SENTINEL_DOCUMENT_ID`), not a plain `["not", "a", "string"]" --
+    reasoning that the guard's message is a constant string is not the
+    same as PINNING it. Without a marker, a mutant that changes the
+    message to interpolate `{record['document_id']!r}` survives every
+    assertion here. With the marker, that mutant is caught the same way
+    `_assert_no_score_sentinel_leaked` already catches an interpolated
+    score value elsewhere in this file."""
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    bad_value: Any = (
+        _SENTINEL_DOCUMENT_ID if field_name == "document_id" else ["not", "a", "string"]
+    )
+    document_id_for_score_id = bad_value if field_name == "document_id" else "doc-0"
+    full_record: dict[str, Any] = {
+        "item_id": "item-1",
+        "document_id": "doc-0",
+        "scores": [
+            {
+                "id": score_id(
+                    run_id="run-1",
+                    document_id=document_id_for_score_id,
+                    score_name=_SENTINEL_SCORE_NAME,
+                ),
+                "name": _SENTINEL_SCORE_NAME,
+                "value": _SENTINEL_SCORE_VALUE,
+            }
+        ],
+    }
+    full_record[field_name] = bad_value  # wrong TYPE, never a synthesised value
+    records: list[DocumentRecord] = [cast(DocumentRecord, full_record)]
+
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        adapter.record_run(
+            dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+        )
+
+    message = str(excinfo.value)
+    if field_name != "document_id":
+        # document_id itself can't be named in the message when IT is the
+        # field under test (INV-02: never interpolate the offending
+        # value, and here document_id IS the bad value) -- same stance as
+        # the missing-document_id anchor case above.
+        assert "doc-0" in message
+    else:
+        # R-2 / M7: the marker carried by the bad document_id value must
+        # never leak into the message -- pinning INV-02 for this guard,
+        # not just reasoning about it in a comment.
+        assert _SENTINEL_DOCUMENT_ID_MARKER not in message
+    _assert_no_score_sentinel_leaked(message)
     _assert_zero_platform_writes(http_client, tracing_client)

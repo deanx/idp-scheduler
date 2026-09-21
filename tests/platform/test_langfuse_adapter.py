@@ -236,6 +236,56 @@ def test_get_dataset_malformed_item_raises_typed_error_not_key_error() -> None:
         adapter.get_dataset("spike-01")
 
 
+def test_get_dataset_non_string_document_id_raises_typed_error_not_a_silent_pass_through() -> (
+    None
+):
+    """FU-01.3-G / QA-01 re-audit #3 F-1 / REG-09 (reopened): the OTHER
+    trust boundary. ``get_dataset`` took ``raw_item["input"]["document_id"]``
+    untyped -- the golden schema (CT-05) guards ``expectedOutput``, not
+    ``input`` -- so a malformed platform item flowed in and back out
+    (the REG-04 family) with no raise at all. Before the fix this is a
+    silent pass-through: ``get_dataset`` returns normally with a
+    non-string ``document_id`` sitting in the item, which is exactly the
+    shape ``_require_record_shape`` (the other half of this card) now
+    refuses on the way back out through ``record_run``. Both trust
+    boundaries or neither.
+
+    Atchim R-2 (fresh DEBT-44 instance, M8): the bad value carries a
+    distinctive marker (not a plain ``7``) so the test PINS INV-02 --
+    asserting the marker never reaches the message -- instead of merely
+    reasoning that the guard's message is a constant string. A mutant
+    that interpolates the offending value into the message would
+    otherwise survive this test undetected."""
+    marker = "SENTINEL-DATASET-DOCUMENT-ID-do-not-leak-4e9c02"
+    client = FakeHttpClient(
+        {
+            ("GET", "/api/public/v2/datasets/spike-01"): (200, _v2_dataset_response(None)),
+            ("GET", "/api/public/dataset-items?datasetName=spike-01"): (
+                200,
+                _dataset_items_page(
+                    [
+                        {
+                            "id": "item-1",
+                            "input": {"document_id": [marker]},  # wrong TYPE, not missing
+                            "expectedOutput": {"fields": {}},
+                        }
+                    ],
+                    page=1,
+                    total_pages=1,
+                ),
+            ),
+        }
+    )
+    adapter = LangfuseAdapter(client=client)
+
+    with pytest.raises(DatasetFetchFailedError) as excinfo:
+        adapter.get_dataset("spike-01")
+
+    message = str(excinfo.value)
+    assert "document_id" in message
+    assert marker not in message
+
+
 def test_get_dataset_error_message_never_echoes_the_response_body(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
