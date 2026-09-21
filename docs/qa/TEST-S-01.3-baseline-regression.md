@@ -50,7 +50,7 @@ Skips: 14 default / 1 live — the single live skip is the documented S-01.6 gat
 | **(d)** DEBT-36 / M12 boundary | `test_langfuse_adapter.py:981-984` — exact-equality clock, `> ` mutant raises nothing | ✅ COVERED |
 | **(e)** DEBT-38 CT-05 re-probe list (3 locations) | `docs/design/CONTRACTS.md:11`, `SPEC-01:138`, `SPEC-01:434` | ⚠️ **PARTIAL — `CLAUDE.md ## External services` not updated.** Deliberate: both Dengoso and Atchim refused to edit `CLAUDE.md` on a card's say-so, and Atchim endorsed the refusal. **Needs a human hand** |
 | **(f)** DEBT-39 `task_failed` fixture comments | `test_record_run_preconditions.py:190-196`, `:229-231` | ✅ COVERED |
-| **(g)** The structural fix, 3 parts | (1) loop `:449-450` before first subscript `:452`, unsliced — verified independently in source; (2) `isinstance` literally first at `:101`; (3) `sorted(__required_keys__)` at `:103` **and** the parametrize at `:679` — not a literal in disguise, confirmed by MB | ✅ COVERED — the card's central bullet |
+| **(g)** The structural fix, 3 parts | (1) loop `:449-450` before first subscript `:452`, unsliced — verified independently in source; (2) `isinstance` literally first at `:101`; (3) `sorted(__required_keys__)` at `:103` **and** the parametrize at `:679` — driven by the type, ⚠️ **but see the QA-01 re-audit #3 correction of 2026-09-21: this phrasing OVERCLAIMED.** Zangado's MF mutant — a literal hand-list `['document_id','item_id']` dropping `scores` — **survives all 172 tests**. MB proves the loop is non-vacuous, not that a literal is impossible; the parametrize is mutation-pinned for 2 of 3 keys, and covers key **presence only, never value types** (see F-1, Major, fail-open) | ✅ COVERED — the card's central bullet |
 | **(h)** gitleaks fixture rename | Renamed at `:306`, `:326`, `:336`; `gitleaks protect --staged` = 0 leaks | ⚠️ **PARTIAL and un-closeable as written** — see below |
 
 ## DoD (h): the exit condition is un-closeable, and the gate's definition is the defect
@@ -72,6 +72,17 @@ REG-09 MA ✅, MC ✅ (*"notably sharp"* — the "load-bearing assertion is the 
 
 ## Scenario A bugs (quarantined repros)
 - None. No `@bug-repro` tests written; no pre-existing unrelated bug discovered.
+
+## Post-stamp correction (QA-01 re-audit #3, 2026-09-21, Zangado Fable 5.1)
+
+⚠️ **Two claims in this stamp were overturned by the first genuinely independent audit of this delta. They are corrected in place above and recorded here so the stamp is not read as it was written.**
+
+1. **"A fourth escape structurally unavailable" was false when written.** `_require_record_shape` checks `isinstance(record["item_id"], str)` but has **no equivalent check for `document_id`**, which `types.py:65` declares `str`. A non-string `document_id` passes the guard and `record_run` **writes it and returns success** — the first REG-09 family member that is **fail-open** (Major). Part (3) made key **presence** type-driven; **value types remained hand-enumerated**, 1 of 2 `str` fields. REG-09 is reopened for value types.
+2. **MB does not prove "not a literal in disguise."** A literal hand-list omitting `scores` (mutant MF) survives all 172 tests, because the `scores` leg is rescued by the downstream guard.
+
+**This is the cost of the non-independence declared above, made concrete:** a same-instance gate re-checked its own APPROVE and missed a fourth escape that its own recorded method (DEBT-40 — enumerate obligations from the declared type) finds in a single lookup. The stamp's `Status: ✅ PASSED` stands for what it tested; the audit's own words: *"'a fourth escape structurally unavailable' was written on the same day a fourth escape was one type-hint away, and the reviewer who wrote it had already told us how to find it."*
+
+**Binding consequence:** the re-stamp that lands F-1's `src/` fix **must be run by an Atchim instance that did NOT review that diff**. A `/test` gate on a `Risk: high` delta is never to be run by the APPROVE-issuing instance.
 
 ## History
 - /test gap-fill (Atchim TDD gate) on 2026-09-21 at `7a45037` (reviewed) / stamp commit `2cc4dde`: ✅ PASSED. Superseded by this re-stamp after **FU-01.3-D** (`fcadd58`, `ad333fc`, `617dd8c`, `3708b3d`) changed `langfuse_adapter.py` and four test files. That stamp's gate was reviewer-independent (Atchim had not previously reviewed the FU-01.3-B delta's code as a separate APPROVE); **this one is not** — see its Independence field.

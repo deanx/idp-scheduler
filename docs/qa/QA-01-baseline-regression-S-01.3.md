@@ -337,3 +337,80 @@ None.
 - **Review-method debt**: guard-function reviews must enumerate obligations from the **declared type** (`TypedDict.__required_keys__` / dataclass fields), not from the diff's changed lines; a mutant population drawn only from changed lines cannot detect an unguarded caller *above* the guard.
 - **`hypothesis` property test** — optional, needs a dependency decision (see Ruling 2).
 - **ruff `select` has no `S` (bandit) family at all** (`pyproject.toml:57`), so the `noqa: S310` at `transport.py:117` never suppressed anything and the transport files have never had the URL-scheme audit run against them. Low; decide deliberately whether to enable `S3xx` or record it as out of scope. Not a finding.
+
+---
+
+# Re-audit #3 — 2026-09-21 (after FU-01.3-D)
+
+**Verdict: ⚠️ Pass with follow-ups. S-01.3 STAYS DONE.** 0 Critical, **1 Major**, 4 Minor.
+**Auditor:** Zangado (Fable 5.1) — **the first genuinely independent look at this delta.** **Branch:** `feat/S-01.2-idp-adapter` @ `4d6d837`. **Rigor:** standard, no gate skipped.
+**Independence chain:** Dengoso **sonnet** → Atchim **opus** (*same instance for both the code-review APPROVE and the `/test` gate — NOT reviewer-independent, self-declared in the stamp*) → Zangado **Fable 5.1**. Nothing in this audit rests on Atchim's APPROVE or PASS; every claim used was re-derived.
+
+## Entry gates (verified, not trusted)
+`git diff --stat 3708b3d HEAD -- src/` **empty** → the stamp's self-reference warning checks out, freshness PASS. No test files deleted since `8f55017`. No merge/WIP commits in range, no TODO/FIXME in `src/`/`tests/`, only the documented live-gate skips.
+
+## Own runs
+| Scope | Result |
+|---|---|
+| Default | **493 passed, 14 skipped** |
+| Live (Langfuse 4.38.0, health 200) | **506 passed, 1 skipped** |
+| Composition subset | **83 passed** |
+| mypy / ruff / pip-audit / `check_clean.py` | clean / clean / no known vulns / exit 0 |
+
+**Independent mutation re-execution** (`PYTHONHASHSEED=2`, source restored byte-identical each time): MA, MB, MC, MD, ME **all re-killed in his hands**. Two of his own: **MG** (`['document_id','scores']`) KILLED; **MF** (`['document_id','item_id']`, dropping `scores`) **SURVIVES all 172**.
+
+## Gate lines
+| Gate | Outcome |
+|---|---|
+| `Observability:` | **✅ VERIFIED** — observed, not read (see below) |
+| `Containment:` | **REQUIRED → deferred to S-01.4, UPHELD. No sixth item — leg (2) AMENDED instead** |
+| `SCA:` | **✅ PASS** |
+| `Secrets:` | **⚠️ — see F-2** (no credential; gate definition is the defect) |
+| `Composition:` | **✅ PASS** (83 + live N26/INV-01) |
+| `Cleanliness:` | **✅ PASS** |
+| `LLM-Evals:` / `UI:` | **N/A** / **N/A** |
+
+**Observability detail.** Drove **six** malformed shapes through the real `record_run` with a DEBUG handler on the root logger: missing `item_id`, missing `scores`, missing `document_id`, `item_id` a list, record a `str`, malformed record at index 1. All six produced a typed `ExperimentRecordFailedError` with **0 log lines, 0 HTTP calls, 0 SDK calls** and **0 INV-02 sentinel hits** (score id/name/value absent from both exception text and captured logs; messages name `document_id` only). "No log line by design" holds for all three FU-01.3-D paths; **S-01.4's N10 walk must log the mapped abort reason.**
+
+## Findings
+
+### Major
+
+**F-1 — a non-string `document_id` passes the guard and `record_run` WRITES it and returns success. Fourth REG-09 family member, and the first that is FAIL-OPEN.**
+`langfuse_adapter.py:101-114` checks `document_id` for **presence** (via `__required_keys__`) and checks `item_id`'s **value** is a `str` at `:112` — but never checks `document_id`'s value, though `types.py:65` declares `document_id: str`. **Verified independently by the orchestrator by reading the source: there is no `isinstance` check for `document_id`.** Reproduced through the real `record_run` with the cache primed, for `None`, `7`, `["doc"]`, `{"k":"v"}`: **no raise, `http=1`, `sdk=1`** on all four. `score_id()` (`scoring.py:32`) is an f-string, so it stringifies anything and the A3 derivation check passes whenever the caller derived the id the same way; the score lands and the value reaches the experiment span `input` at `:506`. Upstream, `get_dataset:278` also takes `raw_item["input"]["document_id"]` untyped — the golden schema guards `expectedOutput`, not `input` — so a malformed platform item flows in and back out (REG-04 family).
+- **Why Major, not Minor:** every prior REG-09 shape was Minor *because* it was fail-closed (0 SDK, 0 HTTP). This one performs writes and reports success on malformed input. The `types.py:99-101` Protocol contract is broken in the **fail-open** direction.
+- **It falsifies the stamp's central sentence.** "A fourth escape structurally unavailable" is untrue: part (3) made key **presence** type-driven; **value types are still hand-enumerated** — `item_id` yes, `document_id` no, 1 of 2 `str` fields.
+- **Why S-01.3 still stays Done:** no *new* sensitive data leaves the app (whatever sat in `input.document_id` was already on the platform as item input; `expected_output={}` still holds); realistic reachability is low (S-01.4 resolves the document file by `document_id` first, and N28 validates the golden set); the fix is two one-liners at the two trust boundaries.
+- **`escaped-atchim: yes`** — the guard's own declared type says `str`; DEBT-40's one-lookup method finds it.
+- **Fix:** (i) `isinstance(document_id, str)` right after the key loop; (ii) the same at `get_dataset:278`, raising `DatasetFetchFailedError`; (iii) **make value pins type-driven too** — parametrize a wrong-type-value test over the `str`-annotated fields of `typing.get_type_hints(DocumentRecord)`, so a future scalar field auto-generates its **value** pin exactly as part (3) does for presence. Widen REG-09 (no new row). **Re-stamp required, and it must be run by an Atchim instance that did NOT review the diff.**
+
+### Minor
+
+**F-2 — the recommended merge-base scoping does NOT clear this branch; the fingerprint baseline is the load-bearing remedy, not an optional extra.**
+`gitleaks protect --staged` = 0. `gitleaks git .` = 1 (`353549d:…:generic-api-key:305`, 136 commits). Zangado also ran the shape Atchim recommended — `--log-opts="$(git merge-base main HEAD)..HEAD"` — and it **still reports 1 leak**, because merge-base is `d3d1444`, 129 commits back, putting `353549d` *inside this PR's own range*. **A diff-scoped blocking gate would go red on this branch exactly like the full-history one.** `.env` gitignored + untracked; value verified not a credential; no rotation.
+- **Ruling:** working-tree-clean / history-dirty **is** acceptable for S-01.3 to stay Done, *conditionally* — (a) the fingerprint entry goes into `.gitleaks.toml` `[allowlist] fingerprints` with a same-line reason (permitted: it pins one commit × file × line × rule and cannot blind a future commit); (b) T-01.4.10 leg 1 redefined **with a named owner and a real card** — he could not find the "already DEBT-1" card referenced in the handoff; (c) no history rewrite, no `paths` allowlist. Agrees the blocking-full-history definition is the defect. `Secrets: ⚠️` stands until (a) lands — not a downgrade.
+- `escaped-atchim: no` — gate design, outside the five-axis lens.
+
+**F-3 — DEBT-42's third instance was mis-described *by the orchestrator*, and the correction is recorded.** `assert out["status"]` at `tests/adapter/test_integration_idp.py:72` **cannot** "pass for a FAILED status": `extract()` returns `body` only when `raw_status in self._success_statuses` (`idp_client.py:314-317`), and `normalize()` raises again outside the success set (`normalize.py:53`). **Verified independently by the orchestrator, who wrote the erroneous prose and has corrected it in `DEBT.md`.** The assertion is **redundant, not dangerous** — a weaker finding than the `:88` twin, not a stronger one. Debt remains right; the implied urgency did not.
+- `escaped-atchim: n/a` — register prose authored after the gate.
+
+**F-4 — the stamp overclaims what MB proves.** Mutant **MF** (a literal hand-list omitting `scores`) survives all 172 tests. MB proves only that the loop is **non-vacuous**. Accurate claim: type-driven for **source generation of the key list**, mutation-pinned for **2 of 3 keys**, and (per F-1) **no coverage of value types at all**. Corrected in the stamp and in REG-09's MB note. **N-2 ruling: agrees it is not a gate** (MF is behaviourally equivalent — the downstream guard raises typed), but "auto-generates its pin" deserves *less* weight than the stamp gave it: it auto-generates a **case**; whether that case observes the key loop is per-key luck.
+- `escaped-atchim: no` — Atchim surfaced N-2 himself; the residual is wording.
+
+**F-5 — FU-01.3-D's card header reads `✅ DONE` with (e) and (h) open** (SPEC-01:195). The inline disclosure two bullets down is honest; the header is not — the exact "closed bullet readable as a closed class" failure the process amendment (`DEBT.md`) was written against **on the same day**. Reword to `✅ DONE — (e) CLAUDE.md line and (h) exit condition carried, see below`. Not a reopen.
+- `escaped-atchim: n/a` — card wording.
+
+## Rulings on the four questions put to him
+1. **N-1 (DEBT-35's class relocated):** **agrees with Atchim.** DoD (c) named `:38` and only `:38`; it is closed. *"Not a bullet marked done that isn't; a bullet that was scoped too narrowly, which is a different failure and is now recorded as one."* The process amendment already fixes it at the right level.
+2. **The third instance:** **debt is right, the description was wrong** — see F-3.
+3. **N-2:** **not a gate**, but the stamp's weighting was too strong — see F-4.
+4. **The stamp's non-independence:** **admissible for this delta, once, and only because this audit exists. Not a precedent.** Model pairing passes; the mutation evidence is reproducible (he reproduced MA–ME himself); it is labelled honestly. **But the cost is not hypothetical** — a same-instance gate re-checked its own APPROVE and missed a fail-open escape its own recorded method finds in one lookup. **No re-gate is required for S-01.3 to stay Done — this audit is the independent look.** **Binding going forward: the re-stamp landing F-1 must be run by an Atchim instance that did not review that diff.**
+
+## NFR-01 walk (8b)
+**FU-01.3-D changed no row's ✅/❌ standing.** N26 ✅ (unchanged — the new guard doesn't touch the id-scoping guarantee), N10 S-01.3 leg ✅ (unchanged; **F-1 is a fail-*open* path producing no abort at all — a correctness finding, not an N10 gap**), N16 S-01.3 leg ✅, N2 ✅, N21 ✅, N22 ✅. N1/N3/N6/N7/N8/N14/N15/N28 ⚠️ WAIVED → S-01.4 (N6/DEBT-30 caveat stands). No `feature` row left ⬜ PENDING. All `system` rows ⚠️ WAIVED → `/signoff`, **with a new note carried there: N12/N20 — F-1 shows `document_id` reaches the span `input` unvalidated; the "only `document_id` and expected fields" invariant assumes it is a string. Enforce it.**
+
+## Containment — leg (2) AMENDED, no sixth item
+`HARDEN-01.md` still absent; deferral to S-01.4 **UPHELD** (S-01.3 has no run loop to cascade through, and every *abort* path is fail-closed before the first SDK call — verified). The new guard is the same seam as leg (2), so **leg (2) is amended** rather than a leg added: *"the malformed-record seam — every `DocumentRecord` field's **presence and value type** (including F-1's non-string `document_id`, which is fail-open today), with the malformed record at index ≥ 2 (ME's larger-prefix residual, which fixtures cannot buy)."* **Condition remains five items; S-01.4 cannot reach Done without all five.**
+
+## Open decision — `hypothesis` DEFER should now be REVISITED, not merely counted
+Dunga's own trigger rule was "a third **distinct** residual appearing". F-1 is that third residual (**value types**), on top of ME's larger-prefix gap and N-2's fourth-key caveat. The trigger has fired.
