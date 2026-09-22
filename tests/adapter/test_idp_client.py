@@ -27,7 +27,11 @@ from idp_regression.adapter.errors import (
     IDPSubmitError,
     IDPTransportError,
 )
-from idp_regression.adapter.idp_client import MuleSoftIDPAdapter
+from idp_regression.adapter.idp_client import (
+    MAX_RETRY_AFTER_SECONDS,
+    MuleSoftIDPAdapter,
+    _parse_retry_after_seconds,
+)
 
 
 def _advancing_clock(step: float = 0.1) -> Callable[[], float]:
@@ -620,6 +624,95 @@ def test_poll_401_or_403_refresh_then_retry_succeeds_and_invalidates_once(
     assert len(token_fetch_calls) == 2
 
 
+def test_poll_second_get_after_401_uses_the_refreshed_token_not_the_old_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Atchim re-gate (DEBT-46) — a mutant that discards
+    ``TokenCache.get()``'s return value and replays the OLD Bearer token on
+    the retried GET survives 274/274. This is the same defect class as
+    DEBT-21, one level deeper: the retry HAPPENS, but nothing proves it
+    carries the NEW token. Pins the second GET's ``Authorization`` header
+    against the first — they must differ, and the second must carry the
+    freshly-fetched token."""
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    token_fetch_calls: list[int] = []
+
+    def counting_post_json(
+        *args: object, **kwargs: object
+    ) -> tuple[int, dict[str, Any]]:
+        token_fetch_calls.append(1)
+        return 200, {"access_token": f"tok-{len(token_fetch_calls)}", "expires_in": 300}
+
+    captured_auth_headers: list[str] = []
+    poll_call_count = {"n": 0}
+
+    def counting_get_json(
+        url: str, *, timeout_seconds: float, headers: dict[str, str]
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
+        poll_call_count["n"] += 1
+        captured_auth_headers.append(headers["Authorization"])
+        if poll_call_count["n"] == 1:
+            return 401, {"error": "expired"}, {}
+        return 200, {"status": "SUCCEEDED", "pages": []}, {}
+
+    adapter = _adapter(
+        monkeypatch,
+        clock=_clock_from([0.0, 0.0, 0.5, 1.0, 1.5, 2.0]),
+    )
+    monkeypatch.setattr(transport, "post_json", counting_post_json)
+    monkeypatch.setattr(transport, "get_json_with_headers", counting_get_json)
+
+    out = adapter.extract(str(doc), "action-1", "v1")
+
+    assert out["status"] == "SUCCEEDED"
+    assert len(captured_auth_headers) == 2
+    assert captured_auth_headers[0] == "Bearer tok-1"
+    assert captured_auth_headers[1] == "Bearer tok-2"
+    assert captured_auth_headers[0] != captured_auth_headers[1]
+
+
+def test_poll_deadline_still_fires_after_retries_have_consumed_the_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Atchim re-gate (DEBT-46) — mutant
+    ``if now >= deadline and poll_retry_count == 0:`` survives 274/274.
+    ADR-0004 #3 says the retry budget is INCLUDED in, never extends, the
+    per-document timeout — but only the zero-retry path pinned that. Here
+    two 5xx retries consume time (not the retry-attempts budget: default
+    max_attempts=3, only 2 used) before the clock crosses the deadline;
+    the real code must still raise ``IDPPollTimeoutError`` on the very
+    next loop iteration, with retry attempts still remaining. Fails FAST
+    under the mutant (a 3rd, then 4th, 500 keeps arriving until the
+    retry-budget itself exhausts and ``IDPPollHardFailureError`` fires
+    instead — a different exception, not a 120s pytest-timeout hang)."""
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    calls: list[int] = []
+
+    def always_transient_get_json(
+        *args: object, **kwargs: object
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
+        calls.append(1)
+        return 500, {"error": "transient"}, {}
+
+    adapter = _adapter(
+        monkeypatch,
+        poll_timeout_seconds=10.0,
+        clock=_clock_from([0.0, 0.0, 1.0, 2.0, 2.0, 3.0, 3.0, 11.0]),
+        sleep=lambda _seconds: None,
+    )
+    monkeypatch.setattr(transport, "get_json_with_headers", always_transient_get_json)
+
+    with pytest.raises(IDPPollTimeoutError):
+        adapter.extract(str(doc), "action-1", "v1")
+
+    # Only 2 GETs happened (2 retries) — the default poll_retry_max_attempts
+    # is 3, so the retry-attempts budget still had headroom: the timeout
+    # fired on the deadline alone, not because attempts ran out.
+    assert len(calls) == 2
+
+
 @pytest.mark.parametrize("http_status", [404, 400])
 def test_poll_non_429_4xx_raises_hard_failure_immediately_not_polled(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, http_status: int
@@ -805,6 +898,56 @@ def test_poll_retry_backoff_is_bounded_by_max_attempts_config(
     with pytest.raises(IDPPollHardFailureError):
         adapter.extract(str(doc), "action-1", "v1")
     assert len(calls) == 2  # max_attempts=1 -> 2 total attempts
+
+
+@pytest.mark.parametrize(
+    "raw_value",
+    ["-5", "-0.001", "nan", "inf", "-inf", str(MAX_RETRY_AFTER_SECONDS + 1)],
+)
+def test_parse_retry_after_seconds_rejects_negative_nonfinite_and_over_cap(
+    raw_value: str,
+) -> None:
+    """Atchim re-gate (DEBT-46) — mutant ``if False:`` on the
+    finite/negative/cap guard survives 274/274; only the non-numeric
+    branch (``float()`` raising) was ever covered. A ``Retry-After: -5``
+    or ``nan`` must fall back to None (exponential backoff), never reach
+    ``self._sleep()`` as a raw negative/NaN duration."""
+    assert _parse_retry_after_seconds(raw_value) is None
+
+
+def test_parse_retry_after_seconds_accepts_the_boundary_value_at_the_cap() -> None:
+    # The guard is `> MAX_RETRY_AFTER_SECONDS`, so the cap itself is honoured
+    # (inclusive) — distinguishes the real guard from an off-by-one mutant.
+    assert _parse_retry_after_seconds(str(MAX_RETRY_AFTER_SECONDS)) == pytest.approx(
+        MAX_RETRY_AFTER_SECONDS
+    )
+
+
+def test_poll_retry_sleep_seconds_ignores_retry_after_header_on_a_non_429_status() -> None:
+    """Atchim re-gate (DEBT-46) — mutant ``if status_code == 429`` ->
+    ``if True`` survives 274/274: a 500 response's own ``Retry-After``
+    header (which a real server has no ADR-0004-sanctioned reason to send
+    on a 5xx) would otherwise be honoured verbatim instead of falling
+    through to exponential backoff. Calls the private helper directly —
+    fast, no clock/sleep plumbing needed."""
+    adapter = MuleSoftIDPAdapter(
+        client_id="cid",
+        client_secret="csecret",
+        region="us-east-2",
+        org_id="org-1",
+        terminal_statuses={"SUCCEEDED"},
+        success_statuses={"SUCCEEDED"},
+        random_func=lambda: 1.0,  # deterministic: full-jitter ceiling
+    )
+    sleep_seconds = adapter._poll_retry_sleep_seconds(
+        attempt=1,
+        status_code=500,
+        headers={"retry-after": "50"},
+        remaining_budget=100.0,
+    )
+    # base(1.0) * 2**0 = 1.0, random_func()=1.0 -> 1.0, capped by the 100.0
+    # remaining budget -- NOT the header's 50.0, which only a 429 may honour.
+    assert sleep_seconds == pytest.approx(1.0)
 
 
 def test_success_statuses_must_be_a_subset_of_terminal_statuses() -> None:
