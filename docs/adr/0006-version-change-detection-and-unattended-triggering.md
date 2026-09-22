@@ -1,6 +1,6 @@
 # ADR-0006: Version-change detection & unattended run triggering
 
-**Status:** Proposed — **conditional on S-01.6 / T-01.6.6 discovery** (see §Preconditions)
+**Status:** ⚠️ **PARTIALLY WITHDRAWN (2026-09-22).** **Decision A is WITHDRAWN** — its premise was disproved the same day by `docs/spikes/PROBE-2026-09-22-idp-version-listing.md`; see §Decision A — Withdrawal. **Decision B is DEFERRED** with A (a watcher with nothing to detect has no trigger), except §B.4, whose quota reasoning is **promoted into ADR-0004 A10** and applies to the CLI that exists today. **Decision C is amended** — the S-01.4 `run_eval_detailed` delta is withdrawn with B. The document is kept in full, not deleted: the design is the blueprint if the premise is ever re-opened, and the reasoning is why it was not built.
 **Date:** 2026-09-22
 **Context (use case):** UC-01 (the run itself, unchanged) + a **new** use case, provisionally **UC-02 "unattended version watch"**, owed by Feliz. This ADR designs the capability; it does not write the use case.
 **Risk:** High — this is the first component that can **spend IDP quota with no human in the loop** and the first that decides *on its own* what gets measured. Its failure modes are silence (looks healthy, certifies nothing) and runaway (certifies everything, burns the org's quota). Both are the "silently-wrong GREEN" family `CLAUDE.md ## Rigor` warns about. Atchim review: **REQUIRED** before implementation.
@@ -42,14 +42,17 @@ Keep it on the record as the alternative it is: if this product ever grows a *se
 
 The user's step-8 text mentions confidence. They were not asked to re-decide DEBT-18 and did not, **so option B stands**: no confidence value crosses to the platform. Flagged for a future decision: a **per-field confidence *score*** — a float on the existing `field:<name>` score, not the extracted value — is the one narrow amendment that is plausibly compatible with option B's intent (it reveals model certainty, not document contents). It is **not** designed here and **must not be implemented without an explicit user decision**, because a float derived per-field is still a per-field signal about a specific document, and whether that is "content" is the user's call, not the architect's.
 
-### Preconditions — this ADR is conditional
+### Preconditions — **resolved 2026-09-22: question 1 is answered NO, and the branch this ADR was written for is closed**
 
-`S-01.6 / T-01.6.6` already carries the three discovery questions this design rests on, and **none of them is answered yet**:
-1. Does a management API list an action's versions, and what does it return (ids, timestamps, published/draft flag)?
-2. Does submit support a floating/`latest` version?
-3. Do published versions carry a timestamp or monotonic ordering?
+`S-01.6 / T-01.6.6` carried three discovery questions. Their status after `docs/spikes/PROBE-2026-09-22-idp-version-listing.md` (live probe + vendor documentation + the correction at its end):
 
-**Decision A below is written for the "listing exists" branch and names its fallbacks explicitly.** Nothing here may be implemented before T-01.6.6 returns. Also unresolved and named in T-01.6.6: the **(a) regression gate vs (b) production monitoring** ambiguity. This ADR designs **(a)** only. **(b) is not this product** — there is no golden for an arbitrary production document, so the classifier has nothing to compare against.
+| # | Question | Status |
+|---|---|---|
+| 1 | Does a management API list an action's versions? | ❌ **ANSWERED — NO, on any supported surface.** `OPTIONS` on the runtime plane returns `Allow: POST,OPTIONS`; the documented IDP REST API is **exactly two endpoints** (`POST …/executions`, `GET …/executions/{id}`); `anypoint…/idp/api/v1/…` 403s for both orgs and is the console's **undocumented, unsupported** backing API; and the connected app already holds the **only documented scope** (`Execute Published Actions`), so no grant would open a documented listing — because none exists. |
+| 2 | Does submit support a floating/`latest` version? | ⬜ **STILL UNANSWERED.** This matters only for the fallback rejected below. |
+| 3 | Do published versions carry a timestamp or monotonic ordering? | ⬜ **MOOT** — nothing lists them. §A.2 refused to depend on ordering anyway, which is the one design choice this outcome vindicates rather than invalidates. |
+
+**Consequence: the "listing exists" branch that §Decision A is written for is not available, and the ADR's own status changes accordingly.** Nothing in §Decision A is implementable, now or on the current evidence. Also unresolved and named in T-01.6.6: the **(a) regression gate vs (b) production monitoring** ambiguity. This ADR designs **(a)** only. **(b) is not this product** — there is no golden for an arbitrary production document, so the classifier has nothing to compare against.
 
 ---
 
@@ -67,7 +70,32 @@ The existing boundaries (IDP runtime plane, platform, local documents) are uncha
 
 ---
 
-## Decision A — Version-change detection
+## Decision A — Version-change detection · ⚠️ **WITHDRAWN 2026-09-22**
+
+> **Read the withdrawal first. Everything below it is preserved design, not a plan of record.**
+
+### Withdrawal — the verdict, and the defence
+
+**Verdict: option 2 — *not feasible on a supported surface; stay with CI-on-PR and the explicit publish-time run*. Decision A is withdrawn, not merely deferred**, because deferral implies a pending fact that would revive it and there is none: the documented API is two endpoints, the credential already holds the only documented scope, and no grant can create an endpoint that does not exist. What would revive it is MuleSoft **publishing** a version-listing API — a vendor event, not a task anyone here can schedule.
+
+**The one-paragraph defence.** The product's purpose is to judge whether a *changed* prompt is better or worse, and the two moments a prompt change becomes visible are a PR and a human publishing a version — both of which have a human present who can invoke `run_eval` with the new `--version`. Version *polling* was solving the gap between those two moments, and buying it now costs either quota (option 1) or a dependency on an undocumented console API (option 3) on a tool **whose entire value is being a CI gate other teams trust**. Option 3's failure mode is the one `CLAUDE.md ## Rigor` names as the worst this system can produce: an upstream change breaks detection **silently**, the watcher keeps emitting healthy `watch_tick` lines, and nobody learns that versions stopped being regressed — a false green that looks exactly like a working service. Option 1 spends real extraction quota on every tick to detect an event that happens a few times a week, is itself conditional on an unanswered question (q2), and inverts the cost of the instrument: paying with the expensive tool to learn what a metadata call would have told us free. Against those, option 2 costs one honest sentence in the docs — *this tool does not detect publishes; you trigger it* — and buys a gate with no unsupported dependency, no new persistent state, no unattended spend and no new trust boundary.
+
+**The gap option 2 leaves, stated rather than buried.** CI-on-PR covers a prompt change that travels through this repository. It does **not** cover a version published directly in the IDP console by a Prompt Engineer who then forgets to run the regression — a real workflow, and the case Decision A was meant to catch. The honest controls for it are **procedural, not architectural**: publishing an action version and running the regression against it are one step in the Prompt Engineer's checklist, and the run's `--version` is the record that it happened (INV-04). Calling that a process control is accurate; calling it automation would not be. **If the user judges that gap unacceptable, the decision to re-open is theirs and the live candidate is option 1 — gated on T-01.6.6 q2 and on ADR-0004 A10's ceiling existing first.**
+
+**Options weighed, for the record.**
+
+| Option | Verdict |
+|---|---|
+| 1 — floating-`latest` probe (spend quota to detect) | ❌ Rejected *for now*, not disproved. Conditional on q2 (unanswered); costs one extraction per tick forever to detect a weekly event; requires the submit response to report which version answered — unverified. **Keep on record as the only supported automation path** if the user re-opens. |
+| 2 — **not feasible; CI-on-PR + publish-time run** ✅ | **Chosen.** No unsupported dependency, no unattended spend, no new state, no new boundary. Leaves the console-publish gap, covered procedurally and named above. |
+| 3 — depend on the private console API | ❌ Rejected, firmly. An undocumented endpoint with no compatibility guarantee, under a credential that is currently **403 to it**, as the foundation of a trust gate. Its breakage is silent by construction. A regression gate may not be built on a surface the vendor does not promise. |
+
+**What is withdrawn with it.** `IDPVersionCatalog`, the two-tier state, `list_certified_versions` on `PlatformAdapter`, `watch-once`, the claim protocol, quarantine, the watcher observability contract and its alerting-sink dependency, **and the `run_eval_detailed` / `RunOutcome` delta against a DONE S-01.4** — that seam existed only to let the watcher tell "gate failed" from "run aborted". Dunga: **the §Decision C S-01.4 DoD delta is withdrawn; do not card it, and no `/test` re-stamp is owed for it.**
+
+**What survives, and where it went.**
+- **The quota ceiling (§B.4)** — promoted to **ADR-0004 A10** and re-scoped to the one-shot CLI. It stops being a watcher precondition and becomes the app-side answer to N27 / `/signoff` B-3. Sharpened, not softened: the credential can invoke **any** action in its business group ([IDP Security Best Practices](https://docs.mulesoft.com/idp/security-best-practices)), so the blast radius is wider than "our own action".
+- **§A.2's refusal to trust external ordering** — kept as a general rule for any future IDP-sourced identifier.
+- **The threat-model finding that a machine-supplied version id flows into a URL path** — dormant while no machine supplies one; it revives verbatim the day option 1 is re-opened.
 
 ### A.1 Adapter surface: a *second* Protocol, not a method on `IDPAdapter`
 
@@ -200,7 +228,9 @@ def run_eval(...) -> int:             # unchanged thin wrapper — CT-04 untouch
 
 `run_eval` keeps its `-> int` signature and its contract, so **CT-04, INV-06 and the CI gate are unaffected**. The watcher is a second consumer that needs more than the CI gate needs, and the correct answer to that is a richer sibling, not a fragmented exit code.
 
-### B.4 IDP quota ceiling — a **Done-blocker**, not an NFR row to waive
+### B.4 IDP quota ceiling — a **Done-blocker**, not an NFR row to waive · ➡️ **PROMOTED to ADR-0004 A10 (2026-09-22)**
+
+> **This section's reasoning is now the plan of record for the CLI that exists today, in ADR-0004 A10** — pre-flight not mid-flight, metered in documents at the submit call site, required with no default, no invented numbers. What A10 changes: the durable per-day ledger below is **not** built (it needed the tier-2 store that dies with Decision A), so the ceiling is **per-run only**, and the gap that leaves — a day's cumulative spend across many invocations — is stated there rather than implied. Read the rest of this section as the watcher-specific form of the same idea.
 
 `/signoff` B-3 (N27) found no quota cap and **no config hook at all**. Until now that was a Major system finding with a human in the loop. A watcher removes the human, so:
 
@@ -277,14 +307,16 @@ Structured, one JSON object per line, through the existing `sanitize_for_log` pa
 | `docs/use-cases/UC-01-baseline-regression.md` | Actor/trigger line gains the unattended watcher as a **third** trigger (alongside Prompt Engineer and CI); a note recording the §Step 8 ownership statement | **Narrative → edited by me (2026-09-22).** No AC, flow step or BR changes |
 | `docs/design/SEQ-UC-01-baseline-regression.md` | A note that the actor may be the watcher, and the §Step 8 ownership statement. **The diagram itself is unchanged** | **Narrative → edited by me.** |
 | `docs/specs/SPEC-01-baseline-regression.md` §Summary/§Scope | The §Step 8 ownership sentence; "unattended version-watch triggering" named under **Out of scope → SPEC-02** | **Narrative → edited by me.** |
-| `docs/specs/SPEC-01-baseline-regression.md` S-01.4 **DoD** | `run_eval_detailed` / `RunOutcome` seam (§B.3) | ⚠️ **Proposed delta for Dunga — NOT edited by me.** S-01.4 is **DONE**; adding a seam changes its Files set and stales `docs/qa/TEST-S-01.4-*.md`. Dunga's call: a new sub-task on S-01.4 with a `/test` re-stamp, or a task on the new story that touches S-01.4's module and pays the re-stamp there. **My recommendation: the latter** — the seam exists only for the watcher, so the consumer's story should carry its cost and its re-stamp |
+| `docs/specs/SPEC-01-baseline-regression.md` S-01.4 **DoD** | ~~`run_eval_detailed` / `RunOutcome` seam (§B.3)~~ — ❌ **WITHDRAWN 2026-09-22 with Decision B.** Nothing is owed against S-01.4 from this ADR. | ~~⚠️ **Proposed delta for Dunga — NOT edited by me.** S-01.4 is **DONE**; adding a seam changes its Files set and stales `docs/qa/TEST-S-01.4-*.md`. Dunga's call: a new sub-task on S-01.4 with a `/test` re-stamp, or a task on the new story that touches S-01.4's module and pays the re-stamp there. **My recommendation: the latter** — the seam exists only for the watcher, so the consumer's story should carry its cost and its re-stamp~~ |
 | `docs/design/CONTRACTS.md` / `INVARIANTS.md` | No change yet. CT-06 (`IDPVersionCatalog` response contract) and CT-07 (state-file schema) land with SPEC-02, once T-01.6.6 pins the real response shape. Registering a contract against an unverified API would be inventing a seam | Deferred, deliberately |
 | `docs/qa/NFR-02.md` | **Created** — the NFR checklist for the new UC | Mine. All rows `⬜ PENDING`; I set targets, I do not verify them |
 | `docs/state/ASSUMPTIONS.md` | T-01.6.6's three questions become blocking assumptions of SPEC-02 | Dunga/Feliz at `/plan`, once UC-02 exists |
 
 ---
 
-## Proposed story — **S-02.1, under a NEW spec (SPEC-02), not under SPEC-01**
+## Proposed story — **S-02.1, under a NEW spec (SPEC-02), not under SPEC-01** · ⚠️ **WITHDRAWN 2026-09-22**
+
+> **Dunga: do not card this story, and do not open SPEC-02.** It realises Decision A, which is withdrawn. Nothing below is a plan of record. Two items are re-homed and *are* live work, both under SPEC-01 / UC-01 and neither belonging to this story: **(1)** ADR-0004 **A10** — the per-run IDP quota ceiling (`--max-documents-per-run`, pre-flight, `AbortReason` member, CI `concurrency` control), the app-side close of N27 / `/signoff` B-3; **(2)** ADR-0004 **A9** — `--org` as a required run-identity flag, plus the recommended five-field INV-04 widening and the 404 disambiguation message. Sizes and cards are yours; I have not estimated them.
 
 **Why a new spec and not `S-01.7`.** SPEC-01 realises UC-01, whose actor is a Prompt Engineer or CI running a regression *they* decided to run. This capability has a **different actor** (an unattended service), a **different trigger** (a state change at an external system), **new persistent state**, a **new external API plane**, and post-conditions UC-01 does not have (what has been certified, what is quarantined, how much quota is left). Those are the hallmarks of a separate use case, not another story inside one. Folding it into SPEC-01 would also quietly widen a spec whose `/signoff` verdict is 🔴 NO-GO with five open blockers — SPEC-01 needs closing, not extending.
 
@@ -295,7 +327,15 @@ Structured, one JSON object per line, through the existing `sanitize_for_log` pa
 
 **Scope out:** production-extraction monitoring (T-01.6.6's reading (b) — a different product); webhooks; multi-action watching (one action per tick invocation — run two schedules); any change to `classify` / `overall_gate` / the exit-code contract; per-field confidence scores (needs a user decision, §Context).
 
-### Definition of Ready — **NOT READY.** Six conditions, all currently open.
+### Definition of Ready — ❌ **VOID (2026-09-22): condition 1 was answered NO, so the story is not "not ready", it is not happening.**
+
+**How condition 1 resolved, recorded because a DoR that is merely deleted teaches nothing.** It read *"T-01.6.6 answered … Without Q1/Q2 the design's own §A.1 has an unresolved branch and **the story may be infeasible**."* Q1 came back NO on every supported surface. **The hard blocker fired as designed and the story is infeasible as written** — this is the DoR doing exactly its job, one probe before implementation rather than one sprint into it.
+
+The other five conditions do not lapse quietly, and where they outlive this story they are said so here: **condition 3** (`/signoff` B-1 `ENCRYPTION_KEY`, B-2 the golden store on `0.0.0.0` behind `postgres`/`postgres`) and **condition 4** (B-5, one real document end-to-end) are SPEC-01 blockers and **remain open and owed** independent of this ADR — they were never conditional on a watcher. **Condition 5** (an alerting sink) lapses with Decision B; the N11 "signal exists, nothing consumes it" finding it was derived from stays waived under SPEC-01 as it was. **Condition 2** (UC-02, Feliz) lapses — **Feliz owes no UC-02**; if the user re-opens detection, it starts there again.
+
+*The original six, preserved unchanged below for the record.*
+
+#### ~~Definition of Ready — **NOT READY.** Six conditions, all currently open.~~ (superseded)
 
 1. **T-01.6.6 answered** (the three listing questions) and the (a)-vs-(b) ambiguity resolved in writing. Without Q1/Q2 the design's own §A.1 has an unresolved branch and the story may be **infeasible**. *Hard blocker.*
 2. **UC-02 written and intent-validated by Feliz.** This ADR is a design without a use case above it; the ACs, personas and business rules are Feliz's, not mine.
@@ -373,10 +413,13 @@ sequenceDiagram
 
 ## What this ADR does NOT decide (and who decides it)
 
-1. **Whether a version-listing API exists at all** → T-01.6.6, live org. The entire capability is conditional on it.
+*Updated 2026-09-22 for the withdrawal. Items 3, 4 and 7 lapse with Decision B; 2 and 5 outlive it; 6 is answered.*
+
+1. ~~**Whether a version-listing API exists at all** → T-01.6.6, live org. The entire capability is conditional on it.~~ **ANSWERED 2026-09-22: it does not, on any supported surface** — the capability is withdrawn (§Decision A — Withdrawal).
+1b. **Whether to re-open detection despite that** → **the user.** The gap option 2 leaves is a console-published version nobody runs a regression against, covered today by process, not architecture. Re-opening means option 1 (floating-`latest` probe), which needs T-01.6.6 **q2** answered first and ADR-0004 A10's ceiling in place before a single automated submit.
 2. **Whether per-field confidence may cross to the platform** → **user**. DEBT-18 option B stands until they say otherwise.
 3. **Which scheduler** (cron / systemd timer / GitHub Actions `schedule`) → user/ops. The design requires only "something runs a command on an interval and preserves its exit code".
 4. **Which alerting sink** → user/ops. The design fixes the *contract* (what is emitted, what must be alarmed on), not the product.
-5. **The quota numbers** — `--max-documents-per-day`, `--max-runs-per-tick`, the tick interval → **user**, from the org's actual IDP allotment. I refuse to default them; a guessed quota ceiling is worse than none because it looks like a control.
-6. **Whether the management plane needs a different credential/scope** → T-01.6.6 reports it; **Mestre** registers it in `## External services`. Not mine to write.
-7. **How the `run_eval_detailed` delta is carded against a DONE S-01.4** → **Dunga** (§Decision C).
+5. **The quota numbers** — now `--max-documents-per-run` (ADR-0004 A10) → **user**, from the org's actual IDP allotment. I refuse to default them; a guessed quota ceiling is worse than none because it looks like a control. **A10 adds a prior question the user must answer first: what does MuleSoft actually meter — documents, pages, or executions?** If it is pages, a documents ceiling bounds invocations and not spend.
+6. ~~**Whether the management plane needs a different credential/scope**~~ → **ANSWERED 2026-09-22: there is no documented management plane and no scope that opens one.** The connected app already holds the only documented scope (`Execute Published Actions`). **Nothing new for Mestre to register** — but the existing IDP row's note that the credential reaches **any action or version in its business group** is a containment fact worth carrying into `/harden` and it is the reason ADR-0004 A10 exists.
+7. ~~**How the `run_eval_detailed` delta is carded against a DONE S-01.4** → **Dunga** (§Decision C).~~ **Withdrawn — there is no delta against S-01.4 from this ADR, and no `/test` re-stamp is owed for one.** What Dunga *does* now carry from today: ADR-0004 **A9** (`--org` required; the five-field INV-04 widening, recommended and costed) and **A10** (the per-run quota ceiling; the 404 disambiguation message). Both touch S-01.4's module against a DONE story — the same carding question A9/A10 hand over deliberately, since `Risk: high` + DEBT-44 means the re-stamp is not free.

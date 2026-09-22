@@ -1,5 +1,11 @@
 # NFR-02 — Non-functional requirements checklist — unattended version watch
 
+> ⚠️ **DORMANT — 2026-09-22. Do not work this checklist.** The use case it is written against is withdrawn: `docs/spikes/PROBE-2026-09-22-idp-version-listing.md` established that **no supported API lists an action's versions**, so ADR-0006 **Decision A is withdrawn** and Decision B deferred with it. There is no UC-02 and no SPEC-02 to card. Kept, not deleted, for two reasons: it is the ready-made checklist if the user ever re-opens detection via the floating-`latest` probe (ADR-0006 §Decision A — Withdrawal, option 1), and an absent file would make a deliberate decision look like an oversight.
+>
+> **Rows that did NOT lapse — they re-homed to `NFR-01` as N29–N31 (ADR-0004 A9/A10):** M3 and D4 (quota metering, pre-flight enforcement) and the no-default half of C2. They now bind the **one-shot CLI**, which is the caller that actually exists. What did **not** survive: the per-**day** ledger, because it needed the tier-2 state store that dies with Decision A — today's ceiling is per-run only, and that limit is stated in ADR-0004 A10 rather than implied.
+>
+> Everything below is preserved as written on 2026-09-22 and none of it is a plan of record.
+
 **Use case:** UC-02 (unattended version watch) — **owed by Feliz**; this checklist is written against ADR-0006 and is provisional until UC-02 exists.
 **ADR:** ADR-0006 (version-change detection & unattended run triggering)
 **Rigor profile:** `prototype` (mechanical floor always applies; every gate the profile turns off is **recorded**, never silently dropped)
