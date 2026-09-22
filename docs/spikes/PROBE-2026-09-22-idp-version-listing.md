@@ -39,3 +39,31 @@ Grant the connected app read access to the IDP management surface (Anypoint Acce
 
 ## Scripts
 Not committed — throwaway, in the session scratchpad. Reproducible from the table above: client-credentials token from `accounts/api/v2/oauth2/token`, then a bearer GET per row.
+
+---
+
+## Addendum — the documentation answers it (2026-09-22, same day)
+
+Source: [Processing Documents and Retrieving Results With the IDP API](https://docs.mulesoft.com/idp/automate-document-processing-with-the-idp-api) and [Creating Connected Apps](https://docs.mulesoft.com/access-management/creating-connected-apps-dev).
+
+### The scope question
+The IDP permission family lives in Access Management under **Document Actions**, granted **per business group**: **Manage Actions**, **Build Actions**, **Execute Published Actions**.
+
+This credential demonstrably holds **Execute Published Actions** — `POST …/executions` succeeded today — and behaves as though it holds none of the others: every read surface returns 403/401. That is consistent with the probe table above and is the likely reason the management-plane calls are refused.
+
+### The version-listing question — **the public IDP API documents no such endpoint**
+The documented IDP REST API is **two endpoints only**:
+
+| Method | Path | Scope |
+|---|---|---|
+| `POST` | `https://idp-rt.{region}.anypoint.mulesoft.com/api/v1/organizations/{orgId}/actions/{actionId}/versions/{actionVersion}/executions` | Execute Published Actions |
+| `GET` | `…/executions/{executionId}` | not stated |
+
+**There is no documented endpoint that lists an action's versions, and none that lists actions.** This matches the runtime-plane probe exactly (`Allow: POST,OPTIONS`).
+
+**Consequence for ADR-0006.** `anypoint.mulesoft.com/idp/api/v1/...` — the 403 path — is the IDP web app's own backing API (the sibling route `/idp/v1/...` serves the SPA). It is **undocumented and unsupported**. So even with Manage Actions granted, ADR-0006 Decision A's "listing exists" branch would rest on a **private API with no compatibility guarantee**, for a tool whose entire purpose is to be a CI gate other teams trust.
+
+**This does not decide the matter — Soneca owns that — but it changes which branch is live.** ADR-0006's own named fallbacks are (i) a floating-`latest` probe that spends quota to detect change, and (ii) *not feasible — stay with CI-on-PR*. A third now exists: **build on the undocumented management API with eyes open**, accepting that a silent upstream change breaks version detection. Granting Manage Actions and re-probing is still worth doing — it tells us what the endpoint actually returns — but the decision is no longer "does it exist" so much as "do we depend on something unsupported".
+
+### Also settled by the same page — `?valueOnly=false` is correct
+*"add the `valueOnly=false` query parameter to your GET request."* Verbatim from the docs, on the execution-results GET. This **closes Atchim's unverifiable items 1 and 2** (correct parameter name, casing, and that it belongs on the result GET) — previously unfalsifiable by the suite, now confirmed by both the vendor docs and a live response that came back in the full cell shape.
