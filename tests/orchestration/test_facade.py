@@ -138,6 +138,63 @@ def test_run_eval_returns_nonzero_and_names_the_missing_idp_var(
     assert "distinctive-client-secret-NOT-A-REAL-SECRET-4d9c" not in caplog.text
 
 
+def test_run_eval_returns_nonzero_when_idp_statuses_are_configured_inconsistently(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+) -> None:
+    """Required finding (Atchim gate, live-reproduced 2026-09-21):
+    `MuleSoftIDPAdapter.__init__` raises a raw `ValueError` when
+    `success_statuses` is not a subset of `terminal_statuses`
+    (`adapter/idp_client.py:109`) -- `facade.py`'s
+    `except (RuntimeError, IDPConfigurationError)` did not catch it, so
+    an uncaught traceback escaped `main()` instead of a controlled
+    non-zero return, breaking the `-> int` / ADR-0004 exit-code
+    contract. `IDP_SUCCESS_STATUSES=DONE` / `IDP_TERMINAL_STATUSES=SUCCEEDED`
+    reproduces it through the REAL facade (no `make_idp_adapter`
+    monkeypatch), the same way `test_cli.py`'s C5 test exercises the real
+    facade rather than a stubbed one."""
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.setenv("IDP_SUCCESS_STATUSES", "DONE")
+    monkeypatch.setenv("IDP_TERMINAL_STATUSES", "SUCCEEDED")
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+
+
+def test_run_eval_sanitizes_the_caught_idp_configuration_exception_message(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+) -> None:
+    """Reviewer suggestion (2026-09-21): `facade.py`'s
+    `make_idp_adapter()` except-block logs `str(exc)` unsanitized --
+    the one untrusted-ish boundary in the batch not routed through
+    `sanitize_for_log`. Today's messages only name a variable, but the
+    boundary should not rely on that staying true. Pin it with a message
+    containing a quote and an embedded fake log line; the raw text must
+    never appear unescaped in the log."""
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+
+    hostile_message = 'boom" forged="1'
+
+    def _raise_hostile(*args: object, **kwargs: object) -> None:
+        raise RuntimeError(hostile_message)
+
+    monkeypatch.setattr(facade, "make_idp_adapter", _raise_hostile)
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    assert hostile_message not in caplog.text
+    assert json.dumps(hostile_message) in caplog.text
+
+
 def test_run_eval_never_logs_the_idp_client_secret_value(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

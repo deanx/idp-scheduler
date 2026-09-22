@@ -70,10 +70,22 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
 
     try:
         make_idp_adapter()
-    except (RuntimeError, IDPConfigurationError) as exc:
-        # Both already name only the offending variable, never a value
-        # (INV-02) -- see make_idp_adapter's `_require`/`_timing_env`.
-        logger.error("run_eval: %s", exc)
+    except (RuntimeError, IDPConfigurationError, ValueError) as exc:
+        # `ValueError` closes a Required gate finding (2026-09-21,
+        # live-reproduced): `MuleSoftIDPAdapter.__init__` raises a raw
+        # `ValueError` when `success_statuses` is not a subset of
+        # `terminal_statuses` (adapter/idp_client.py:109), which escaped
+        # this except-block and broke the `-> int` / ADR-0004 exit-code
+        # contract. All three exception types already name only the
+        # offending variable/config, never a value (INV-02) -- see
+        # make_idp_adapter's `_require`/`_timing_env` and
+        # MuleSoftIDPAdapter's `_validate_timing`. `str(exc)` is still
+        # wrapped in `sanitize_for_log` defensively (reviewer
+        # suggestion): today's messages are safe by construction, but
+        # this is the one exception-message boundary in this function
+        # not otherwise routed through it, and that safety is not
+        # guaranteed to hold for every future raiser of these types.
+        logger.error("run_eval: %s", sanitize_for_log(str(exc)))
         return 1
 
     run_id = generate_run_id()
