@@ -77,6 +77,11 @@ sequenceDiagram
     end
 ```
 
+**Amendment 2026-09-22 (Soneca, ADR-0006) — the diagram itself is unchanged.**
+- **The actor may also be an unattended watcher.** ADR-0006 designs a scheduled `watch-once` tick that discovers a newly published action version and invokes this exact flow with the discovered `--version`; the other three run-identity flags stay required and CLI-only (A8). Everything below the first message is identical under that trigger. The tick's own sequence is in ADR-0006 §Appendix; it moves to `SEQ-UC-02-*` when Feliz writes UC-02.
+- **Who compares.** `PLAT` stores the golden-set dataset and the scores and provides the version-over-version view. It does **not** compare: `CLS` + `GATE` (ours, pure, ADR-0003) own the nested walk, type-aware matching, `match_key` pairing and per-leaf verdicts, and the gate is computed **before** anything is written (INV-08). Langfuse custom evaluators were considered as an alternative host and deferred — see ADR-0006 §Step 8.
+- Steps landing 2026-09-22 inside `IDP`'s poll loop (not a diagram change): a **≥ 10 s poll-interval floor**, and the result GET carrying **`?valueOnly=false`**. The latter was a live fail-shut defect — `NORM` already requires the `{"value", "confidence"}` cell shape that only `valueOnly=false` returns.
+
 Key paths this diagram pins:
 - *Amendment 2026-09-19 (Soneca, QA-01-S-01.3 F-4):* two changes supersede the diagram's `write_scores(… verdicts …)` and `flush()` steps.
   - ADR-0005 #9: gates are computed in the loop, and one `record_run` runs after the loop.

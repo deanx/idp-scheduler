@@ -11,6 +11,11 @@
 
 We build the P0 MVP flow for the IDP Regression Tester: run the current baseline IDP action version over an entire golden set, classify each extracted field against the golden, persist per-field `field:<name>` scores and a `gate` score per document to a named run on Langfuse (ADR-0005; golden sets guarded by a committed server-side `expectedOutputSchema`), record the action version and golden version used, and exit non-zero on any critical FAIL or run error. The classifier (Epic B) is pure and is the CI gate; the IDP adapter, Langfuse platform adapter, and orchestrator + CLI (Epic D) wire the pure core to the external services. Two prerequisite spike stories gate the uncertain parts before the implementation stories that depend on them (S-01.5 is Done; S-01.6 is open).
 
+> **Architecture-narrative amendment 2026-09-22 (Soneca, ADR-0006). Narrative only — no DoD, AC, task or estimate below is changed by this note.**
+> **Langfuse stores the golden-set dataset and the scores, and provides the version-over-version regression view. The comparison brain is ours**: the nested walk, type-aware canonical matching, `match_key` list pairing and per-leaf scoring live in `classifier/` (ADR-0003) and are the CI gate (INV-08 — the gate is computed in-process, before the single `record_run`, and never inferred from what landed on the platform). Langfuse *custom evaluators* are recorded as a considered-and-deferred alternative host for the same logic (ADR-0006 §Step 8): they would move the pure classifier inside the platform's execution model, against INV-08 and ADR-0005 #9. Two honest limits of the platform view: it shows **verdicts and gates, not values** (DEBT-18 option B), and the version series only reads as a series if the run name carries the version.
+>
+> ⚠️ **Proposed delta to S-01.4's DoD — NOT applied here, for Dunga.** ADR-0006 §B.3 needs a `run_eval_detailed(...) -> RunOutcome` sibling (`exit_code`, `gate_failed`, `abort_reason`, `run_id`, `documents_submitted`) with `run_eval(...) -> int` kept as the thin wrapper, because an unattended caller must distinguish "the gate found a regression" (a successful run) from "the run aborted" — and **CT-04 deliberately cannot tell it apart, and must not be changed to**. S-01.4 is **DONE**, so adding this seam stales `docs/qa/TEST-S-01.4-*.md` and changes its Files set. **Soneca does not edit a Done story's DoD.** Dunga's call: a sub-task on S-01.4 with a `/test` re-stamp, or a task on SPEC-02 that touches S-01.4's module and pays the re-stamp there. **Recommendation: the latter** — the seam exists only for the watcher, so the consumer's story should carry its cost.
+
 ## Scope
 
 - In scope (UC-01):
@@ -26,6 +31,7 @@ We build the P0 MVP flow for the IDP Regression Tester: run the current baseline
   - Candidate (non-baseline) runs and A/B comparison (later UCs).
   - Human disposition (F19) and golden promotion (F20) — deferred to post-MVP UCs.
   - Release/deploy/changelog/version tagging (CI/CD concern, not the board).
+  - **Unattended version-watch triggering** — detecting that a new action version was published and running the regression with no human present. Designed in **ADR-0006**; belongs to **UC-02 / SPEC-02** (a different actor, a different trigger, new persistent state, a new external API plane). Added 2026-09-22.
 
 ## Implementation order & dependencies
 

@@ -17,7 +17,15 @@
 
 ## Use case
 
-- **Actor:** Prompt Engineer (or CI Pipeline acting on their behalf)
+> **Narrative amendment 2026-09-22 (Soneca, ADR-0006) — no AC, flow step or business rule changes.**
+>
+> **1. A third trigger exists (in design, not yet built).** UC-01's flow is triggered by a Prompt Engineer or by CI on a prompt-change PR. ADR-0006 designs an **unattended version watcher** — a scheduled one-shot tick that detects a newly published action version and invokes this same flow with the discovered `--version`. It is a *new caller above* `run_eval`, not a change to it: **every step, AC, alternate flow and business rule below is unchanged under that trigger.** The watcher is a separate use case (UC-02, owed by Feliz) and a separate spec (SPEC-02); it is **not** in scope here.
+>
+> **2. Where the comparison lives, said out loud (user decision 2026-09-22).** The evaluation platform stores the golden-set dataset and the scores, and provides the cross-run/version-over-version view. **The comparison itself is ours**: the nested walk, type-aware canonical matching, `match_key` list pairing and per-leaf scoring are `classifier/` (ADR-0003) and are the CI gate (INV-08). This confirms ADR-0003/0005 and changes no code — it is written down because the docs never said which side of the seam owned it, and a reader could have assumed the platform did. Langfuse *custom evaluators* were considered as an alternative host for the same logic and **deferred**: they would move the pure classifier inside the platform's execution model, against INV-08 and ADR-0005 #9 (record-after). See ADR-0006 §Step 8.
+>
+> **3. Two honest limits of the platform's "regression view".** Per DEBT-18 option B it shows **verdicts and gates, not values** — no extracted, expected or confidence *value* crosses to the platform. And version-over-version comparison depends on the run name carrying the version (ADR-0006 §C3).
+
+- **Actor:** Prompt Engineer (or CI Pipeline acting on their behalf; from SPEC-02 onward, also an unattended version watcher — see the amendment above)
 - **Goal:** Run the current baseline action version over an entire golden set, classify each extracted field against the golden, persist per-field scores and a gate to a named run on the evaluation platform, and record the action version and golden version used — producing the reproducible reference against which any candidate change is compared.
 - **Preconditions:**
   1. A golden set exists on the evaluation platform (at least one dataset item: `document_id` + expected golden fields).
