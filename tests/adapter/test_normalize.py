@@ -485,3 +485,16 @@ def test_non_dict_prompt_entry_raises_typed_error() -> None:
     raw = {"status": "SUCCEEDED", "pages": [{"prompts": ["not a mapping"]}]}
     with pytest.raises(MalformedIDPOutputError):
         normalize(raw, success_statuses={"SUCCEEDED"})
+
+
+def test_value_only_cell_shape_raises_typed_error() -> None:
+    # Defect (2026-09-22 architecture-adherence review): IDP's execution-
+    # result endpoint returns value-only cells by default (a bare scalar,
+    # not {"value": ..., "confidence": ...}) unless the poll GET carries
+    # ?valueOnly=false. normalize() REQUIRES the full shape (a "value" key
+    # on every cell) — this pins the consequence a live, un-parameterized
+    # poll GET would hit today: a value-only cell is a malformed cell, not
+    # silently coerced or confidence-dropped.
+    raw = {"status": "SUCCEEDED", "pages": [{"fields": {"total": "1150.00"}}]}
+    with pytest.raises(MalformedIDPOutputError):
+        normalize(raw, success_statuses={"SUCCEEDED"})

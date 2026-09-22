@@ -148,3 +148,27 @@ Atchim review: APPROVED (top-level gate, 2026-09-18 — opus; reviewer-independe
 ## Amendment 2026-09-22 — `IDP_ACTION_ID` is no longer a CLI default (ADR-0004 A8)
 
 §Decision's line *"`IDP_ACTION_ID` survives only as an optional CLI default (ADR-0004)"* is **superseded** by ADR-0004 Amendment **A8** (user decision, 2026-09-22). `--action` is now a **required CLI parameter with no environment fallback**, exactly as `--version` already was, and `IDP_ACTION_ID` is **read by no production code path** — it survives only as test-harness convenience. The principle underneath this ADR is unchanged and is simply applied without an exception: run parameters (`action_id`, `version`) are not environment config. See ADR-0004 A8 for the full rule and its consequences.
+
+## Amendment 2026-09-22 — Poll contract: `?valueOnly=false` required, poll-interval floor raised to 10s (architecture-adherence review)
+
+Raised by a user architecture-adherence review of `src/idp_regression/adapter/idp_client.py`, independent of the `/spike` in the §Follow-up work list (still open, still pins `IDP_TERMINAL_STATUSES`/`IDP_SUCCESS_STATUSES`/the timeout against the live org — this amendment does not discharge it). Two defects, both in the poll contract this ADR defines at §Decision step 3.
+
+**A9. The poll GET must request the full cell shape — `?valueOnly=false`.**
+
+**The rule.** §Context confirms the raw execution response nests every cell as `{"value": ..., "confidence": ...}`, and §Normalized-output contract commits `normalize()` to requiring that shape (`FieldValue.value` is not optional; a cell without a `"value"` key raises `MalformedIDPOutputError(reason="invalid_cell")`). What was undocumented: the Anypoint IDP execution-result endpoint returns **value-only** cells (a bare scalar, not the `{value, confidence}` mapping) **by default**, and the full shape is opt-in via a `?valueOnly=false` query parameter on the result GET. The adapter's poll GET carried no query string, so against the live API every extraction would have failed `normalize()`'s own boundary check (or, had `normalize()` been laxer, silently dropped confidence) — a live fail-shut defect masked entirely by synthetic fixtures that were hand-written in the full shape.
+
+**Evidence.** `_poll()` built `f"{base_url}/{execution_id}"` with no query string (idp_client.py, pre-fix). `normalize()` (`adapter/normalize.py:92-94`) already raised on a missing `"value"` key — the two pieces of code disagreed about what the wire actually returns, and nothing in the test suite exercised the real query string because every fixture and fake already supplied the full shape.
+
+**Fix.** The poll GET — the one whose body `_poll()` returns as the extraction result — now requests `f"{base_url}/{execution_id}?{urlencode({'valueOnly': 'false'})}"`. Not the submit POST (submit returns only an execution id, no cell data). Built via `urllib.parse.urlencode`, not string concatenation, so a second query parameter can be added later without re-deriving the escaping. Pinned by a literal-URL test (a mutant dropping the query string goes RED) and a `normalize()`-level test proving a value-only cell (`{"total": "1150.00"}`) is rejected as malformed — the defect's live consequence, made visible in the suite rather than only in a comment.
+
+**Reversal cost.** Low — a single query-string change at one call site, covered by a URL-pinning test that will catch a regression immediately.
+
+**A10. Poll-interval floor raised from 3.0s (unstated default) to a required minimum of 10.0s.**
+
+**The rule.** `DEFAULT_POLL_INTERVAL_SECONDS` was `3.0`, with no floor below the general `> 0` timing check — a caller (or a future config change) could set it arbitrarily low. §Threat model's Denial-of-service line ("IDP rate limits unknown … bounded retry for transient errors only") already commits to IDP-side rate protection; a 3s poll against a long-running extraction is roughly 40 requests per document, which is the opposite of that posture. `MIN_POLL_INTERVAL_SECONDS = 10.0` is now enforced in `_validate_timing` at construction — same typed `IDPConfigurationError` shape as the existing `MAX_*` bounds (QA F-1 precedent), fail-closed, never discovered mid-poll. `DEFAULT_POLL_INTERVAL_SECONDS` is raised to `10.0` to match.
+
+**Evidence.** No incident — this is a hardening ahead of the live-org `/spike` (§Follow-up work), which still has to pin IDP's actual rate limits. 10.0s is a conservative floor chosen to bound worst-case request volume, not a measured value; it is deliberately loose enough to revisit once the spike has real numbers.
+
+**Consequence for `DEFAULT_POLL_TIMEOUT_SECONDS` (`120.0`, unchanged).** At the new default interval this is 12 polls per document — still a sane number; not changed by this amendment, and no reason found to change it.
+
+**Reversal cost.** Low while unreleased — a single constant plus a validation floor, both covered by boundary tests (9.999 rejected, 10.0 accepted). Raising the floor further later is free; lowering it below 10.0 after this amendment ships would need a stated reason (e.g. the `/spike`'s pinned live-org rate limit turns out to tolerate less), not just convenience.

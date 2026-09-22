@@ -10,6 +10,7 @@ import logging
 import pathlib
 import re
 import time
+import urllib.parse
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -74,7 +75,7 @@ def _adapter(
     submit_result: tuple[int, dict[str, Any]] = (202, {"id": "exec-1"}),
     poll_results: list[tuple[int, dict[str, Any]]] | None = None,
     poll_timeout_seconds: float = 60.0,
-    poll_interval_seconds: float = 1.0,
+    poll_interval_seconds: float = 10.0,
     clock: Callable[[], float] | None = None,
     sleep: Callable[[float], None] | None = None,
     terminal_statuses: set[str] | None = None,
@@ -185,6 +186,44 @@ def test_two_extract_calls_reuse_the_cached_token_one_fetch(
     adapter.extract(str(doc), "action-1", "v1")
     adapter.extract(str(doc), "action-1", "v1")
     assert len(token_fetch_calls) == 1
+
+
+def test_poll_get_url_carries_value_only_false_query_param(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Defect (2026-09-22 architecture-adherence review): the Anypoint IDP
+    # execution-result GET returns value-only output by default (bare
+    # scalars, e.g. {"total": "1150.00"}), and normalize() REQUIRES the
+    # full {"value": ..., "confidence": ...} cell shape (invalid_cell on a
+    # missing "value" key) -- so every real poll would fail to normalize
+    # unless the GET explicitly asks for the full shape via
+    # ?valueOnly=false. Pin the literal query parameter on the URL the
+    # adapter actually requests -- a mutant dropping it must go RED.
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    requested_urls: list[str] = []
+
+    def capturing_get_json(
+        url: str, *args: object, **kwargs: object
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
+        requested_urls.append(url)
+        return 200, {"status": "SUCCEEDED", "pages": []}, {}
+
+    adapter = _adapter(
+        monkeypatch,
+        clock=_clock_from([0.0, 0.0, 0.5, 1.0]),
+    )
+    monkeypatch.setattr(transport, "get_json_with_headers", capturing_get_json)
+    adapter.extract(str(doc), "action-1", "v1")
+
+    assert requested_urls, "get_json_with_headers was never called"
+    (url,) = requested_urls
+    assert url.startswith(
+        "https://idp-rt.us-east-2.anypoint.mulesoft.com/api/v1"
+        "/organizations/org-1/actions/action-1/versions/v1/executions/exec-1?"
+    ), url
+    parsed_query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+    assert parsed_query == {"valueOnly": ["false"]}, parsed_query
 
 
 def test_poll_transport_error_keeps_polling_within_budget_then_succeeds(
@@ -1012,6 +1051,22 @@ def test_invalid_poll_interval_raises_typed_config_error_at_construction(
         MuleSoftIDPAdapter(**_adapter_kwargs(poll_interval_seconds=bad_value))  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("below_floor", [0.1, 1.0, 3.0, 9.0, 9.999])
+def test_poll_interval_below_the_10_second_floor_raises_typed_config_error(
+    below_floor: float,
+) -> None:
+    # Rate-protection floor (2026-09-22 architecture-adherence review): a
+    # 3s poll against a long extraction is ~40 requests/document. Rejected
+    # fail-closed at construction, same typed-error shape as the existing
+    # MAX_* bounds (QA F-1 precedent), never discovered mid-poll.
+    with pytest.raises(IDPConfigurationError):
+        MuleSoftIDPAdapter(**_adapter_kwargs(poll_interval_seconds=below_floor))  # type: ignore[arg-type]
+
+
+def test_poll_interval_at_the_10_second_floor_is_accepted() -> None:
+    MuleSoftIDPAdapter(**_adapter_kwargs(poll_interval_seconds=10.0))  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf"), "not-a-number"])
 def test_invalid_token_refresh_margin_raises_typed_config_error_at_construction(
     bad_value: object,
@@ -1154,7 +1209,7 @@ def test_poll_budget_is_measured_from_before_submit_not_after(
     adapter = _adapter(
         monkeypatch,
         poll_timeout_seconds=10.0,
-        poll_interval_seconds=1.0,
+        poll_interval_seconds=10.0,
         clock=clock,
         sleep=lambda _seconds: None,
     )
@@ -1190,7 +1245,7 @@ def test_poll_clamps_per_get_timeout_and_sleep_to_remaining_budget(
     adapter = _adapter(
         monkeypatch,
         poll_timeout_seconds=10.0,
-        poll_interval_seconds=5.0,
+        poll_interval_seconds=10.0,
         # calls, in order: token.get() now, token._refresh() expires_at,
         # extract() start, poll iter1 now (=8.0, remaining=2.0), sleep-calc
         # now (=8.0, remaining=2.0), poll iter2 now (=11.0, past deadline).
@@ -1254,7 +1309,9 @@ def test_default_clock_and_sleep_are_time_monotonic_and_time_sleep_not_time_time
         org_id="org-1",
         terminal_statuses={"SUCCEEDED"},
         success_statuses={"SUCCEEDED"},
-        poll_interval_seconds=0.01,
+        # >= MIN_POLL_INTERVAL_SECONDS; the real time.sleep default is never
+        # actually invoked here since the first poll returns SUCCEEDED.
+        poll_interval_seconds=10.0,
     )
     out = adapter.extract(str(doc), "action-1", "v1")
     assert out["status"] == "SUCCEEDED"

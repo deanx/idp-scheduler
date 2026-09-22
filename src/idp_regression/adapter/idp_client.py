@@ -13,6 +13,7 @@ import math
 import os
 import random
 import time
+import urllib.parse
 from collections.abc import Callable
 
 from idp_regression.adapter import transport
@@ -37,7 +38,7 @@ TOKEN_URL = "https://anypoint.mulesoft.com/accounts/api/v2/oauth2/token"
 
 DEFAULT_SUBMIT_TIMEOUT_SECONDS = 30.0
 DEFAULT_POLL_TIMEOUT_SECONDS = 120.0
-DEFAULT_POLL_INTERVAL_SECONDS = 3.0
+DEFAULT_POLL_INTERVAL_SECONDS = 10.0
 DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS = 60.0
 
 #: DEBT-24 / ADR-0004 #3 -- bounded poll retry for a transient 5xx/429 HTTP
@@ -71,11 +72,27 @@ MAX_POLL_TIMEOUT_SECONDS = 3_600.0
 MAX_POLL_INTERVAL_SECONDS = 3_600.0
 MAX_TOKEN_REFRESH_MARGIN_SECONDS = 3_600.0
 
+#: IDP-side rate protection (2026-09-22 architecture-adherence review): a
+#: poll interval below this floor is rejected fail-closed at construction,
+#: same shape as the MAX_* bounds above. A 3s poll against a long
+#: extraction is ~40 requests/document; 10s keeps that bounded.
+MIN_POLL_INTERVAL_SECONDS = 10.0
 
-def _validate_timing(name: str, value: object, *, allow_zero: bool, max_value: float) -> float:
+
+def _validate_timing(
+    name: str,
+    value: object,
+    *,
+    allow_zero: bool,
+    max_value: float,
+    min_value: float | None = None,
+) -> float:
     """Fail closed on a non-numeric/non-finite/out-of-range timing config
     value (QA F-1) — raised as a typed ``IDPConfigurationError`` at
-    construction, not discovered mid-poll."""
+    construction, not discovered mid-poll. ``min_value``, when given, is a
+    floor stricter than the ``allow_zero``/``> 0`` check above it (e.g. the
+    poll-interval rate-protection floor) — checked after those, not instead
+    of them."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise IDPConfigurationError(f"{name} must be a number")
     try:
@@ -94,6 +111,8 @@ def _validate_timing(name: str, value: object, *, allow_zero: bool, max_value: f
         raise IDPConfigurationError(f"{name} must be > 0")
     if fvalue > max_value:
         raise IDPConfigurationError(f"{name} exceeds the sane upper bound of {max_value}")
+    if min_value is not None and fvalue < min_value:
+        raise IDPConfigurationError(f"{name} must be >= {min_value}")
     return fvalue
 
 
@@ -173,6 +192,7 @@ class MuleSoftIDPAdapter:
             poll_interval_seconds,
             allow_zero=False,
             max_value=MAX_POLL_INTERVAL_SECONDS,
+            min_value=MIN_POLL_INTERVAL_SECONDS,
         )
         token_refresh_margin_seconds = _validate_timing(
             "token_refresh_margin_seconds",
@@ -378,7 +398,17 @@ class MuleSoftIDPAdapter:
         deadline: float,
     ) -> dict[str, object]:
         base_url = _executions_base_url(self._region, self._org_id, action_id, version)
-        url = f"{base_url}/{execution_id}"
+        # `?valueOnly=false` is required on the result-producing GET: the
+        # IDP execution-result endpoint returns value-only cells (bare
+        # scalars) by default, and normalize() requires the full
+        # {"value": ..., "confidence": ...} cell shape (2026-09-22
+        # architecture-adherence review; ADR-0002 amendment). This GET is
+        # the one whose body `_poll()` returns as the result, so it belongs
+        # here, not on the submit POST. Built via urlencode, not string
+        # concatenation, so it stays correct if a second query param is
+        # ever added.
+        query = urllib.parse.urlencode({"valueOnly": "false"})
+        url = f"{base_url}/{execution_id}?{query}"
         last_status: str | None = None
         poll_retry_count = 0
         while True:
