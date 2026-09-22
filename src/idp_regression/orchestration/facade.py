@@ -84,13 +84,15 @@ from idp_regression.platform.types import DocumentRecord, PlatformAdapter, RunMe
 
 logger = logging.getLogger(__name__)
 
-#: The golden dataset name (config, not secret -- like `IDP_DOCUMENT_DIR`,
-#: ADR-0004's ".env holds only environment facts" list). ⚠️ **Design call
-#: for review**: no prior task pinned this name anywhere in the codebase
-#: or its docs, so this is a new, minimal, fail-closed convention (N6
-#: shape: missing/empty -> non-zero exit, clear message, zero network
-#: calls) rather than a silent default -- a wrong silent default here
-#: would run the regression against the wrong golden set with no error.
+#: The golden dataset name's env var (config, not secret -- like
+#: `IDP_DOCUMENT_DIR`, ADR-0004's ".env holds only environment facts"
+#: list). ⚠️ Updated 2026-09-21 (ADR-0004 amendment T-01.4.12 A6 /
+#: DEBT-48): `run_eval` itself no longer reads this var -- `dataset_name`
+#: is now a required parameter (see `run_eval`'s docstring), resolved by
+#: `cli.py::main` with the same flag > env > fail-closed precedence as
+#: `--action`/`IDP_ACTION_ID`. This constant is kept here, exported, so
+#: `cli.py` (and any other caller) names the var once, not by a
+#: hand-copied string literal.
 GOLDEN_DATASET_NAME_VAR = "GOLDEN_DATASET_NAME"
 
 #: The local directory holding the document files under test
@@ -125,10 +127,17 @@ def _resolve_document_path(document_dir: str, document_id: str) -> str:
 
     **Containment (security fix, 2026-09-21)**: `document_id` is platform
     (golden-set) content -- data a Curator or anyone with platform write
-    access controls -- already pre-run-validated as a non-empty string by
-    `validate_golden_set` (N28), but that check is about JSON shape, not
-    filesystem safety. Both the configured root and the candidate are
-    resolved to real absolute paths (`os.path.realpath` -- this also
+    access controls. ⚠️ Corrected 2026-09-21 (R-1 gate finding): this
+    docstring used to claim `document_id` was "already pre-run-validated
+    as a non-empty string by `validate_golden_set` (N28)" -- that was
+    false. `validate_golden_set` (`prerun.py`) validates `item["golden"]`
+    only; it never inspects `document_id`, so a non-`str`, empty, or
+    NUL-containing `document_id` reached here unvalidated and escaped as
+    a raw `TypeError`/`ValueError` (2026-09-21 live repro). This
+    function's FIRST statement below now rejects exactly those three
+    shapes itself, as `_PathContainmentViolation`, before any `os.path`
+    call. Both the configured root and the candidate are then resolved
+    to real absolute paths (`os.path.realpath` -- this also
     resolves a symlink to its real target, so a symlink planted *inside*
     `document_dir` that points *outside* it is caught, not just a literal
     `..` in `document_id`), and the candidate must land strictly inside
@@ -146,6 +155,17 @@ def _resolve_document_path(document_dir: str, document_id: str) -> str:
     exit-code contract stays intact) and logs the `document_id` only via
     `sanitize_for_log`, never the resolved/candidate path.
     """
+    if not isinstance(document_id, str) or not document_id or "\x00" in document_id:
+        # R-1: reject non-`str`, empty, and NUL-containing `document_id`
+        # up front -- none of these are safe to hand to `os.path.isabs`/
+        # `os.path.realpath` below, which raise raw `TypeError`/
+        # `ValueError` on exactly these shapes instead of the typed
+        # `_PathContainmentViolation` this function otherwise always
+        # raises. `document_id` may not be a `str` at all here (the type
+        # hint is aspirational, not enforced at this boundary), so no
+        # f-string/`sanitize_for_log` call touches it before this check.
+        raise _PathContainmentViolation(document_id if isinstance(document_id, str) else "")
+
     if os.path.isabs(document_id):
         raise _PathContainmentViolation(document_id)
 
@@ -156,6 +176,37 @@ def _resolve_document_path(document_dir: str, document_id: str) -> str:
     return candidate
 
 
+def _validate_dataset_shape(dataset: object) -> None:
+    """HARDEN-01 GAP-1 (2026-09-21): the orchestrator used to trust the
+    `Dataset`/`DatasetItem` shape the `PlatformAdapter` returned at face
+    value -- a non-list `items`, a missing `items` key, an item missing
+    `document_id`, or a non-`str` `document_id` all raised a raw
+    `KeyError`/`TypeError`/`AttributeError` deep inside `check_empty_set`,
+    `validate_golden_set`, or the per-document loop, escaping `run_eval`
+    entirely (breaking its own `-> int` contract, per Branca's `/harden`
+    report). Validated here, BEFORE the schema-drift/empty-set/N28 chain
+    even runs, and mapped to `DatasetFetchFailedError` -- the same
+    reason `get_dataset` itself already uses for a malformed response,
+    since a structurally-invalid dataset is exactly that class of
+    failure regardless of which layer detects it. This checks SHAPE
+    only (types, key presence) -- it never inspects `golden` content
+    (N28's job) and never a `value` (INV-02)."""
+    if not isinstance(dataset, dict):
+        raise DatasetFetchFailedError("get_dataset returned a non-dict dataset")
+    items = dataset.get("items")
+    if not isinstance(items, list):
+        raise DatasetFetchFailedError("dataset 'items' is missing or not a list")
+    for item in items:
+        if not isinstance(item, dict):
+            raise DatasetFetchFailedError("a dataset item is not a dict")
+        if not isinstance(item.get("item_id"), str) or not item["item_id"]:
+            raise DatasetFetchFailedError("a dataset item has a missing/non-string item_id")
+        if not isinstance(item.get("document_id"), str) or not item["document_id"]:
+            raise DatasetFetchFailedError(
+                "a dataset item has a missing/non-string document_id"
+            )
+
+
 def _mark_run_status_best_effort(
     platform: PlatformAdapter,
     run_id: str,
@@ -164,6 +215,7 @@ def _mark_run_status_best_effort(
     action_id: str,
     action_version: str,
     golden_version: str,
+    golden_dataset_name: str,
 ) -> None:
     """ADR-0004 #14 (Atchim non-blocking debt, carried forward by
     ADR-0005 #9 steps 3/4/5): the `run_status` marker write is
@@ -171,7 +223,11 @@ def _mark_run_status_best_effort(
     gate's truth regardless of whether this marker lands on the
     platform; a failure here must never itself abort or crash
     `run_eval`. Never logs the caught exception's message (INV-02 -- a
-    platform error body could echo request content)."""
+    platform error body could echo request content).
+
+    `golden_dataset_name` (A6 / DEBT-48): the fourth INV-04 field,
+    carried alongside the other three so the marker also answers "which
+    named golden set was this run measured against"."""
     try:
         platform.mark_run_status(
             run_id,
@@ -179,6 +235,7 @@ def _mark_run_status_best_effort(
             action_id=action_id,
             action_version=action_version,
             golden_version=golden_version,
+            golden_dataset_name=golden_dataset_name,
         )
     except Exception:  # noqa: BLE001 - best-effort by design, must never raise
         logger.warning(
@@ -187,10 +244,19 @@ def _mark_run_status_best_effort(
         )
 
 
-def run_eval(action_id: str, version: str, run_name: str) -> int:
+def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> int:
     """Run the baseline regression for `action_id` at `version` over the
-    configured golden set, writing per-field + gate scores to a run
-    derived from `run_name` on the platform (ADR-0004, ADR-0005 #9).
+    named golden set (`dataset_name`), writing per-field + gate scores to
+    a run derived from `run_name` on the platform (ADR-0004, ADR-0005 #9).
+
+    `dataset_name` (ADR-0004 amendment T-01.4.12 A6 / DEBT-48): a
+    required, plain parameter -- like `action_id`/`version` above, this
+    function does NOT read `GOLDEN_DATASET_NAME` from the environment
+    itself. Precedence resolution (`--dataset` flag > `GOLDEN_DATASET_NAME`
+    env > fail-closed) is the CLI's job (`cli.py::main`), exactly mirroring
+    how `--action`/`IDP_ACTION_ID` is already resolved there before
+    `run_eval` is ever entered. A caller of this public function directly
+    (bypassing the CLI) must supply `dataset_name` explicitly.
 
     Returns a process exit code: `0` iff every document's gate was
     `PASS` and no error occurred anywhere in the run; non-zero on any
@@ -265,9 +331,13 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
         _log_run_end("aborted", 1)
         return 1
 
-    dataset_name = (os.environ.get(GOLDEN_DATASET_NAME_VAR) or "").strip()
+    # A6: `dataset_name` is caller-supplied now (see the docstring above)
+    # -- still fail-closed on an empty/whitespace-only value, the same
+    # N6 shape the env-read version used, so a caller that passes ""
+    # through doesn't reach any network call either.
+    dataset_name = dataset_name.strip()
     if not dataset_name:
-        logger.error("run_eval: missing required env var %s", GOLDEN_DATASET_NAME_VAR)
+        logger.error("run_eval: dataset_name must not be empty")
         _log_run_end("aborted", 1)
         return 1
 
@@ -289,6 +359,10 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
 
     try:
         dataset = platform.get_dataset(dataset_name)
+        # GAP-1: validate shape BEFORE trusting it structurally anywhere
+        # else -- same except-clause, same reason, as a malformed
+        # `get_dataset` response.
+        _validate_dataset_shape(dataset)
     except DatasetFetchFailedError as exc:
         logger.error("run_eval: dataset_fetch_failed: %s", sanitize_for_log(str(exc)))
         _log_run_end("aborted", 1)
@@ -306,6 +380,15 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
         logger.error("run_eval: %s: %s", exc.reason, sanitize_for_log(str(exc)))
         _log_run_end("aborted", 1)
         return 1
+    except Exception as exc:  # noqa: BLE001 - HARDEN-01 GAP-1, see facade docstring
+        # No `run_id` exists yet at this point (it is generated below),
+        # so there is no run to mark `aborted` -- unlike the in-loop
+        # catch-all further down. `type(exc).__name__` only, never
+        # `str(exc)` (INV-02: an unanticipated exception's message is
+        # not vetted the way every typed one in this codebase is).
+        logger.error("run_eval: unexpected pre-run error: %s", type(exc).__name__)
+        _log_run_end("aborted", 1)
+        return 1
 
     # T-01.4.6 (INV-04): golden_version is a content hash over the SAME
     # `dataset["items"]` object just validated above -- no second fetch
@@ -319,12 +402,13 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
     experiment_name = compose_experiment_name(run_name, run_id)
     logger.info(
         "run_eval: pre-run checks passed run=%s experiment=%s action=%s "
-        "version=%s golden_version=%s items=%d",
+        "version=%s golden_version=%s golden_dataset_name=%s items=%d",
         sanitize_for_log(run_name),
         sanitize_for_log(experiment_name),
         sanitize_for_log(action_id),
         sanitize_for_log(version),
         sanitize_for_log(golden_version),
+        sanitize_for_log(dataset_name),
         len(dataset["items"]),
     )
 
@@ -345,6 +429,7 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
             action_id=action_id,
             action_version=version,
             golden_version=golden_version,
+            golden_dataset_name=dataset_name,
         )
         logger.error(
             "run_eval: %s document_id=%s detail=%s",
@@ -440,6 +525,7 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
             "action_id": action_id,
             "action_version": version,
             "golden_version": golden_version,
+            "golden_dataset_name": dataset_name,
         }
         try:
             platform.record_run(
@@ -458,6 +544,27 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
         logger.error("run_eval: %s: %s", exc.reason, sanitize_for_log(str(exc)))
         _log_run_end("aborted", 1, pass_count=passed_count, fail_count=failed_count)
         return 1
+    except Exception as exc:  # noqa: BLE001 - HARDEN-01 GAP-1, see facade docstring
+        # Unlike the pre-run catch-all above, `run_id` DOES exist here
+        # (generated before this try-block) -- ADR-0004 #14 says every
+        # run that exists gets a best-effort `aborted` marker, so this
+        # writes one, exactly like every `_abort()` call site above,
+        # before ever logging or returning. `type(exc).__name__` only,
+        # never `str(exc)` (INV-02 -- an untyped exception's message is
+        # not vetted the way every typed one this codebase raises is;
+        # it could echo IDP or platform response content).
+        _mark_run_status_best_effort(
+            platform,
+            run_id,
+            "aborted",
+            action_id=action_id,
+            action_version=version,
+            golden_version=golden_version,
+            golden_dataset_name=dataset_name,
+        )
+        logger.error("run_eval: unexpected error: %s", type(exc).__name__)
+        _log_run_end("aborted", 1, pass_count=passed_count, fail_count=failed_count)
+        return 1
 
     # ADR-0005 #9 step 5: mark_run_status("complete", ...), best-effort --
     # INV-08 holds trivially, the exit code below never reads this marker
@@ -469,6 +576,7 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
         action_id=action_id,
         action_version=version,
         golden_version=golden_version,
+        golden_dataset_name=dataset_name,
     )
 
     exit_code = 1 if any_gate_failed else 0

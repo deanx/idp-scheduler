@@ -113,7 +113,12 @@ def test_write_scores_payload_never_carries_a_file_path_or_bytes() -> None:
                 "scores": scores,
             }
         ],
-        metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+        metadata={
+            "action_id": "a",
+            "action_version": "v",
+            "golden_version": "g",
+            "golden_dataset_name": "d",
+        },
     )
 
     score_bodies = [b for b in client.bodies if isinstance(b, dict) and b.get("name")]
@@ -138,6 +143,7 @@ def test_mark_run_status_payload_never_carries_a_file_path_or_bytes() -> None:
         action_id="action-1",
         action_version="v1",
         golden_version="deadbeef",
+        golden_dataset_name="dataset-1",
     )
 
     assert len(client.bodies) > 0
@@ -213,7 +219,12 @@ def test_record_run_completes_and_posts_no_sentinel_value_in_any_score_body() ->
         run_name="run-1",
         run_id="run-1",
         records=[{"item_id": "item-1", "document_id": "doc-1", "scores": scores}],
-        metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+        metadata={
+            "action_id": "a",
+            "action_version": "v",
+            "golden_version": "g",
+            "golden_dataset_name": "d",
+        },
     )
 
     score_bodies = [b for b in client.bodies if isinstance(b, dict) and b.get("name")]
@@ -246,7 +257,12 @@ def test_experiment_item_input_contains_only_document_id() -> None:
                 "scores": [],
             }
         ],
-        metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+        metadata={
+            "action_id": "a",
+            "action_version": "v",
+            "golden_version": "g",
+            "golden_dataset_name": "d",
+        },
     )
 
     item = tracing_client.run_experiment_calls[0]["data"][0]
@@ -272,7 +288,12 @@ def test_experiment_item_expected_output_is_never_the_golden() -> None:
         run_name="run-1",
         run_id="run-1",
         records=[{"item_id": "item-1", "document_id": "doc-1", "scores": []}],
-        metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+        metadata={
+            "action_id": "a",
+            "action_version": "v",
+            "golden_version": "g",
+            "golden_dataset_name": "d",
+        },
     )
 
     item = tracing_client.run_experiment_calls[0]["data"][0]
@@ -310,7 +331,12 @@ def test_experiment_task_output_is_the_verdict_map_never_a_raw_value() -> None:
         run_name="run-1",
         run_id="run-1",
         records=[{"item_id": "item-1", "document_id": "doc-1", "scores": scores}],
-        metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+        metadata={
+            "action_id": "a",
+            "action_version": "v",
+            "golden_version": "g",
+            "golden_dataset_name": "d",
+        },
     )
 
     assert tracing_client.task_outputs == [{"field:total": "wrong_value", "gate": "FAIL"}]
@@ -336,7 +362,12 @@ def test_run_metadata_forwarded_as_experiment_metadata() -> None:
                 "scores": [],
             }
         ],
-        metadata={"action_id": "action-1", "action_version": "v1", "golden_version": "deadbeef"},
+        metadata={
+            "action_id": "action-1",
+            "action_version": "v1",
+            "golden_version": "deadbeef",
+            "golden_dataset_name": "dataset-1",
+        },
     )
 
     call = tracing_client.run_experiment_calls[0]
@@ -344,6 +375,7 @@ def test_run_metadata_forwarded_as_experiment_metadata() -> None:
         "action_id": "action-1",
         "action_version": "v1",
         "golden_version": "deadbeef",
+        "golden_dataset_name": "dataset-1",
     }
 
 
@@ -378,16 +410,20 @@ _KNOWN_SPAN_ATTRIBUTE_KEYS = {
     "langfuse.observation.metadata.experiment_run_name",
     "langfuse.observation.metadata.dataset_id",
     "langfuse.observation.metadata.dataset_item_id",
-    # RunMetadata (action_id/action_version/golden_version), forwarded as
-    # run_experiment's metadata= kwarg — the only "extra" allowlisted
-    # content per ADR-0005 #9 ("trace metadata = the three RunMetadata
-    # strings"); the SDK attaches it under both prefixes.
+    # RunMetadata (action_id/action_version/golden_version, widened to
+    # four fields by ADR-0004 amendment T-01.4.12 A6 / DEBT-48 to also
+    # include golden_dataset_name), forwarded as run_experiment's
+    # metadata= kwarg — the only "extra" allowlisted content per
+    # ADR-0005 #9 ("trace metadata = the RunMetadata strings"); the SDK
+    # attaches it under both prefixes.
     "langfuse.observation.metadata.action_id",
     "langfuse.observation.metadata.action_version",
     "langfuse.observation.metadata.golden_version",
+    "langfuse.observation.metadata.golden_dataset_name",
     "langfuse.experiment.metadata.action_id",
     "langfuse.experiment.metadata.action_version",
     "langfuse.experiment.metadata.golden_version",
+    "langfuse.experiment.metadata.golden_dataset_name",
     "langfuse.environment",
     "langfuse.experiment.id",
     "langfuse.experiment.name",

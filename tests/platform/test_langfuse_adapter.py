@@ -534,6 +534,7 @@ def test_mark_run_status_writes_a_run_status_score() -> None:
         action_id="action-1",
         action_version="v1",
         golden_version="deadbeef",
+        golden_dataset_name="dataset-1",
     )
 
     method, path, body = client.calls[-1]
@@ -556,6 +557,7 @@ def test_mark_run_status_failure_raises_typed_error() -> None:
             action_id="a",
             action_version="v",
             golden_version="g",
+            golden_dataset_name="d",
         )
 
 
@@ -596,6 +598,7 @@ def test_mark_run_status_rejects_an_unrecognised_status_value() -> None:
             action_id="a",
             action_version="v",
             golden_version="g",
+            golden_dataset_name="d",
         )
 
     assert client.calls == []
@@ -615,13 +618,17 @@ def test_mark_run_status_rejected_status_error_never_echoes_the_offending_value(
             action_id="a",
             action_version="v",
             golden_version="g",
+            golden_dataset_name="d",
         )
 
     assert offending not in str(excinfo.value)
     assert client.calls == []
 
 
-@pytest.mark.parametrize("field_name", ["run_id", "action_id", "action_version", "golden_version"])
+@pytest.mark.parametrize(
+    "field_name",
+    ["run_id", "action_id", "action_version", "golden_version", "golden_dataset_name"],
+)
 def test_mark_run_status_rejects_a_non_string_str_declared_param(field_name: str) -> None:
     """THE KILLING TEST: before the fix, none of these four `str`-declared
     parameters were checked -- a non-string value is silently formatted
@@ -642,6 +649,7 @@ def test_mark_run_status_rejects_a_non_string_str_declared_param(field_name: str
         "action_id": "a",
         "action_version": "v",
         "golden_version": "g",
+        "golden_dataset_name": "d",
     }
     kwargs[field_name] = ["not", "a", "string"]  # wrong TYPE, never a synthesised value
 
@@ -1018,7 +1026,12 @@ def test_record_run_score_write_5xx_raises_score_write_failed_error() -> None:
             run_name="run-1",
             run_id="run-1",
             records=records,  # type: ignore[arg-type]
-            metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+            metadata={
+                "action_id": "a",
+                "action_version": "v",
+                "golden_version": "g",
+                "golden_dataset_name": "d",
+            },
         )
 
 
@@ -1069,7 +1082,12 @@ def test_record_run_never_posts_to_the_v4_trace_ingestion_endpoint() -> None:
         run_name="run-1",
         run_id="run-1",
         records=records,  # type: ignore[arg-type]
-        metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+        metadata={
+            "action_id": "a",
+            "action_version": "v",
+            "golden_version": "g",
+            "golden_dataset_name": "d",
+        },
     )
 
     assert all("/api/public/ingestion" not in path for _, path, _ in client.calls)
@@ -1157,7 +1175,12 @@ def test_write_scores_error_log_survives_a_newline_in_document_id_and_score_name
             run_name="run-1",
             run_id="run-1",
             records=records,  # type: ignore[arg-type]
-            metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+            metadata={
+                "action_id": "a",
+                "action_version": "v",
+                "golden_version": "g",
+                "golden_dataset_name": "d",
+            },
         )
 
     for record in caplog.records:
@@ -1183,6 +1206,7 @@ def test_mark_run_status_error_log_survives_a_newline_in_run_id(
             action_id="a",
             action_version="v",
             golden_version="g",
+            golden_dataset_name="d",
         )
 
     for record in caplog.records:
@@ -1267,7 +1291,12 @@ def _record_run_via(adapter: LangfuseAdapter) -> None:
         run_name="run-1",
         run_id="run-1",
         records=records,  # type: ignore[arg-type]
-        metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+        metadata={
+            "action_id": "a",
+            "action_version": "v",
+            "golden_version": "g",
+            "golden_dataset_name": "d",
+        },
     )
 
 
@@ -1632,7 +1661,12 @@ def test_record_deadline_persists_across_records_not_reset_per_record() -> None:
             run_name="run-1",
             run_id="run-1",
             records=records,  # type: ignore[arg-type]
-            metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+            metadata={
+                "action_id": "a",
+                "action_version": "v",
+                "golden_version": "g",
+                "golden_dataset_name": "d",
+            },
         )
 
     score_post_calls = [c for c in client.calls if c[1] == "/api/public/scores"]

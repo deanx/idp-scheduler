@@ -194,6 +194,49 @@ def test_structural_check_mismatched_dataset_run_ids_raises() -> None:
         record_experiment(_MismatchedRunIds(items), run_name="r", items=items, task=_task)
 
 
+def test_gap2_run_experiment_raising_is_wrapped_not_leaked() -> None:
+    """HARDEN-01 GAP-2: an unwrapped SDK exception from `run_experiment`
+    itself (transport, auth, ...) must not escape `record_experiment`
+    untyped -- it is the reachable production trigger for GAP-1 (an
+    exception this codebase's own contract says can never escape
+    `run_eval`)."""
+    items = _items(1)
+
+    class _RaisingClient(_OkTracingClient):
+        def run_experiment(self, **kwargs: object) -> _FakeResult:
+            raise TimeoutError("socket hung")
+
+    with pytest.raises(ExperimentRecordFailedError):
+        record_experiment(_RaisingClient(items), run_name="r", items=items, task=_task)
+
+
+def test_gap2_flush_raising_is_wrapped_not_leaked() -> None:
+    items = _items(1)
+
+    class _RaisingFlush(_OkTracingClient):
+        def flush(self) -> None:
+            raise TimeoutError("socket hung")
+
+    with pytest.raises(FlushFailedError):
+        record_experiment(_RaisingFlush(items), run_name="r", items=items, task=_task)
+
+
+def test_gap2_drifted_item_results_attribute_is_wrapped_not_leaked() -> None:
+    """A version bump that renames/removes `result.item_results` raises a
+    raw `AttributeError` today -- must surface as `ExperimentRecordFailedError`."""
+    items = _items(1)
+
+    class _NoItemResultsAttr:
+        pass
+
+    class _DriftedResultClient(_OkTracingClient):
+        def run_experiment(self, **kwargs: object) -> Any:
+            return _NoItemResultsAttr()
+
+    with pytest.raises(ExperimentRecordFailedError):
+        record_experiment(_DriftedResultClient(items), run_name="r", items=items, task=_task)
+
+
 def test_watcher_handlers_are_removed_after_the_call() -> None:
     items = _items(1)
     otlp_logger = logging.getLogger(OTLP_EXPORTER_LOGGER_NAME)

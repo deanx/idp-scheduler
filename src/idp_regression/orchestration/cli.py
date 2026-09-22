@@ -1,8 +1,9 @@
-"""`run_eval` CLI entry point (T-01.4.1).
+"""`run_eval` CLI entry point (T-01.4.1, `--dataset` added by ADR-0004
+amendment T-01.4.12 A6 / DEBT-48).
 
 ::
 
-    run_eval --version <v> --run <name> [--action <id>]
+    run_eval --version <v> --run <name> [--action <id>] [--dataset <name>]
 
 `load_dotenv()` is the first line of this script, before argparse even
 resolves `--action`'s `IDP_ACTION_ID` default (ADR-0004, INV-05) -- `main`
@@ -53,7 +54,7 @@ from collections.abc import Sequence
 
 from idp_regression.adapter.transport import sanitize_for_log
 from idp_regression.orchestration.dotenv_support import load_dotenv
-from idp_regression.orchestration.facade import run_eval
+from idp_regression.orchestration.facade import GOLDEN_DATASET_NAME_VAR, run_eval
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", dest="version", required=True)
     parser.add_argument("--run", dest="run_name", required=True)
     parser.add_argument("--action", dest="action", default=None)
+    # ADR-0004 amendment T-01.4.12 A6 (DEBT-48): same precedence shape as
+    # `--action`/`IDP_ACTION_ID` -- flag wins, `GOLDEN_DATASET_NAME` is
+    # the local-convenience fallback, neither set is a pre-network
+    # non-zero exit (N6). CI pipelines are expected to pass `--dataset`
+    # explicitly, next to `--version`, so the pointer is visible in the
+    # PR diff that changes it rather than buried in a runner's env.
+    parser.add_argument("--dataset", dest="dataset", default=None)
     return parser
 
 
@@ -131,8 +139,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         logger.error("run_eval: --version has an invalid format")
         return 1
 
+    # A6 (DEBT-48): flag > GOLDEN_DATASET_NAME env > fail-closed, same
+    # shape as --action/IDP_ACTION_ID above. `.strip()` rejects a
+    # whitespace-only env value the same way `bootstrap.py`'s N6 guard
+    # already does for the platform/IDP credentials.
+    dataset_name = (args.dataset or os.environ.get(GOLDEN_DATASET_NAME_VAR) or "").strip()
+    if not dataset_name:
+        logger.error(
+            "run_eval: no --dataset given and GOLDEN_DATASET_NAME is not set in the environment"
+        )
+        return 1
+
     try:
-        return run_eval(action_id, args.version, args.run_name)
+        return run_eval(action_id, args.version, args.run_name, dataset_name)
     except Exception as exc:  # noqa: BLE001 - defense in depth, see docstring
         # `run_eval`'s own contract (facade.py, `orchestration/errors.py`)
         # is that no exception may ever escape it -- this batch (T-01.4.6)

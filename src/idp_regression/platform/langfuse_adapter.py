@@ -790,6 +790,7 @@ class LangfuseAdapter:
                 "action_id": metadata["action_id"],
                 "action_version": metadata["action_version"],
                 "golden_version": metadata["golden_version"],
+                "golden_dataset_name": metadata["golden_dataset_name"],
             },
         )
 
@@ -823,6 +824,7 @@ class LangfuseAdapter:
         action_id: str,
         action_version: str,
         golden_version: str,
+        golden_dataset_name: str,
     ) -> None:
         # FO-3 (DEBT-48): `RunStatus` was enforced nowhere -- any string
         # POSTed verbatim as ADR-0004 #14's marker value, which a reader
@@ -832,8 +834,9 @@ class LangfuseAdapter:
         # hand-written, and this reuses the module's own existing typed
         # error for this call rather than introducing a second one.
         # Same sweep finding, same call: run_id/action_id/action_version/
-        # golden_version (all declared `str`) are interpolated into
-        # `comment` below, which IS written -- unchecked until now.
+        # golden_version/golden_dataset_name (A6/DEBT-48, all declared
+        # `str`) are interpolated into `comment` below, which IS written
+        # -- unchecked until now.
         # Derived from THIS method's own declared type hints
         # (`typing.get_type_hints`), not a hand-written parameter list,
         # so a future `str` parameter on this signature auto-extends the
@@ -859,7 +862,7 @@ class LangfuseAdapter:
 
         comment = (
             f"action_id={action_id} action_version={action_version} "
-            f"golden_version={golden_version}"
+            f"golden_version={golden_version} golden_dataset_name={golden_dataset_name}"
         )
         run_status_id = score_id(
             run_id=run_id,

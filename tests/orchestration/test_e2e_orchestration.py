@@ -7,10 +7,12 @@ failure stops the loop and writes the `aborted` marker exactly once),
 INV-08 (every gate is computed before any platform write), and NFR N3
 (the abort path returns promptly -- no wall-clock sleep is on it).
 
-The fakes are typed against the real `PlatformAdapter` Protocol
-(`platform/types.py`) via an explicit `: PlatformAdapter` annotation --
-a signature drift on either side is a mypy failure here, not a silently
-passing test (per this task's "keep the fakes honest" instruction).
+The fakes are typed against the real `PlatformAdapter` (`platform/types.py`)
+and `IDPAdapter` (`adapter/types.py`) Protocols via explicit `:
+PlatformAdapter` / `: IDPAdapter` annotations -- a signature drift on
+either side is a mypy failure here, not a silently passing test (per
+this task's "keep the fakes honest" instruction; S-2 gate finding
+2026-09-21: `_E2EIDPAdapter` previously had no such binding at all).
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import time
 import pytest
 
 from idp_regression.adapter.errors import IDPExecutionFailedError
+from idp_regression.adapter.types import IDPAdapter, NormalizedOutput
 from idp_regression.orchestration import facade
 from idp_regression.orchestration.facade import run_eval
 from idp_regression.platform.schema import load_golden_schema
@@ -37,6 +40,7 @@ DOCUMENT_DIR = "/documents"
 ACTION_ID = "12345678-1234-1234-1234-123456789012"
 VERSION = "1.0"
 RUN_NAME = "nightly"
+DATASET_NAME = "idp-regression-golden"
 
 
 def _set_all_credential_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -76,7 +80,7 @@ def _dataset(document_ids: list[str]) -> Dataset:
     }
 
 
-def _passing_actual() -> dict[str, object]:
+def _passing_actual() -> NormalizedOutput:
     """Matches `_dataset`'s single golden field exactly -- classifies PASS."""
     return {
         "status": "SUCCEEDED",
@@ -89,7 +93,14 @@ class _E2EIDPAdapter:
     (`document_path, action_id, version`). Raises `error_for_document_id`
     when it reaches the matching document; every call before or after is
     recorded in `calls` and (unless erroring) returns a passing actual,
-    so a test can assert exactly which documents were reached."""
+    so a test can assert exactly which documents were reached.
+
+    S-2 gate finding: unlike `_E2EPlatform` below (bound to
+    `PlatformAdapter` at each construction site), this fake previously
+    had NO Protocol binding anywhere, so a real `IDPAdapter.extract`
+    signature change would drift silently past this suite. Bound to
+    `IDPAdapter` (`adapter/types.py`) at each construction site below.
+    """
 
     def __init__(
         self,
@@ -103,7 +114,7 @@ class _E2EIDPAdapter:
         self._events = events
         self.calls: list[str] = []
 
-    def extract(self, document_path: str, action_id: str, version: str) -> object:
+    def extract(self, document_path: str, action_id: str, version: str) -> NormalizedOutput:
         document_id = os.path.relpath(document_path, DOCUMENT_DIR)
         self.calls.append(document_id)
         self._events.append(f"extract:{document_id}")
@@ -155,6 +166,7 @@ class _E2EPlatform:
         action_id: str,
         action_version: str,
         golden_version: str,
+        golden_dataset_name: str,
     ) -> None:
         self._events.append(f"mark_run_status:{status}")
         self.mark_run_status_calls.append(
@@ -164,6 +176,7 @@ class _E2EPlatform:
                 "action_id": action_id,
                 "action_version": action_version,
                 "golden_version": golden_version,
+                "golden_dataset_name": golden_dataset_name,
             }
         )
 
@@ -191,9 +204,10 @@ def test_happy_path_extracts_classifies_gates_and_records_once(
     document_ids = ["doc-1", "doc-2", "doc-3"]
     events: list[str] = []
     idp_adapter = _E2EIDPAdapter(events=events)
+    _idp_adapter_conforms: IDPAdapter = idp_adapter  # S-2: Protocol binding check
     platform = _install(monkeypatch, document_ids=document_ids, idp_adapter=idp_adapter)
 
-    exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME)
+    exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME, DATASET_NAME)
 
     assert exit_code == 0
     assert idp_adapter.calls == document_ids
@@ -208,12 +222,14 @@ def test_happy_path_extracts_classifies_gates_and_records_once(
     assert [r["document_id"] for r in records] == document_ids
     assert all(set(r.keys()) == {"item_id", "document_id", "scores"} for r in records)
 
-    # INV-04: action_id/action_version/golden_version in run metadata.
+    # INV-04 (widened to four fields, A6/DEBT-48): action_id/
+    # action_version/golden_version/golden_dataset_name in run metadata.
     metadata = call["metadata"]
     assert isinstance(metadata, dict)
     assert metadata["action_id"] == ACTION_ID
     assert metadata["action_version"] == VERSION
     assert isinstance(metadata["golden_version"], str) and metadata["golden_version"]
+    assert metadata["golden_dataset_name"] == DATASET_NAME
 
     # The run completes -- best-effort "complete" marker, not "aborted".
     assert [c["status"] for c in platform.mark_run_status_calls] == ["complete"]
@@ -229,9 +245,10 @@ def test_no_platform_write_happens_before_every_gate_is_computed(
     document_ids = ["doc-1", "doc-2", "doc-3"]
     events: list[str] = []
     idp_adapter = _E2EIDPAdapter(events=events)
+    _idp_adapter_conforms: IDPAdapter = idp_adapter  # S-2: Protocol binding check
     _install(monkeypatch, document_ids=document_ids, idp_adapter=idp_adapter)
 
-    exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME)
+    exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME, DATASET_NAME)
 
     assert exit_code == 0
     # Every extract:<doc> event precedes the single record_run event --
@@ -259,10 +276,11 @@ def test_abort_at_document_2_of_3_stops_the_run_and_marks_aborted_once(
         error_for_document_id="doc-2",
         error=IDPExecutionFailedError("execution failed", status="FAILED"),
     )
+    _idp_adapter_conforms: IDPAdapter = idp_adapter  # S-2: Protocol binding check
     platform = _install(monkeypatch, document_ids=document_ids, idp_adapter=idp_adapter)
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME)
+        exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME, DATASET_NAME)
 
     assert exit_code != 0
     # doc-1 and doc-2 were reached; doc-3 (after the failure) was not.
@@ -299,10 +317,11 @@ def test_abort_path_returns_promptly(
         error_for_document_id="doc-1",
         error=IDPExecutionFailedError("execution failed", status="FAILED"),
     )
+    _idp_adapter_conforms: IDPAdapter = idp_adapter  # S-2: Protocol binding check
     _install(monkeypatch, document_ids=document_ids, idp_adapter=idp_adapter)
 
     start = time.perf_counter()
-    exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME)
+    exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME, DATASET_NAME)
     elapsed = time.perf_counter() - start
 
     assert exit_code != 0
