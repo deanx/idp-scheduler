@@ -20,6 +20,7 @@ import logging
 import pytest
 
 from idp_regression.orchestration import cli
+from idp_regression.orchestration.facade import DEFAULT_MAX_DOCUMENTS_PER_RUN
 
 _VALID_UUID = "12345678-1234-1234-1234-123456789012"
 
@@ -34,7 +35,7 @@ def test_missing_version_exits_nonzero_without_calling_run_eval(
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
     monkeypatch.setattr(cli, "run_eval", _fail_if_called)
 
-    exit_code = cli.main(["--action", _VALID_UUID, "--run", "nightly"])
+    exit_code = cli.main(["--org", "org-test-0000", "--action", _VALID_UUID, "--run", "nightly"])
 
     assert exit_code != 0
 
@@ -88,7 +89,18 @@ def test_malformed_action_id_exits_nonzero_without_calling_run_eval(
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
     monkeypatch.setattr(cli, "run_eval", _fail_if_called)
 
-    exit_code = cli.main(["--action", bad_action_id, "--version", "1.0", "--run", "nightly"])
+    exit_code = cli.main(
+        [
+            "--org",
+            "org-test-0000",
+            "--action",
+            bad_action_id,
+            "--version",
+            "1.0",
+            "--run",
+            "nightly",
+        ]
+    )
 
     assert exit_code != 0
 
@@ -100,7 +112,18 @@ def test_malformed_version_exits_nonzero_without_calling_run_eval(
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
     monkeypatch.setattr(cli, "run_eval", _fail_if_called)
 
-    exit_code = cli.main(["--action", _VALID_UUID, "--version", bad_version, "--run", "nightly"])
+    exit_code = cli.main(
+        [
+            "--org",
+            "org-test-0000",
+            "--action",
+            _VALID_UUID,
+            "--version",
+            bad_version,
+            "--run",
+            "nightly",
+        ]
+    )
 
     assert exit_code != 0
 
@@ -108,10 +131,17 @@ def test_malformed_version_exits_nonzero_without_calling_run_eval(
 def test_valid_args_call_run_eval_with_the_resolved_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[str, str, str, str]] = []
+    calls: list[tuple[str, str, str, str, str, int]] = []
 
-    def _record(action_id: str, version: str, run_name: str, dataset_name: str) -> int:
-        calls.append((action_id, version, run_name, dataset_name))
+    def _record(
+        action_id: str,
+        version: str,
+        run_name: str,
+        dataset_name: str,
+        org_id: str,
+        max_documents_per_run: int,
+    ) -> int:
+        calls.append((action_id, version, run_name, dataset_name, org_id, max_documents_per_run))
         return 7
 
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
@@ -119,6 +149,8 @@ def test_valid_args_call_run_eval_with_the_resolved_values(
 
     exit_code = cli.main(
         [
+            "--org",
+            "org-test-0000",
             "--action",
             _VALID_UUID,
             "--version",
@@ -131,7 +163,16 @@ def test_valid_args_call_run_eval_with_the_resolved_values(
     )
 
     assert exit_code == 7
-    assert calls == [(_VALID_UUID, "1.0.0", "nightly", "idp-regression-golden")]
+    assert calls == [
+        (
+            _VALID_UUID,
+            "1.0.0",
+            "nightly",
+            "idp-regression-golden",
+            "org-test-0000",
+            DEFAULT_MAX_DOCUMENTS_PER_RUN,
+        )
+    ]
 
 
 def test_malformed_action_id_error_message_never_echoes_the_value(
@@ -144,7 +185,18 @@ def test_malformed_action_id_error_message_never_echoes_the_value(
     distinctive_bad_value = "distinctive-bad-action-id-9f3a"
 
     with caplog.at_level(logging.ERROR):
-        cli.main(["--action", distinctive_bad_value, "--version", "1.0", "--run", "nightly"])
+        cli.main(
+            [
+                "--org",
+                "org-test-0000",
+                "--action",
+                distinctive_bad_value,
+                "--version",
+                "1.0",
+                "--run",
+                "nightly",
+            ]
+        )
 
     assert distinctive_bad_value not in caplog.text
 
@@ -169,10 +221,12 @@ def test_load_dotenv_is_called_before_parse_args(monkeypatch: pytest.MonkeyPatch
                 run_name="nightly",
                 action=_VALID_UUID,
                 dataset="idp-regression-golden",
+                org="org-test-0000",
+                max_documents_per_run=1000,
             )
 
     monkeypatch.setattr(cli, "_build_parser", lambda: _RecordingParser())
-    monkeypatch.setattr(cli, "run_eval", lambda a, v, r, d: 0)
+    monkeypatch.setattr(cli, "run_eval", lambda a, v, r, d, o, m: 0)
 
     exit_code = cli.main([])
 
@@ -203,6 +257,8 @@ def test_main_reaches_the_real_facade_and_returns_its_exit_code(
 
     exit_code = cli.main(
         [
+            "--org",
+            "org-test-0000",
             "--action",
             _VALID_UUID,
             "--version",
@@ -239,7 +295,18 @@ def test_main_never_escapes_when_load_dotenv_itself_raises(
     monkeypatch.setattr(cli, "load_dotenv", _boom)
 
     with caplog.at_level(logging.INFO):
-        exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
+        exit_code = cli.main(
+            [
+                "--org",
+                "org-test-0000",
+                "--action",
+                _VALID_UUID,
+                "--version",
+                "1.0",
+                "--run",
+                "nightly",
+            ]
+        )
 
     assert exit_code != 0
     assert sentinel not in caplog.text
@@ -261,7 +328,18 @@ def test_main_gives_a_dotenv_load_failure_its_own_message_not_run_evals(
     monkeypatch.setattr(cli, "load_dotenv", _boom)
 
     with caplog.at_level(logging.INFO):
-        cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
+        cli.main(
+            [
+                "--org",
+                "org-test-0000",
+                "--action",
+                _VALID_UUID,
+                "--version",
+                "1.0",
+                "--run",
+                "nightly",
+            ]
+        )
 
     assert "cli: unexpected error loading .env" in caplog.text
     assert "run_eval: unexpected error" not in caplog.text
@@ -284,13 +362,22 @@ def test_main_converts_an_unexpected_exception_from_run_eval_into_a_nonzero_exit
     -- never re-raises, never prints the raw traceback."""
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
 
-    def _boom(action_id: str, version: str, run_name: str, dataset_name: str) -> int:
+    def _boom(
+        action_id: str,
+        version: str,
+        run_name: str,
+        dataset_name: str,
+        org_id: str,
+        max_documents_per_run: int,
+    ) -> int:
         raise RuntimeError("unexpected\nfailure with embedded newline")
 
     monkeypatch.setattr(cli, "run_eval", _boom)
 
     exit_code = cli.main(
         [
+            "--org",
+            "org-test-0000",
             "--action",
             _VALID_UUID,
             "--version",
@@ -321,7 +408,14 @@ def test_main_never_logs_the_raw_message_of_an_unexpected_exception_from_run_eva
 
     sentinel = "Bearer sk-lf-SEKRIT-should-never-be-logged"
 
-    def _boom(action_id: str, version: str, run_name: str, dataset_name: str) -> int:
+    def _boom(
+        action_id: str,
+        version: str,
+        run_name: str,
+        dataset_name: str,
+        org_id: str,
+        max_documents_per_run: int,
+    ) -> int:
         raise RuntimeError(sentinel)
 
     monkeypatch.setattr(cli, "run_eval", _boom)
@@ -329,6 +423,8 @@ def test_main_never_logs_the_raw_message_of_an_unexpected_exception_from_run_eva
     with caplog.at_level(logging.ERROR):
         exit_code = cli.main(
             [
+                "--org",
+                "org-test-0000",
                 "--action",
                 _VALID_UUID,
                 "--version",
@@ -356,7 +452,14 @@ def test_main_never_escapes_on_a_cancelled_error_from_run_eval(
 
     import asyncio
 
-    def _boom(action_id: str, version: str, run_name: str, dataset_name: str) -> int:
+    def _boom(
+        action_id: str,
+        version: str,
+        run_name: str,
+        dataset_name: str,
+        org_id: str,
+        max_documents_per_run: int,
+    ) -> int:
         raise asyncio.CancelledError()
 
     monkeypatch.setattr(cli, "run_eval", _boom)
@@ -364,6 +467,8 @@ def test_main_never_escapes_on_a_cancelled_error_from_run_eval(
     with caplog.at_level(logging.ERROR):
         exit_code = cli.main(
             [
+                "--org",
+                "org-test-0000",
                 "--action",
                 _VALID_UUID,
                 "--version",
@@ -388,12 +493,14 @@ def test_version_at_the_64_char_cap_is_accepted(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(
         cli,
         "run_eval",
-        lambda a, v, r, d: calls.append((a, v, r, d)) or 0,  # type: ignore[func-returns-value]
+        lambda a, v, r, d, o, m: calls.append((a, v, r, d)) or 0,  # type: ignore[func-returns-value]
     )
     version = "a" * 64
 
     exit_code = cli.main(
         [
+            "--org",
+            "org-test-0000",
             "--action",
             _VALID_UUID,
             "--version",
@@ -424,7 +531,9 @@ def test_golden_dataset_name_env_var_is_no_longer_read_as_a_fallback(
     monkeypatch.setattr(cli, "run_eval", _fail_if_called)
     monkeypatch.setenv("GOLDEN_DATASET_NAME", "env-dataset")
 
-    exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
+    exit_code = cli.main(
+        ["--org", "org-test-0000", "--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"]
+    )
 
     assert exit_code == 2
 
@@ -440,7 +549,9 @@ def test_missing_dataset_exits_via_the_argparse_required_path_not_calling_run_ev
     monkeypatch.setattr(cli, "run_eval", _fail_if_called)
     monkeypatch.delenv("GOLDEN_DATASET_NAME", raising=False)
 
-    exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
+    exit_code = cli.main(
+        ["--org", "org-test-0000", "--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"]
+    )
 
     assert exit_code == 2
 
@@ -459,6 +570,8 @@ def test_blank_dataset_flag_value_is_rejected_including_whitespace_only(
 
     exit_code = cli.main(
         [
+            "--org",
+            "org-test-0000",
             "--action",
             _VALID_UUID,
             "--version",
@@ -480,7 +593,18 @@ def test_version_one_char_past_the_64_char_cap_is_rejected(
     monkeypatch.setattr(cli, "run_eval", _fail_if_called)
     version = "a" * 65
 
-    exit_code = cli.main(["--action", _VALID_UUID, "--version", version, "--run", "nightly"])
+    exit_code = cli.main(
+        [
+            "--org",
+            "org-test-0000",
+            "--action",
+            _VALID_UUID,
+            "--version",
+            version,
+            "--run",
+            "nightly",
+        ]
+    )
 
     assert exit_code != 0
 
@@ -584,6 +708,8 @@ def test_argparse_error_path_sanitizes_rather_than_leaks_the_raw_value(
     with caplog.at_level(logging.ERROR):
         exit_code = cli.main(
             [
+                "--org",
+                "org-test-0000",
                 "--unrecognized-flag",
                 sentinel,
                 "--action",
@@ -620,6 +746,8 @@ def test_argparse_error_path_does_not_let_an_embedded_newline_forge_a_log_line(
     with caplog.at_level(logging.ERROR):
         cli.main(
             [
+                "--org",
+                "org-test-0000",
                 "--unrecognized-flag",
                 forged_payload,
                 "--action",
@@ -637,3 +765,255 @@ def test_argparse_error_path_does_not_let_an_embedded_newline_forge_a_log_line(
     # not redact) -- what must NEVER appear is a REAL newline immediately
     # followed by it, which is what would make it render as its own line.
     assert "\nERROR:root:run_eval: gate PASSED forged=1" not in caplog.text
+
+
+# --- ADR-0004 A9 (2026-09-22): --org is required, no env fallback -------
+
+
+def test_missing_org_exits_via_the_argparse_required_path_not_calling_run_eval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mirrors `test_missing_action_exits_via_the_argparse_required_path_
+    not_calling_run_eval` above -- `--org` is argparse `required=True`,
+    exit EXACTLY 2 (not merely nonzero), since `org_id = None` would also
+    fail the downstream blank-after-`.strip()` check (exit 1) if
+    `required=True` were quietly dropped."""
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(cli, "run_eval", _fail_if_called)
+    monkeypatch.delenv("IDP_ORG_ID", raising=False)
+
+    exit_code = cli.main(
+        [
+            "--action",
+            _VALID_UUID,
+            "--version",
+            "1.0",
+            "--run",
+            "nightly",
+            "--dataset",
+            "idp-regression-golden",
+        ]
+    )
+
+    assert exit_code == 2
+
+
+def test_idp_org_id_env_var_is_not_read_as_a_fallback_for_org(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutation pin: setting `IDP_ORG_ID` must NOT make an omitted
+    `--org` succeed -- there is no env fallback. Exact-code-2, see the
+    rationale above."""
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(cli, "run_eval", _fail_if_called)
+    monkeypatch.setenv("IDP_ORG_ID", "org-from-env-should-not-be-used")
+
+    exit_code = cli.main(
+        [
+            "--action",
+            _VALID_UUID,
+            "--version",
+            "1.0",
+            "--run",
+            "nightly",
+            "--dataset",
+            "idp-regression-golden",
+        ]
+    )
+
+    assert exit_code == 2
+
+
+@pytest.mark.parametrize("blank_org_flag", ["", "   "])
+def test_blank_org_flag_value_is_rejected_including_whitespace_only(
+    blank_org_flag: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """N6 shape, same as `--dataset`'s equivalent test above: a
+    whitespace-only `--org` VALUE must be rejected exactly like an empty
+    one. Asserts the SPECIFIC "must not be blank" message and zero calls
+    to `run_eval` -- a bare `exit_code == 1` assertion is not
+    mutation-sensitive here: `_fail_if_called` raising `AssertionError`
+    if `run_eval` WERE called would still be caught by `main()`'s own
+    outer catch-all and still exit 1, so deleting the blank-`--org`
+    guard entirely would still pass a bare exit-code check (confirmed
+    live)."""
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(cli, "run_eval", _fail_if_called)
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = cli.main(
+            [
+                "--action",
+                _VALID_UUID,
+                "--version",
+                "1.0",
+                "--run",
+                "nightly",
+                "--dataset",
+                "idp-regression-golden",
+                "--org",
+                blank_org_flag,
+            ]
+        )
+
+    assert exit_code == 1
+    assert "run_eval: --org must not be blank" in caplog.text
+
+
+def test_org_flag_value_is_passed_through_to_run_eval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "run_eval",
+        lambda a, v, r, d, o, m: calls.append(o) or 0,  # type: ignore[func-returns-value]
+    )
+
+    exit_code = cli.main(
+        [
+            "--action",
+            _VALID_UUID,
+            "--version",
+            "1.0",
+            "--run",
+            "nightly",
+            "--dataset",
+            "idp-regression-golden",
+            "--org",
+            "  a-distinctive-org-id-4d9c  ",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == ["a-distinctive-org-id-4d9c"]
+
+
+# --- ADR-0004 A10 (2026-09-22): --max-documents-per-run, MVP optional ---
+
+
+def test_max_documents_per_run_defaults_when_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User override of A10's own required-no-default text: the flag is
+    OPTIONAL -- omitting it must still succeed, using
+    `facade.DEFAULT_MAX_DOCUMENTS_PER_RUN`."""
+    calls: list[int] = []
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "run_eval",
+        lambda a, v, r, d, o, m: calls.append(m) or 0,  # type: ignore[func-returns-value]
+    )
+
+    exit_code = cli.main(
+        [
+            "--action",
+            _VALID_UUID,
+            "--version",
+            "1.0",
+            "--run",
+            "nightly",
+            "--dataset",
+            "idp-regression-golden",
+            "--org",
+            "org-test-0000",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [DEFAULT_MAX_DOCUMENTS_PER_RUN]
+
+
+def test_max_documents_per_run_flag_value_is_passed_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "run_eval",
+        lambda a, v, r, d, o, m: calls.append(m) or 0,  # type: ignore[func-returns-value]
+    )
+
+    exit_code = cli.main(
+        [
+            "--action",
+            _VALID_UUID,
+            "--version",
+            "1.0",
+            "--run",
+            "nightly",
+            "--dataset",
+            "idp-regression-golden",
+            "--org",
+            "org-test-0000",
+            "--max-documents-per-run",
+            "5",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [5]
+
+
+@pytest.mark.parametrize("bad_value", ["0", "-1", "-1000"])
+def test_max_documents_per_run_zero_or_negative_is_a_usage_error(
+    bad_value: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A10: '0 or negative is a usage error' -- there is no opt-out
+    flag."""
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(cli, "run_eval", _fail_if_called)
+
+    exit_code = cli.main(
+        [
+            "--action",
+            _VALID_UUID,
+            "--version",
+            "1.0",
+            "--run",
+            "nightly",
+            "--dataset",
+            "idp-regression-golden",
+            "--org",
+            "org-test-0000",
+            "--max-documents-per-run",
+            bad_value,
+        ]
+    )
+
+    assert exit_code == 1
+
+
+def test_max_documents_per_run_non_integer_is_an_argparse_usage_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-numeric value fails argparse's own `type=int` conversion,
+    exit 2 (like every other malformed-flag usage error), distinct from
+    the 0/negative exit-1 case above."""
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(cli, "run_eval", _fail_if_called)
+
+    exit_code = cli.main(
+        [
+            "--action",
+            _VALID_UUID,
+            "--version",
+            "1.0",
+            "--run",
+            "nightly",
+            "--dataset",
+            "idp-regression-golden",
+            "--org",
+            "org-test-0000",
+            "--max-documents-per-run",
+            "banana",
+        ]
+    )
+
+    assert exit_code == 2

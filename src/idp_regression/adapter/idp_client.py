@@ -317,6 +317,18 @@ class MuleSoftIDPAdapter:
             transport_failed = True
         if transport_failed:
             raise IDPSubmitError("IDP submit call failed or timed out") from None
+        if status == 404:
+            # ADR-0004 A10 companion item (2026-09-22): the executions URL
+            # is composed entirely from (org, action, version) --
+            # `_executions_base_url` above -- so a 404 means exactly one
+            # thing: one of those three parameters does not resolve on
+            # this plane. Naming the three *parameter names* (never the
+            # URL, the org value, or the token -- ADR-0002's rule stands)
+            # turns an hour-long probe into a one-line diagnosis.
+            raise IDPSubmitError(
+                "IDP submit call returned 404 -- one of (org, action, version) "
+                "does not resolve on this plane"
+            )
         if status not in (200, 201, 202) or not isinstance(body, dict):
             raise IDPSubmitError(f"IDP submit call was rejected (status={status})")
         execution_id = body.get("id")
@@ -375,9 +387,7 @@ class MuleSoftIDPAdapter:
         deadline (the retry budget is INCLUDED in, never extends, the
         per-document timeout)."""
         retry_after = (
-            _parse_retry_after_seconds(headers.get("retry-after"))
-            if status_code == 429
-            else None
+            _parse_retry_after_seconds(headers.get("retry-after")) if status_code == 429 else None
         )
         if retry_after is not None:
             sleep_seconds = retry_after
@@ -458,9 +468,7 @@ class MuleSoftIDPAdapter:
                     http_status=status_code,
                 )
             if not isinstance(body, dict):
-                raise IDPAmbiguousStatusError(
-                    "IDP poll response body was not a JSON object"
-                )
+                raise IDPAmbiguousStatusError("IDP poll response body was not a JSON object")
             raw_status = body.get("status")
             # ADR-0004 #17: a missing/null/non-string status must abort
             # immediately — never inferred as "unknown, keep polling"
@@ -484,11 +492,23 @@ class MuleSoftIDPAdapter:
             self._sleep(min(self._poll_interval_seconds, max(deadline - self._clock(), 0.0)))
 
 
-def make_idp_adapter() -> MuleSoftIDPAdapter:
+def make_idp_adapter(org_id: str) -> MuleSoftIDPAdapter:
     """Factory reading ``IDP_*`` env config (BR6, ADR-0002 §Context).
 
     Action id and version are **not** read here — they are per-run
     parameters passed to ``extract()`` (ADR-0002 amendment 2026-09-19).
+
+    ``org_id`` is likewise **not** read from the environment (ADR-0004
+    A9, 2026-09-22): an action is addressed by ``(org, action, version)``
+    — literally what ``_executions_base_url`` composes — and A8 already
+    ruled that every parameter defining *what a run measured* is CLI-only,
+    required, with no env fallback. ``IDP_ORG_ID`` moved from the
+    environment-description column to that rule: the credential in
+    ``.env`` is valid for more than one org id (IDP access is granted at
+    the business-group level), so the org id is not derivable from the
+    credential and can be wrong while the credential is right — the org
+    must therefore reach this factory as a caller-supplied parameter,
+    exactly like ``action_id``/``version`` reach ``extract()``.
     """
 
     def _require(name: str) -> str:
@@ -544,7 +564,7 @@ def make_idp_adapter() -> MuleSoftIDPAdapter:
         client_id=_require("IDP_CLIENT_ID"),
         client_secret=_require("IDP_CLIENT_SECRET"),
         region=_require("IDP_REGION"),
-        org_id=_require("IDP_ORG_ID"),
+        org_id=org_id,
         terminal_statuses=_statuses("IDP_TERMINAL_STATUSES", "SUCCEEDED"),
         success_statuses=_statuses("IDP_SUCCESS_STATUSES", "SUCCEEDED"),
         submit_timeout_seconds=_timing_env(

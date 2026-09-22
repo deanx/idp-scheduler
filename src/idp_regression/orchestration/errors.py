@@ -40,6 +40,15 @@ contract stays 0/non-zero).
   2026-09-21; N28 validates JSON shape only, never filesystem safety).
   Raised BEFORE any IDP call for that document -- the adapter never sees
   the escaped path.
+- `quota_ceiling_exceeded` -- ADR-0004 A10 (2026-09-22): the dataset's
+  item count exceeds `--max-documents-per-run` (an MVP guard rail, NOT
+  derived from the org's real IDP allotment -- see A10). A PRE-RUN guard
+  (sits after `get_dataset`/`empty_set`/N28, before `run_id` exists), so
+  per A7 it never reaches `RunAborted` -- `run_eval` logs this reason
+  directly, writes no `run_status` marker, and returns 1. Listed here
+  anyway (Hyrum's-Law note, A10): `AbortReason` is a `Literal`, so this
+  is an ADDITIVE member for producers, but it BREAKS any consumer doing
+  exhaustive matching -- the taxonomy must be treated as open.
 """
 
 from __future__ import annotations
@@ -57,6 +66,7 @@ AbortReason = Literal[
     "malformed_actual",
     "flush_failed",
     "path_containment_violation",
+    "quota_ceiling_exceeded",
 ]
 
 

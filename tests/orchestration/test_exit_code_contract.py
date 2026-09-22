@@ -65,9 +65,7 @@ def _well_formed_dataset() -> dict[str, object]:
                 "item_id": "item-1",
                 "document_id": "doc-1",
                 "golden": {
-                    "fields": {
-                        "total": {"value": "1250.00", "type": "number", "critical": True}
-                    }
+                    "fields": {"total": {"value": "1250.00", "type": "number", "critical": True}}
                 },
             }
         ],
@@ -127,7 +125,7 @@ def _base_env(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> None:
 def _run(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> int:
     _base_env(monkeypatch, tmp_path)
     return run_eval(
-        "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden", "org-t"
     )
 
 
@@ -158,9 +156,7 @@ def test_every_abort_reason_exits_non_zero(
     "did this raise", which is what actually protects CT-04.
     """
     _base_env(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        facade, "make_platform", lambda: _FakePlatform(_well_formed_dataset())
-    )
+    monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(_well_formed_dataset()))
 
     def _raise(dataset: object) -> None:
         raise RunAborted(reason, f"forced for reason={reason}")
@@ -169,7 +165,11 @@ def test_every_abort_reason_exits_non_zero(
 
     with caplog.at_level(logging.ERROR):
         exit_code = run_eval(
-            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+            "12345678-1234-1234-1234-123456789012",
+            "1.0",
+            "nightly",
+            "idp-regression-golden",
+            "org-t",
         )
 
     assert exit_code != 0
@@ -224,7 +224,7 @@ def _abort_reason_string_literals_at_real_sites(source: str) -> set[str]:
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        is_abort_or_raised = (isinstance(func, ast.Name) and func.id in {"_abort", "RunAborted"})
+        is_abort_or_raised = isinstance(func, ast.Name) and func.id in {"_abort", "RunAborted"}
         is_logger_call = isinstance(func, ast.Attribute) and func.attr in {
             "error",
             "warning",
@@ -307,7 +307,11 @@ def test_empty_set_and_drifted_schema_reports_schema_drift(
 
     with caplog.at_level(logging.ERROR):
         exit_code = run_eval(
-            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+            "12345678-1234-1234-1234-123456789012",
+            "1.0",
+            "nightly",
+            "idp-regression-golden",
+            "org-t",
         )
 
     assert exit_code != 0
@@ -326,15 +330,11 @@ def test_all_gates_pass_exits_zero(
     document_dir = "/documents"
     document_id = "doc-1"
     path, actual = _matching_actual_for(document_dir, document_id)
-    monkeypatch.setattr(
-        facade, "make_idp_adapter", lambda: _FakeIDPAdapter({path: actual})
-    )
-    monkeypatch.setattr(
-        facade, "make_platform", lambda: _FakePlatform(_well_formed_dataset())
-    )
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda org_id: _FakeIDPAdapter({path: actual}))
+    monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(_well_formed_dataset()))
 
     exit_code = run_eval(
-        "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden", "org-t"
     )
 
     assert exit_code == 0
@@ -354,16 +354,16 @@ def test_any_gate_fail_exits_non_zero_with_no_error_logged(
     document_id = "doc-1"
     # A mismatching total makes the classifier gate FAIL, not error.
     path, actual = _matching_actual_for(document_dir, document_id, total="0.01")
-    monkeypatch.setattr(
-        facade, "make_idp_adapter", lambda: _FakeIDPAdapter({path: actual})
-    )
-    monkeypatch.setattr(
-        facade, "make_platform", lambda: _FakePlatform(_well_formed_dataset())
-    )
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda org_id: _FakeIDPAdapter({path: actual}))
+    monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(_well_formed_dataset()))
 
     with caplog.at_level(logging.ERROR):
         exit_code = run_eval(
-            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+            "12345678-1234-1234-1234-123456789012",
+            "1.0",
+            "nightly",
+            "idp-regression-golden",
+            "org-t",
         )
 
     assert exit_code != 0

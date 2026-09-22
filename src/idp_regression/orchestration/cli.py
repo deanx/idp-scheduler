@@ -1,9 +1,11 @@
 """`run_eval` CLI entry point (T-01.4.1, `--dataset` added by ADR-0004
-amendment T-01.4.12 A6 / DEBT-48).
+amendment T-01.4.12 A6 / DEBT-48, `--org` added by ADR-0004 A9,
+`--max-documents-per-run` added by ADR-0004 A10, both 2026-09-22).
 
 ::
 
-    run_eval --version <v> --run <name> --action <id> --dataset <name>
+    run_eval --org <id> --version <v> --run <name> --action <id> \\
+        --dataset <name> [--max-documents-per-run <n>]
 
 `load_dotenv()` is the first line of this script, before argparse even
 parses argv (ADR-0004, INV-05) -- `main` is the outermost caller in this
@@ -20,19 +22,39 @@ an already-set var -- see `dotenv_support.load_dotenv`) and holds INV-05
 for any caller of `run_eval`, not only this CLI.
 
 Argument validation (TP-31, ADR-0004 amendment 2026-09-19; tightened
-2026-09-22 -- user decision): `--version`, `--action` and `--dataset` are
-ALL required with no environment fallback (argparse enforces this, exit
-code 2) -- every input that defines *what was tested* comes from the
-command line, so it is visible in a CI invocation and its PR diff.
-Ambient environment can no longer decide what a run measured; it still
-supplies what describes the *machine and account* (IDP credentials,
-org/region, `IDP_DOCUMENT_DIR`, the evaluation platform's own host/key
-vars (N24 -- this module names no vendor), the timeouts). `--action`
-and `--version` are validated here (`action_id` UUID, `version`
-`^[A-Za-z0-9._-]{1,64}$`) and `--dataset` is rejected if blank after
-`.strip()` (the same fail-closed shape `bootstrap.py`'s N6 guard uses for
-credentials) -- all before `run_eval`, and therefore before any
-IDP/platform network call, is ever entered.
+2026-09-22 -- user decision, then amended 2026-09-22 by ADR-0004 A9):
+`--version`, `--action`, `--dataset` and `--org` are ALL required with no
+environment fallback (argparse enforces this, exit code 2) -- every input
+that defines *what was tested* comes from the command line, so it is
+visible in a CI invocation and its PR diff. Ambient environment can no
+longer decide what a run measured; it still supplies what describes the
+*machine and account* (IDP credentials, region, `IDP_DOCUMENT_DIR`, the
+evaluation platform's own host/key vars (N24 -- this module names no
+vendor), the timeouts). `--action` and `--version` are validated here
+(`action_id` UUID, `version` `^[A-Za-z0-9._-]{1,64}$`) and `--dataset`/
+`--org` are rejected if blank after `.strip()` (the same fail-closed
+shape `bootstrap.py`'s N6 guard uses for credentials) -- all before
+`run_eval`, and therefore before any IDP/platform network call, is ever
+entered. `--org` moved here from `IDP_ORG_ID` (ADR-0004 A9, 2026-09-22):
+an action is addressed by `(org, action, version)`, and the credential in
+`.env` is valid for more than one org id (IDP access is granted at the
+business-group level), so the org id is not derivable from the credential
+and can be wrong while the credential is right -- exactly the silent-fork
+failure mode A8 already closed for `--action`/`--dataset`.
+
+`--max-documents-per-run` (ADR-0004 A10, 2026-09-22) is OPTIONAL, unlike
+the four flags above -- a **deliberate deviation from A10's own text**
+(A10 specifies the ceiling as required with no default; the user
+overrode this for the MVP: "just put a high number as parameter for the
+POC/MVP. Don't make it a blocker, maybe a validation point for later.").
+Defaults to `facade.DEFAULT_MAX_DOCUMENTS_PER_RUN` -- a round,
+deliberately arbitrary number that bounds a runaway loop (an
+unexpectedly huge golden set, a future resubmit path), NOT the org's
+real IDP allotment; it must never be presented as a real quota control.
+The run-start log line always records the effective value. `0` or a
+negative value is a usage error (exit 1, pre-network) -- there is no
+opt-out; anyone who wants effectively-unbounded passes a large number
+they chose, on the record in the invocation.
 
 INV-02 (message hygiene, corrected 2026-09-21 -- DEBT-44 gate, fifth
 instance, finding (b)): the three validation error messages this
@@ -62,7 +84,7 @@ from collections.abc import Sequence
 
 from idp_regression.adapter.transport import sanitize_for_log
 from idp_regression.orchestration.dotenv_support import load_dotenv
-from idp_regression.orchestration.facade import run_eval
+from idp_regression.orchestration.facade import DEFAULT_MAX_DOCUMENTS_PER_RUN, run_eval
 from idp_regression.orchestration.log_sanitize import frame_location
 
 logger = logging.getLogger(__name__)
@@ -106,6 +128,27 @@ def _build_parser() -> argparse.ArgumentParser:
     # its PR diff, not resolvable from ambient environment.
     parser.add_argument("--action", dest="action", required=True)
     parser.add_argument("--dataset", dest="dataset", required=True)
+    # ADR-0004 A9 (2026-09-22): `--org` joins the required-flags group --
+    # an action is addressed by (org, action, version), and the org id is
+    # not derivable from the credential (see the module docstring above).
+    parser.add_argument("--org", dest="org", required=True)
+    # ADR-0004 A10 (2026-09-22), MVP override of A10's own required-no-
+    # default text (user decision): OPTIONAL, with a deliberately
+    # arbitrary high default -- an MVP guard rail against a runaway loop,
+    # NOT the org's real IDP allotment (see the module docstring above
+    # and `facade.DEFAULT_MAX_DOCUMENTS_PER_RUN`'s own docstring).
+    parser.add_argument(
+        "--max-documents-per-run",
+        dest="max_documents_per_run",
+        type=int,
+        default=DEFAULT_MAX_DOCUMENTS_PER_RUN,
+        help=(
+            "MVP guard rail bounding a runaway loop (e.g. an unexpectedly "
+            "huge golden set) -- NOT derived from the org's real IDP "
+            "allotment, and not a substitute for one. Must be a positive "
+            f"integer; defaults to {DEFAULT_MAX_DOCUMENTS_PER_RUN}."
+        ),
+    )
     return parser
 
 
@@ -174,8 +217,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         logger.error("run_eval: --dataset must not be blank")
         return 1
 
+    # ADR-0004 A9 (2026-09-22): `--org` is required, no env fallback --
+    # same N6 shape as `--dataset` above (`.strip()` fail-closed on a
+    # whitespace-only value).
+    org_id = (args.org or "").strip()
+    if not org_id:
+        logger.error("run_eval: --org must not be blank")
+        return 1
+
+    # ADR-0004 A10 (2026-09-22): `--max-documents-per-run` is optional
+    # (MVP override of A10's own required-no-default text) but a
+    # non-positive value is still a usage error, pre-network -- there is
+    # no opt-out flag; anyone who wants effectively-unbounded passes a
+    # large number they chose.
+    max_documents_per_run = args.max_documents_per_run
+    if max_documents_per_run <= 0:
+        logger.error("run_eval: --max-documents-per-run must be a positive integer")
+        return 1
+
     try:
-        return run_eval(action_id, args.version, args.run_name, dataset_name)
+        return run_eval(
+            action_id,
+            args.version,
+            args.run_name,
+            dataset_name,
+            org_id,
+            max_documents_per_run,
+        )
     except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 - defense in depth
         # `run_eval`'s own contract (facade.py, `orchestration/errors.py`)
         # is that no exception may ever escape it -- this batch (T-01.4.6)

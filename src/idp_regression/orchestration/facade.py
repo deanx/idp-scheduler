@@ -11,6 +11,8 @@ ADR-0005 #9)::
     -> get_dataset (dataset_fetch_failed) -> schema-drift (schema_drift)
     -> empty-set guard (empty_set) -> N28 structural validation
        (malformed_golden)
+    -> quota-ceiling pre-flight guard (quota_ceiling_exceeded, ADR-0004
+       A10, 2026-09-22) -- zero quota spent on a refusal
     -> golden_version = hash_dataset(...) + run_id/experiment_name
     -> per document, sequentially: resolve document_id -> path
        -> extract -> classify -> overall_gate -> build_score_inputs
@@ -205,9 +207,7 @@ def _validate_dataset_shape(dataset: object) -> None:
         if not isinstance(item.get("item_id"), str) or not item["item_id"]:
             raise DatasetFetchFailedError("a dataset item has a missing/non-string item_id")
         if not isinstance(item.get("document_id"), str) or not item["document_id"]:
-            raise DatasetFetchFailedError(
-                "a dataset item has a missing/non-string document_id"
-            )
+            raise DatasetFetchFailedError("a dataset item has a missing/non-string document_id")
 
 
 def _mark_run_status_best_effort(
@@ -257,7 +257,25 @@ def _mark_run_status_best_effort(
         )
 
 
-def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> int:
+#: ADR-0004 A10 (2026-09-22), MVP override of A10's own "required, no
+#: default" text (user decision): a round, obviously-arbitrary number so
+#: its arbitrariness is impossible to miss -- this bounds a runaway loop
+#: (an unexpectedly huge golden set, a future resubmit path), it is NOT
+#: derived from the org's real IDP allotment, and it must never be
+#: presented as a real quota control. See `cli.py`'s `--max-documents-
+#: per-run` help text and the run-start log line, which always records
+#: the value actually in force.
+DEFAULT_MAX_DOCUMENTS_PER_RUN = 1000
+
+
+def run_eval(
+    action_id: str,
+    version: str,
+    run_name: str,
+    dataset_name: str,
+    org_id: str,
+    max_documents_per_run: int = DEFAULT_MAX_DOCUMENTS_PER_RUN,
+) -> int:
     """Run the baseline regression for `action_id` at `version` over the
     named golden set (`dataset_name`), writing per-field + gate scores to
     a run derived from `run_name` on the platform (ADR-0004, ADR-0005 #9).
@@ -270,6 +288,22 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
     (`cli.py::main`), exactly mirroring `--action`'s own required-flag
     shape. A caller of this public function directly (bypassing the CLI)
     must supply `dataset_name` explicitly.
+
+    `org_id` (ADR-0004 A9, 2026-09-22 -- amends A8): likewise a required,
+    plain parameter, passed straight through to `make_idp_adapter(org_id)`
+    below -- `IDP_ORG_ID` is read by no production code path anymore. An
+    action is addressed by `(org, action, version)`, and the credential
+    alone cannot tell a wrong org id from a right one (IDP access is
+    granted at the business-group level) -- so the org must be visible in
+    the invocation, exactly like `action_id`/`dataset_name`.
+
+    `max_documents_per_run` (ADR-0004 A10, 2026-09-22): a pre-flight
+    ceiling on documents submitted this run, checked once `get_dataset`
+    has returned and before any IDP submit call (a refusal costs zero
+    quota). Defaults to `DEFAULT_MAX_DOCUMENTS_PER_RUN` -- an MVP guard
+    rail against a runaway loop, deliberately NOT derived from the org's
+    real IDP allotment (see the constant's own docstring and `cli.py`'s
+    `--max-documents-per-run` help text).
 
     Returns a process exit code: `0` iff every document's gate was
     `PASS` and no error occurred anywhere in the run; non-zero on any
@@ -349,7 +383,7 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
 
         validate_platform_credentials()
 
-        idp_adapter: MuleSoftIDPAdapter = make_idp_adapter()
+        idp_adapter: MuleSoftIDPAdapter = make_idp_adapter(org_id)
 
         # A6: `dataset_name` is caller-supplied now (see the docstring
         # above) -- still fail-closed on an empty/whitespace-only value,
@@ -384,6 +418,35 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
         check_empty_set(dataset)
         validate_golden_set(dataset)
 
+        # ADR-0004 A10 (2026-09-22): pre-flight IDP quota ceiling -- item
+        # count is known now (get_dataset already ran) and no submit has
+        # happened yet, so a refusal here costs ZERO quota. Deliberately
+        # placed BEFORE golden_version/run_id below (no run exists yet),
+        # so this is a pre-run guard per A7: log, run_end outcome=aborted,
+        # return 1, NO run_status marker -- not a RunAborted/`_abort()`
+        # call, which both require a `run_id` to mark.
+        #
+        # ⚠️ User override of A10's own text (2026-09-22, MVP decision):
+        # A10 specifies this ceiling as REQUIRED with NO DEFAULT ("a
+        # guessed ceiling is worse than none because it looks like a
+        # control"). The user overrode that for the MVP: `--max-
+        # documents-per-run` is OPTIONAL with a high, deliberately
+        # arbitrary default (`DEFAULT_MAX_DOCUMENTS_PER_RUN`, `cli.py`) --
+        # this bounds a runaway loop (a golden set that unexpectedly holds
+        # thousands of items, or a future resubmit path), it is NOT
+        # derived from the org's real IDP allotment and must never be
+        # presented as one. B-3 (`/signoff`, N27) stays OPEN as a
+        # validation point, not closed by this default.
+        item_count = len(dataset["items"])
+        if item_count > max_documents_per_run:
+            logger.error(
+                "run_eval: quota_ceiling_exceeded item_count=%d max_documents_per_run=%d",
+                item_count,
+                max_documents_per_run,
+            )
+            _log_run_end("aborted", 1)
+            return 1
+
         # T-01.4.6 (INV-04): golden_version is a content hash over the
         # SAME `dataset["items"]` object just validated above -- no
         # second fetch (TOCTOU guard, ADR-0005 #7). `hash_dataset` takes
@@ -397,7 +460,8 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
 
         logger.info(
             "run_eval: pre-run checks passed run=%s experiment=%s action=%s "
-            "version=%s golden_version=%s golden_dataset_name=%s items=%d",
+            "version=%s golden_version=%s golden_dataset_name=%s items=%d "
+            "max_documents_per_run=%d",
             sanitize_for_log(run_name),
             sanitize_for_log(experiment_name),
             sanitize_for_log(action_id),
@@ -405,6 +469,7 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
             sanitize_for_log(golden_version),
             sanitize_for_log(dataset_name),
             len(dataset["items"]),
+            max_documents_per_run,
         )
     except MissingCredentialError as exc:
         logger.error("run_eval: missing required env var %s", exc.variable_name)
@@ -511,6 +576,7 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
     any_gate_failed = False
     passed_count = 0
     failed_count = 0
+    submits_made = 0
     try:
         for item in dataset["items"]:
             document_started_at = time.monotonic()
@@ -523,6 +589,23 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
                     "path_containment_violation", exc.document_id, "containment check failed"
                 ) from None
 
+            # ADR-0004 A10: "documents submitted, counted at the submit
+            # call site" -- one `extract()` call is one IDP execution is
+            # one document, so the counter increments immediately before
+            # the call that actually submits, not before path resolution
+            # (a path-containment rejection never reaches the IDP) and
+            # not derived from `len(dataset["items"])`, so any future
+            # resubmit/retry path is counted by construction. The
+            # assertion is a BUG DETECTOR, not a policy (A10): the
+            # pre-flight check above already refused any dataset whose
+            # item count exceeds the ceiling, so `submits_made` can never
+            # legitimately reach it mid-loop -- if it ever fires, the
+            # pre-flight computation was wrong, not the operator's budget.
+            submits_made += 1
+            assert submits_made <= max_documents_per_run, (
+                "internal invariant violated: submits_made exceeded "
+                "max_documents_per_run despite the pre-flight guard"
+            )
             try:
                 actual = idp_adapter.extract(document_path, action_id, version)
             except IDPAuthenticationError as exc:
@@ -530,9 +613,7 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
             except IDPPollTimeoutError as exc:
                 raise _abort("unknown_status_timeout", document_id, str(exc)) from None
             except MalformedIDPOutputError as exc:
-                raise _abort(
-                    "malformed_actual", document_id, f"{exc.reason}: {exc}"
-                ) from None
+                raise _abort("malformed_actual", document_id, f"{exc.reason}: {exc}") from None
             except IDPExecutionFailedError as exc:
                 # `.status` is IDP-controlled -- already sanitized at
                 # construction (adapter/errors.py) and again here through

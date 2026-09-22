@@ -41,6 +41,7 @@ ACTION_ID = "12345678-1234-1234-1234-123456789012"
 VERSION = "1.0"
 RUN_NAME = "nightly"
 DATASET_NAME = "idp-regression-golden"
+ORG_ID = "org-123"
 
 
 def _set_all_credential_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -69,9 +70,7 @@ def _dataset(document_ids: list[str]) -> Dataset:
                 "item_id": f"item-{doc_id}",
                 "document_id": doc_id,
                 "golden": {
-                    "fields": {
-                        "total": {"value": "1250.00", "type": "number", "critical": True}
-                    }
+                    "fields": {"total": {"value": "1250.00", "type": "number", "critical": True}}
                 },
             }
             for doc_id in document_ids
@@ -189,7 +188,7 @@ def _install(
 ) -> _E2EPlatform:
     platform: PlatformAdapter = _E2EPlatform(_dataset(document_ids), events=idp_adapter._events)
     monkeypatch.setattr(facade, "make_platform", lambda: platform)
-    monkeypatch.setattr(facade, "make_idp_adapter", lambda: idp_adapter)
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda org_id: idp_adapter)
     assert isinstance(platform, _E2EPlatform)  # narrows back for call-log assertions
     return platform
 
@@ -207,7 +206,7 @@ def test_happy_path_extracts_classifies_gates_and_records_once(
     _idp_adapter_conforms: IDPAdapter = idp_adapter  # S-2: Protocol binding check
     platform = _install(monkeypatch, document_ids=document_ids, idp_adapter=idp_adapter)
 
-    exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME, DATASET_NAME)
+    exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME, DATASET_NAME, ORG_ID)
 
     assert exit_code == 0
     assert idp_adapter.calls == document_ids
@@ -248,7 +247,7 @@ def test_no_platform_write_happens_before_every_gate_is_computed(
     _idp_adapter_conforms: IDPAdapter = idp_adapter  # S-2: Protocol binding check
     _install(monkeypatch, document_ids=document_ids, idp_adapter=idp_adapter)
 
-    exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME, DATASET_NAME)
+    exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME, DATASET_NAME, ORG_ID)
 
     assert exit_code == 0
     # Every extract:<doc> event precedes the single record_run event --
@@ -280,7 +279,7 @@ def test_abort_at_document_2_of_3_stops_the_run_and_marks_aborted_once(
     platform = _install(monkeypatch, document_ids=document_ids, idp_adapter=idp_adapter)
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME, DATASET_NAME)
+        exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME, DATASET_NAME, ORG_ID)
 
     assert exit_code != 0
     # doc-1 and doc-2 were reached; doc-3 (after the failure) was not.
@@ -300,9 +299,7 @@ def test_abort_at_document_2_of_3_stops_the_run_and_marks_aborted_once(
 # --- NFR N3: the abort path returns promptly, no wall-clock sleep -------
 
 
-def test_abort_path_returns_promptly(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: object
-) -> None:
+def test_abort_path_returns_promptly(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> None:
     """Uses a real monotonic clock (`time.perf_counter`) around the call
     -- not a wall-clock `sleep` anywhere in the path under test -- to pin
     that the abort path never blocks. All collaborators here are pure
@@ -321,7 +318,7 @@ def test_abort_path_returns_promptly(
     _install(monkeypatch, document_ids=document_ids, idp_adapter=idp_adapter)
 
     start = time.perf_counter()
-    exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME, DATASET_NAME)
+    exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME, DATASET_NAME, ORG_ID)
     elapsed = time.perf_counter() - start
 
     assert exit_code != 0
@@ -349,7 +346,7 @@ def test_all_gates_pass_success_path_returns_promptly(
     _install(monkeypatch, document_ids=document_ids, idp_adapter=idp_adapter)
 
     start = time.perf_counter()
-    exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME, DATASET_NAME)
+    exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME, DATASET_NAME, ORG_ID)
     elapsed = time.perf_counter() - start
 
     assert exit_code == 0

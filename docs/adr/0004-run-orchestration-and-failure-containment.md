@@ -319,3 +319,18 @@ From those three the ceiling is arithmetic. Without them it is a guess, and a gu
 **Companion item — the 404 that cost an afternoon.** A submit 404 today surfaces as a generic `IDPSubmitError`. The executions URL carries `(org, action, version)`, so a 404 means exactly one thing: **one of those three does not resolve on this plane.** The error message must say that, naming the three *parameters* (not the URL, not the token — ADR-0002's rule stands; org/action/version ids are not credentials but the URL still never appears). One line would have named today's problem instead of sending a probe after it. **Proposed as a task for Dunga, not an edit here**; it is cheap, testable, and it is the answer to "what stops a wrong org id producing a confusing 404" for as long as any of the three can be wrong.
 
 **Reversal cost: Low-to-medium.** The flag and the pre-flight check are additive and deletable. The `AbortReason` member is the sticky part — a taxonomy that has been published is read by log consumers, so removing a member later is a contract change, not a refactor.
+
+---
+
+### Implementation note (Dengoso, 2026-09-22) — the user overrode A10's "required, no default" for the MVP
+
+**A10 above specifies the ceiling as required, with no default** ("a guessed ceiling is worse than none because it looks like a control"). Before this was built, the user overrode that specific point for the MVP: *"just put a high number as parameter for the POC/MVP. Don't make it a blocker, maybe a validation point for later."* Nothing else in A10 changes — the mechanism (pre-flight, documents-submitted metering at the submit call site, `quota_ceiling_exceeded` in the `AbortReason` taxonomy, no `run_status` marker on this pre-run abort) is built exactly as A10 specifies.
+
+**As built:** `--max-documents-per-run` is an **optional** CLI flag (`cli.py::_build_parser`), defaulting to `facade.DEFAULT_MAX_DOCUMENTS_PER_RUN = 1000` — a round, deliberately arbitrary number chosen so its arbitrariness cannot be missed. It is NOT derived from the org's real IDP allotment and is never presented as one:
+- the flag's `--help` text says so explicitly;
+- the run-start log line (`run_eval: pre-run checks passed ...`) records the effective value on every run, so the number in force is always visible, not buried in a default;
+- this note, plus the code comments at the constant's definition and at the pre-flight check itself, say plainly that this bounds a runaway loop (an unexpectedly huge golden set, a future resubmit path), not spend against a real quota.
+
+A zero or negative value is still a usage error (`cli.py::main`, exit 1, pre-network) — there is no opt-out flag, matching A10's own "no opt-out" rule; only the *required-with-no-default* half of A10's text is overridden.
+
+**B-3 (`/signoff`, N27) stays OPEN.** This is a validation point for later, not a closed control — the user's own framing. Re-raising the ceiling to required-with-no-default (or wiring it to a real, org-supplied allotment) is the way B-3 eventually closes; today's default only bounds a runaway loop, honestly labelled as such everywhere it appears.

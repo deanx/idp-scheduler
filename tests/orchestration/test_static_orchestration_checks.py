@@ -84,10 +84,7 @@ def test_static_check_catches_a_mutated_forbidden_read_call() -> None:
     name (as if the Protocol had grown one and orchestration/ called it)
     is caught by the same AST call-name collector the real check uses."""
     fake_forbidden = frozenset({"get_run_history"})
-    source = (
-        "def f(platform):\n"
-        "    return platform.get_run_history('x')\n"
-    )
+    source = "def f(platform):\n    return platform.get_run_history('x')\n"
     called = _attribute_call_names(source)
     assert called & fake_forbidden
 
@@ -105,9 +102,7 @@ def _imports_jsonschema(tree: ast.Module) -> bool:
             _module_is_jsonschema(alias.name) for alias in node.names
         ):
             return True
-        if isinstance(node, ast.ImportFrom) and node.module and _module_is_jsonschema(
-            node.module
-        ):
+        if isinstance(node, ast.ImportFrom) and node.module and _module_is_jsonschema(node.module):
             return True
     return False
 
@@ -138,18 +133,19 @@ def test_jsonschema_import_check_catches_import_and_import_from_and_alias() -> N
     )
 
 
-# --- A8 (ADR-0004 amendment, 2026-09-22): no production read of the -----
-# --- two retired env-fallback var names -----------------------------------
+# --- A8/A9 (ADR-0004 amendments, 2026-09-22): no production read of the -
+# --- three retired env-fallback var names ---------------------------------
 
 SRC_DIR = pathlib.Path(__file__).resolve().parents[2] / "src" / "idp_regression"
 
-#: The two env var names A8 declares dead: `--action`/`--dataset` are
-#: required CLI flags with no environment fallback (user decision,
-#: 2026-09-22) -- neither name may be read by any production code path
-#: again. They survive only as test-harness conveniences (`.env.example`,
-#: `tests/adapter/test_integration_idp.py`,
+#: The three env var names A8/A9 declare dead: `--action`/`--dataset`/
+#: `--org` are required CLI flags with no environment fallback (user
+#: decision 2026-09-22 for the first two; ADR-0004 A9, same day, for
+#: `IDP_ORG_ID`) -- none of the three may be read by any production code
+#: path again. They survive only as test-harness conveniences
+#: (`.env.example`, `tests/adapter/test_integration_idp.py`,
 #: `tests/orchestration/test_integration_e2e.py`).
-_RETIRED_ENV_VAR_NAMES = frozenset({"IDP_ACTION_ID", "GOLDEN_DATASET_NAME"})
+_RETIRED_ENV_VAR_NAMES = frozenset({"IDP_ACTION_ID", "GOLDEN_DATASET_NAME", "IDP_ORG_ID"})
 
 
 def _docstring_constant_ids(tree: ast.AST) -> set[int]:
@@ -223,6 +219,4 @@ def test_retired_env_var_check_ignores_docstring_mentions_but_catches_real_reads
     real_read = 'import os\naction = os.environ.get("IDP_ACTION_ID")\n'
 
     assert _non_docstring_string_literals(docstring_only) & _RETIRED_ENV_VAR_NAMES == set()
-    assert _non_docstring_string_literals(real_read) & _RETIRED_ENV_VAR_NAMES == {
-        "IDP_ACTION_ID"
-    }
+    assert _non_docstring_string_literals(real_read) & _RETIRED_ENV_VAR_NAMES == {"IDP_ACTION_ID"}

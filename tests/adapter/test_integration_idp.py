@@ -37,9 +37,12 @@ def test_live_oauth_token_fetch_and_cache_reuse() -> None:
     _require_env("IDP_CLIENT_ID")
     _require_env("IDP_CLIENT_SECRET")
     _require_env("IDP_REGION")
-    _require_env("IDP_ORG_ID")
+    org_id = _require_env("IDP_ORG_ID")
 
-    adapter = make_idp_adapter()
+    # ADR-0004 A9 (2026-09-22): org_id is a caller-supplied PARAMETER now,
+    # not an env var make_idp_adapter() reads itself -- IDP_ORG_ID here is
+    # only this test's own test-harness-convenience source for the value.
+    adapter = make_idp_adapter(org_id)
     token_cache = adapter._token_cache  # noqa: SLF001 - white-box, this IS the test
 
     first = token_cache.get()
@@ -54,7 +57,7 @@ def test_live_submit_poll_and_normalize_a_real_document() -> None:
     _require_env("IDP_CLIENT_ID")
     _require_env("IDP_CLIENT_SECRET")
     _require_env("IDP_REGION")
-    _require_env("IDP_ORG_ID")
+    org_id = _require_env("IDP_ORG_ID")
 
     action_id = os.environ.get("IDP_TEST_ACTION_ID") or os.environ.get("IDP_ACTION_ID")
     version = os.environ.get("IDP_TEST_ACTION_VERSION") or os.environ.get("IDP_ACTION_VERSION")
@@ -67,7 +70,7 @@ def test_live_submit_poll_and_normalize_a_real_document() -> None:
             "(S-01.6 pins this); skipping the live submit/poll test"
         )
 
-    adapter = make_idp_adapter()
+    adapter = make_idp_adapter(org_id)
     out = adapter.extract(document_path, action_id, version)
     assert out["status"]
     assert isinstance(out["fields"], dict)
