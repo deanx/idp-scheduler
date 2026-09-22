@@ -1285,3 +1285,118 @@ def test_run_eval_never_logs_the_document_dir_path_in_telemetry(
 
     assert exit_code == 0
     assert sentinel_dir not in caplog.text
+
+
+# --- HARDEN-01 GAP-1: no untyped exception may escape run_eval ---------
+
+
+@pytest.mark.parametrize(
+    "bad_dataset",
+    [
+        {"expected_output_schema": None},  # no "items" key at all -> KeyError
+        {"items": "not-a-list", "expected_output_schema": None},
+        {"items": 42, "expected_output_schema": None},
+        {"items": [None], "expected_output_schema": None},
+        # no document_id key on the item:
+        {"items": [{"item_id": "i1", "golden": {}}], "expected_output_schema": None},
+        {
+            "items": [{"item_id": "i1", "document_id": 5, "golden": {}}],
+            "expected_output_schema": None,
+        },  # non-str document_id
+    ],
+)
+def test_run_eval_never_escapes_on_a_malformed_dataset_shape(
+    bad_dataset: dict[str, object],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """GAP-1 (HARDEN-01): a `Dataset` whose shape drifts from what the
+    orchestrator assumes used to raise a raw `KeyError`/`TypeError`
+    (e.g. no `items` key, `items` not a list, an item missing
+    `document_id`, or a non-`str` `document_id`) straight out of
+    `run_eval`, breaking its own `-> int` contract. Now mapped to
+    `dataset_fetch_failed` (the same reason `get_dataset` failures use)
+    -- no marker (no run exists pre-run), a `run_end` line, exit 1."""
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(bad_dataset))
+
+    with caplog.at_level(logging.INFO):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    assert "dataset_fetch_failed" in caplog.text
+    assert "run_end" in caplog.text
+
+
+def test_run_eval_never_escapes_on_an_untyped_pre_run_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """GAP-1: an untyped exception raised anywhere in the pre-run chain
+    (before `run_id` exists) must not escape -- no marker (no run yet),
+    but a `run_end` line and exit 1."""
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
+
+    def _boom(dataset: object) -> None:
+        raise ValueError("unexpected pre-run failure")
+
+    monkeypatch.setattr(facade, "check_schema_drift", _boom)
+
+    with caplog.at_level(logging.INFO):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    assert "run_end" in caplog.text
+
+
+def test_run_eval_writes_the_aborted_marker_on_an_untyped_in_loop_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """GAP-1: an untyped exception raised AFTER `run_id` exists (in the
+    per-document loop or the record phase) must not escape either -- and,
+    unlike the pre-run case, a run DOES exist, so the best-effort
+    `aborted` marker must be written exactly once (ADR-0004 #14)."""
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    platform = _RecordingPlatform(_well_formed_dataset())
+    monkeypatch.setattr(facade, "make_platform", lambda: platform)
+    _stub_make_idp_adapter_success(monkeypatch)
+
+    def _boom(golden: object, actual: object) -> None:
+        raise ValueError("unexpected classify failure")
+
+    monkeypatch.setattr(facade, "classify", _boom)
+
+    with caplog.at_level(logging.INFO):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    assert "run_end" in caplog.text
+    assert [c["status"] for c in platform.mark_run_status_calls] == ["aborted"]
+
+
+def test_run_eval_still_propagates_keyboard_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+) -> None:
+    """GAP-1's catch-all must be `except Exception`, never a bare
+    `except:`/`except BaseException:` -- a `KeyboardInterrupt` must still
+    propagate out of `run_eval`, not be swallowed into a non-zero exit."""
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
+
+    def _boom(dataset: object) -> None:
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(facade, "check_schema_drift", _boom)
+
+    with pytest.raises(KeyboardInterrupt):
+        run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")

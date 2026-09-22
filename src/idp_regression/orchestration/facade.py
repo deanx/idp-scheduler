@@ -174,6 +174,37 @@ def _resolve_document_path(document_dir: str, document_id: str) -> str:
     return candidate
 
 
+def _validate_dataset_shape(dataset: object) -> None:
+    """HARDEN-01 GAP-1 (2026-09-21): the orchestrator used to trust the
+    `Dataset`/`DatasetItem` shape the `PlatformAdapter` returned at face
+    value -- a non-list `items`, a missing `items` key, an item missing
+    `document_id`, or a non-`str` `document_id` all raised a raw
+    `KeyError`/`TypeError`/`AttributeError` deep inside `check_empty_set`,
+    `validate_golden_set`, or the per-document loop, escaping `run_eval`
+    entirely (breaking its own `-> int` contract, per Branca's `/harden`
+    report). Validated here, BEFORE the schema-drift/empty-set/N28 chain
+    even runs, and mapped to `DatasetFetchFailedError` -- the same
+    reason `get_dataset` itself already uses for a malformed response,
+    since a structurally-invalid dataset is exactly that class of
+    failure regardless of which layer detects it. This checks SHAPE
+    only (types, key presence) -- it never inspects `golden` content
+    (N28's job) and never a `value` (INV-02)."""
+    if not isinstance(dataset, dict):
+        raise DatasetFetchFailedError("get_dataset returned a non-dict dataset")
+    items = dataset.get("items")
+    if not isinstance(items, list):
+        raise DatasetFetchFailedError("dataset 'items' is missing or not a list")
+    for item in items:
+        if not isinstance(item, dict):
+            raise DatasetFetchFailedError("a dataset item is not a dict")
+        if not isinstance(item.get("item_id"), str) or not item["item_id"]:
+            raise DatasetFetchFailedError("a dataset item has a missing/non-string item_id")
+        if not isinstance(item.get("document_id"), str) or not item["document_id"]:
+            raise DatasetFetchFailedError(
+                "a dataset item has a missing/non-string document_id"
+            )
+
+
 def _mark_run_status_best_effort(
     platform: PlatformAdapter,
     run_id: str,
@@ -307,6 +338,10 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
 
     try:
         dataset = platform.get_dataset(dataset_name)
+        # GAP-1: validate shape BEFORE trusting it structurally anywhere
+        # else -- same except-clause, same reason, as a malformed
+        # `get_dataset` response.
+        _validate_dataset_shape(dataset)
     except DatasetFetchFailedError as exc:
         logger.error("run_eval: dataset_fetch_failed: %s", sanitize_for_log(str(exc)))
         _log_run_end("aborted", 1)
@@ -322,6 +357,15 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
         validate_golden_set(dataset)
     except RunAborted as exc:
         logger.error("run_eval: %s: %s", exc.reason, sanitize_for_log(str(exc)))
+        _log_run_end("aborted", 1)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - HARDEN-01 GAP-1, see facade docstring
+        # No `run_id` exists yet at this point (it is generated below),
+        # so there is no run to mark `aborted` -- unlike the in-loop
+        # catch-all further down. `type(exc).__name__` only, never
+        # `str(exc)` (INV-02: an unanticipated exception's message is
+        # not vetted the way every typed one in this codebase is).
+        logger.error("run_eval: unexpected pre-run error: %s", type(exc).__name__)
         _log_run_end("aborted", 1)
         return 1
 
@@ -474,6 +518,26 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
             raise _abort("hard_failure", None, str(exc)) from None
     except RunAborted as exc:
         logger.error("run_eval: %s: %s", exc.reason, sanitize_for_log(str(exc)))
+        _log_run_end("aborted", 1, pass_count=passed_count, fail_count=failed_count)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - HARDEN-01 GAP-1, see facade docstring
+        # Unlike the pre-run catch-all above, `run_id` DOES exist here
+        # (generated before this try-block) -- ADR-0004 #14 says every
+        # run that exists gets a best-effort `aborted` marker, so this
+        # writes one, exactly like every `_abort()` call site above,
+        # before ever logging or returning. `type(exc).__name__` only,
+        # never `str(exc)` (INV-02 -- an untyped exception's message is
+        # not vetted the way every typed one this codebase raises is;
+        # it could echo IDP or platform response content).
+        _mark_run_status_best_effort(
+            platform,
+            run_id,
+            "aborted",
+            action_id=action_id,
+            action_version=version,
+            golden_version=golden_version,
+        )
+        logger.error("run_eval: unexpected error: %s", type(exc).__name__)
         _log_run_end("aborted", 1, pass_count=passed_count, fail_count=failed_count)
         return 1
 
