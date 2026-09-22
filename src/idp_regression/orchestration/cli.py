@@ -133,15 +133,23 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         return run_eval(action_id, args.version, args.run_name)
-    except NotImplementedError as exc:
-        # T-01.4.1 slice boundary (facade.py): the per-document run loop
-        # is not built yet (T-01.4.2 onward), so `run_eval` always raises
-        # past its pre-run checks today. Convert that into a controlled
-        # exit rather than an uncaught traceback -- exit code 3 is
-        # reserved for this and is not part of the eventual 0/non-zero
-        # CI-gate contract (ADR-0004 §Exit-code contract).
-        logger.error("run_eval: %s", exc)
-        return 3
+    except Exception as exc:  # noqa: BLE001 - defense in depth, see docstring
+        # `run_eval`'s own contract (facade.py, `orchestration/errors.py`)
+        # is that no exception may ever escape it -- this batch (T-01.4.6)
+        # finished building the function, closing the slice boundary that
+        # used to make `NotImplementedError` the one real path every
+        # invocation took (formerly caught here as a reserved exit code
+        # 3, not part of the 0/non-zero CI-gate contract). That reserved
+        # code is now retired: nothing raises it anymore. This catch-all
+        # stays as defense in depth for CT-04 (0 iff success, non-zero
+        # otherwise) -- an uncaught exception would still exit non-zero
+        # via Python's own default, but only by coincidence, and would
+        # print a raw traceback that could echo exception-args content
+        # this codebase is otherwise careful never to log (INV-02).
+        # `sanitize_for_log` closes that gap; the exit code is a plain
+        # non-zero, not a distinguishing value.
+        logger.error("run_eval: unexpected error: %s", sanitize_for_log(str(exc)))
+        return 1
 
 
 if __name__ == "__main__":  # pragma: no cover - thin process entry

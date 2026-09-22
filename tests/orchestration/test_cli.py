@@ -199,64 +199,57 @@ def test_load_dotenv_is_called_before_parse_args(monkeypatch: pytest.MonkeyPatch
     assert call_order == ["load_dotenv", "parse_args"]
 
 
-def test_main_returns_3_when_run_eval_hits_the_not_implemented_boundary(
+def test_main_reaches_the_real_facade_and_returns_its_exit_code(
     monkeypatch: pytest.MonkeyPatch, tmp_path: object
 ) -> None:
-    """C5 (DEBT-44 gate, fourth instance): this is the cli->facade seam
-    exercised end to end, with the REAL `facade.run_eval` (not
-    monkeypatched, unlike every other test in this file). Today
-    `run_eval` ALWAYS raises `NotImplementedError` once its pre-run
-    checks pass (T-01.4.3a onward is not built), so this untested branch
-    is the one every real invocation takes -- mutating `return 3` ->
-    `return 0` previously survived all 665 tests because nothing
-    exercised this path with a real facade. `tmp_path` isolates from any
-    real ambient `.env`.
-
-    Updated for T-01.4.11/.2/.5/.6: `run_eval` now fetches the golden
-    dataset for real, which this test cannot do against
-    `https://example.invalid` -- the ONE seam stubbed here (`make_platform`,
-    the network boundary itself) is the deepest possible one, keeping the
-    cli->facade->pre-run-chain wiring genuinely exercised end to end."""
-    from idp_regression.orchestration import facade
-
-    class _FakePlatform:
-        def get_dataset(self, name: str) -> dict[str, object]:
-            from idp_regression.platform.schema import load_golden_schema
-
-            return {
-                "items": [
-                    {
-                        "item_id": "item-1",
-                        "document_id": "doc-1",
-                        "golden": {
-                            "fields": {
-                                "total": {
-                                    "value": "1250.00",
-                                    "type": "number",
-                                    "critical": True,
-                                }
-                            }
-                        },
-                    }
-                ],
-                "expected_output_schema": load_golden_schema(),
-            }
-
+    """C5 (DEBT-44 gate, fourth instance), updated 2026-09-21 (T-01.4.6
+    batch): this is the cli->facade seam exercised end to end, with the
+    REAL `facade.run_eval` (not monkeypatched, unlike every other test in
+    this file). The obsolete `NotImplementedError`-boundary version of
+    this test pinned exit code 3, reserved for the T-01.4.3a-onward slice
+    boundary -- that boundary no longer exists (this batch built the
+    per-document loop and the post-loop record phase, so `run_eval` never
+    raises `NotImplementedError` once its pre-run checks pass). This test
+    now pins the REAL current behavior instead of a stale reservation:
+    without `IDP_DOCUMENT_DIR` set, `run_eval` returns its own ordinary
+    non-zero exit (1), reached through `main()` unchanged -- proving the
+    cli->facade wiring still passes exit codes through untouched, not
+    that a special code is produced. `tmp_path` isolates from any real
+    ambient `.env`; mutating `return run_eval(...)` to `return 0` would
+    still fail this test."""
     monkeypatch.chdir(tmp_path)  # type: ignore[arg-type]
-    monkeypatch.setenv("PLATFORM", "langfuse")
-    monkeypatch.setenv("LANGFUSE_HOST", "https://example.invalid")
-    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pub")
-    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
-    monkeypatch.setenv("IDP_CLIENT_ID", "id")
-    monkeypatch.setenv("IDP_CLIENT_SECRET", "secret")
-    monkeypatch.setenv("IDP_REGION", "us-east")
-    monkeypatch.setenv("IDP_ORG_ID", "org-123")
-    monkeypatch.setenv("GOLDEN_DATASET_NAME", "idp-regression-golden")
-    monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform())
+    monkeypatch.delenv("IDP_DOCUMENT_DIR", raising=False)
 
     exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
 
-    assert exit_code == 3
+    assert exit_code == 1
+
+
+def test_main_converts_an_unexpected_exception_from_run_eval_into_a_nonzero_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defense in depth for CT-04 (0 iff success, non-zero otherwise):
+    `run_eval`'s own contract is that NO exception may escape it, but
+    `main()` no longer relies solely on that contract holding forever --
+    an exception class current code doesn't happen to raise today is one
+    `raise SomeError(...)` away from escaping in a future change, and an
+    uncaught exception here would both defeat CT-04 (Python's own
+    uncaught-exception exit code is a coincidental 1, not a documented
+    contract) and print a raw traceback that could echo exception-args
+    content this codebase is careful never to log elsewhere (INV-02).
+    `main()` now catches any exception `run_eval` raises, routes its
+    message through `sanitize_for_log`, and returns a plain non-zero exit
+    -- never re-raises, never prints the raw traceback."""
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+
+    def _boom(action_id: str, version: str, run_name: str) -> int:
+        raise RuntimeError("unexpected\nfailure with embedded newline")
+
+    monkeypatch.setattr(cli, "run_eval", _boom)
+
+    exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
+
+    assert exit_code != 0
 
 
 def test_version_at_the_64_char_cap_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
