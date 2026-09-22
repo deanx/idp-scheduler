@@ -326,3 +326,31 @@ def test_abort_path_returns_promptly(
 
     assert exit_code != 0
     assert elapsed < 1.0
+
+
+def test_all_gates_pass_success_path_returns_promptly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    """Coverage audit gap 7 (2026-09-21): NFR N3 was only bounded on the
+    abort path (`test_abort_path_returns_promptly` above) -- the success
+    path (extract -> classify -> gate -> the single post-loop
+    `record_run` -> the `complete` marker) had no latency bound at all.
+    Same technique as the abort-path test: a real monotonic clock
+    (`time.perf_counter`) around the whole `run_eval` call, never a
+    wall-clock `time.sleep` anywhere in the path under test -- every
+    collaborator here is a pure in-memory fake with no I/O, so the same
+    generous bound catches an accidental blocking wait on the happy
+    path too."""
+    _base_env(monkeypatch, tmp_path)
+    document_ids = ["doc-1", "doc-2", "doc-3"]
+    events: list[str] = []
+    idp_adapter = _E2EIDPAdapter(events=events)
+    _idp_adapter_conforms: IDPAdapter = idp_adapter  # S-2: Protocol binding check
+    _install(monkeypatch, document_ids=document_ids, idp_adapter=idp_adapter)
+
+    start = time.perf_counter()
+    exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME, DATASET_NAME)
+    elapsed = time.perf_counter() - start
+
+    assert exit_code == 0
+    assert elapsed < 1.0
