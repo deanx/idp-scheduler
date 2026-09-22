@@ -91,12 +91,15 @@ def test_check_empty_set_aborts_on_an_empty_dataset() -> None:
 
 
 def test_an_empty_dataset_with_a_drifted_schema_reports_schema_drift_not_empty_set() -> None:
-    """The pinned pre-run order (get_dataset -> drift -> empty -> N28)
-    means an empty dataset whose schema ALSO drifted must abort
-    `schema_drift`, because `check_schema_drift` runs before
-    `check_empty_set` in `facade.py`'s chain -- this test pins the
-    ordering by construction: `check_schema_drift` raises for THIS
-    dataset without ever consulting `items`."""
+    """`check_schema_drift` never consults `items`, so of course it
+    raises `schema_drift` for this dataset in isolation -- that is NOT a
+    pin on the ORDER the two guards run in inside `facade.py`'s chain
+    (SPEC-01:342's actual AC), only on `check_schema_drift`'s own
+    behavior. Swapping the two calls in `facade.py` would leave this test
+    green. The real ordering pin is
+    `test_run_eval_reports_schema_drift_not_empty_set_when_both_would_fire`
+    in `tests/orchestration/test_facade.py`, which drives `run_eval`
+    itself and would go red if the calls were swapped."""
     empty_and_drifted = _dataset(items=[], schema={"not": "the committed schema"})
     with pytest.raises(RunAborted) as excinfo:
         check_schema_drift(empty_and_drifted)

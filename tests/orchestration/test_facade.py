@@ -1,22 +1,25 @@
 """T-01.4.1/.11/.2/.5/.6: `run_eval(action_id, version, run_name) -> int`
-facade -- the pre-run chain.
+facade -- the FULL run (pre-run chain, per-document loop, post-loop
+record phase).
 
-This slice builds the ENTIRE pre-run chain (ADR-0004/ADR-0005 #8,
+This slice builds the pre-run chain (ADR-0004/ADR-0005 #8,
 S-01.4-KICKOFF.md pinned order): `load_dotenv()` first (INV-05),
 fail-closed credential VALIDATION (NFR N6, DEBT-30 -- see `bootstrap.py`),
-platform construction, `get_dataset` (dataset_fetch_failed), schema-drift
-(schema_drift), empty-set (empty_set), N28 structural validation
-(malformed_golden), and golden_version/run-id/experiment-name composition
-(T-01.4.6, T-01.4.13, DEBT-19). The per-document run loop is T-01.4.3a
-onward and does not exist yet -- `run_eval` raises `NotImplementedError`
-once every pre-run check passes, which is this slice's honest, explicit
-boundary.
+`IDP_DOCUMENT_DIR` validation, platform construction, `get_dataset`
+(dataset_fetch_failed), schema-drift (schema_drift), empty-set
+(empty_set), N28 structural validation (malformed_golden), and
+golden_version/run-id/experiment-name composition (T-01.4.6, T-01.4.13,
+DEBT-19) -- AND, new in this batch, the per-document loop (`extract` ->
+`classify` -> `overall_gate` -> `build_score_inputs`, ADR-0005 #9 step
+2/3, INV-06/INV-08) plus the single post-loop `record_run` (#9 step 4)
+and `mark_run_status` (#9 step 5).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 
 import pytest
 
@@ -36,19 +39,109 @@ def _set_all_credential_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("IDP_REGION", "us-east")
     monkeypatch.setenv("IDP_ORG_ID", "org-123")
     monkeypatch.setenv("GOLDEN_DATASET_NAME", "idp-regression-golden")
+    monkeypatch.setenv("IDP_DOCUMENT_DIR", "/documents")
 
 
 class _FakePlatform:
-    """A minimal `PlatformAdapter` double -- only `get_dataset` is used by
-    the pre-run chain this batch builds. `record_run`/`mark_run_status`
-    are deliberately absent: any test that reaches them is out of this
-    batch's slice boundary and should fail loudly, not silently pass."""
+    """A minimal `PlatformAdapter` double for the PRE-RUN-chain-only
+    tests below -- `get_dataset` plus no-op `record_run`/`mark_run_status`
+    (so a test that reaches the loop boundary doesn't crash on a missing
+    attribute; the loop-boundary tests below assert nothing about their
+    arguments). Tests that need to assert on `record_run`/
+    `mark_run_status` arguments use `_RecordingPlatform` instead."""
 
     def __init__(self, dataset: object) -> None:
         self._dataset = dataset
 
     def get_dataset(self, name: str) -> object:
         return self._dataset
+
+    def record_run(self, **kwargs: object) -> None:
+        pass
+
+    def mark_run_status(self, *args: object, **kwargs: object) -> None:
+        pass
+
+
+class _RecordingPlatform:
+    """A `PlatformAdapter` double that records every `record_run` /
+    `mark_run_status` call for assertion, and can be told to raise a
+    given exception from either."""
+
+    def __init__(
+        self,
+        dataset: object,
+        *,
+        record_run_error: Exception | None = None,
+        mark_run_status_error: Exception | None = None,
+    ) -> None:
+        self._dataset = dataset
+        self._record_run_error = record_run_error
+        self._mark_run_status_error = mark_run_status_error
+        self.record_run_calls: list[dict[str, object]] = []
+        self.mark_run_status_calls: list[dict[str, object]] = []
+
+    def get_dataset(self, name: str) -> object:
+        return self._dataset
+
+    def record_run(self, **kwargs: object) -> None:
+        self.record_run_calls.append(kwargs)
+        if self._record_run_error is not None:
+            raise self._record_run_error
+
+    def mark_run_status(self, run_id: str, status: str, **kwargs: object) -> None:
+        self.mark_run_status_calls.append({"run_id": run_id, "status": status, **kwargs})
+        if self._mark_run_status_error is not None:
+            raise self._mark_run_status_error
+
+
+class _FakeIDPAdapter:
+    """An `.extract()` double. `outputs` maps a resolved document PATH to
+    the `NormalizedOutput` to return; `error` (if set) is raised on every
+    call instead, after recording it."""
+
+    def __init__(
+        self,
+        outputs: dict[str, object] | None = None,
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        self._outputs = outputs or {}
+        self._error = error
+        self.calls: list[tuple[str, str, str]] = []
+
+    def extract(self, document_path: str, action_id: str, version: str) -> object:
+        self.calls.append((document_path, action_id, version))
+        if self._error is not None:
+            raise self._error
+        return self._outputs[document_path]
+
+
+def _matching_actual_for(document_dir: str, document_id: str) -> tuple[str, dict[str, object]]:
+    """A `NormalizedOutput` that exactly matches `_well_formed_dataset()`'s
+    single golden field (`total` = `"1250.00"`, critical), producing a
+    `PASS` gate -- for tests that only care about the success path
+    reaching the loop/record phase, not about classification itself."""
+    path = os.path.join(document_dir, document_id)
+    return path, {
+        "status": "SUCCEEDED",
+        "fields": {"total": {"value": "1250.00", "confidence": 0.99}},
+    }
+
+
+def _stub_make_idp_adapter_success(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    document_dir: str = "/documents",
+    document_id: str = "doc-1",
+) -> _FakeIDPAdapter:
+    """Stub `facade.make_idp_adapter` to return a fake whose `.extract()`
+    matches `_well_formed_dataset()`'s single item, producing a `PASS`
+    gate -- for tests that only care about reaching the record phase."""
+    path, actual = _matching_actual_for(document_dir, document_id)
+    fake = _FakeIDPAdapter({path: actual})
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda: fake)
+    return fake
 
 
 def _well_formed_dataset() -> dict[str, object]:
@@ -322,6 +415,38 @@ def test_run_eval_returns_nonzero_on_schema_drift(
     assert "schema_drift" in caplog.text
 
 
+def test_run_eval_reports_schema_drift_not_empty_set_when_both_would_fire(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+) -> None:
+    """SPEC-01:342 / TP-40's actual AC, pinned at the `run_eval` seam
+    (fresh Atchim gate finding on 98b336d..fd8c9c5): the pinned pre-run
+    ORDER is drift, THEN empty-set -- a dataset that is BOTH empty AND
+    drifted must report `schema_drift`, not `empty_set`, because
+    `facade.py` calls `check_schema_drift` first. Unlike
+    `test_prerun.py`'s same-named-in-spirit test (which calls
+    `check_schema_drift` alone and can't distinguish ordering from
+    single-guard behavior), this test drives `run_eval` itself: swapping
+    the `check_schema_drift`/`check_empty_set` call order in `facade.py`
+    makes this test go red, because an empty, non-drifted-looking-first
+    dataset would then report `empty_set` before drift is ever checked."""
+    dataset = _well_formed_dataset()
+    dataset["items"] = []
+    dataset["expected_output_schema"] = {"not": "the committed schema"}
+
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(dataset))
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    assert "schema_drift" in caplog.text
+    assert "empty_set" not in caplog.text
+
+
 def test_run_eval_returns_nonzero_on_empty_golden_set(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -339,6 +464,31 @@ def test_run_eval_returns_nonzero_on_empty_golden_set(
 
     assert exit_code != 0
     assert "empty_set" in caplog.text
+
+
+def test_run_eval_writes_no_marker_on_a_pre_run_abort(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+) -> None:
+    """ADR-0004 #14 / prerun.py's own docstring: 'a pre-run abort writes
+    no run_status marker, because no run exists yet' -- `run_id` is only
+    generated AFTER the pre-run chain passes (T-01.4.6), so there is
+    nothing to mark. Pinned here at the `run_eval` seam (not just
+    `prerun.py`'s unit tests) since `mark_run_status_best_effort` lives
+    in `facade.py` and it is `facade.py`'s job never to call it before
+    `run_id` exists."""
+    dataset = _well_formed_dataset()
+    dataset["items"] = []  # empty_set: a pre-run abort, no run_id yet
+
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    recording_platform = _RecordingPlatform(dataset)
+    monkeypatch.setattr(facade, "make_platform", lambda: recording_platform)
+
+    exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    assert recording_platform.mark_run_status_calls == []
 
 
 def test_run_eval_returns_nonzero_on_malformed_golden(
@@ -376,26 +526,29 @@ def test_run_eval_logs_the_golden_version_content_hash(
     _disable_dotenv_file_loading(monkeypatch, tmp_path)
     _set_all_credential_env(monkeypatch)
     monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(dataset))
+    _stub_make_idp_adapter_success(monkeypatch)
 
-    with caplog.at_level(logging.INFO), pytest.raises(NotImplementedError):
+    with caplog.at_level(logging.INFO):
         run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
 
     assert expected_golden_version in caplog.text
 
 
-# --- pre-run checks pass -> the loop boundary (T-01.4.3a onward) --------
+# --- pre-run checks pass -> the loop and record phase run ---------------
 
 
-def test_run_eval_raises_not_implemented_once_prerun_checks_pass(
+def test_run_eval_returns_zero_once_the_whole_run_succeeds(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: object,
 ) -> None:
     _disable_dotenv_file_loading(monkeypatch, tmp_path)
     _set_all_credential_env(monkeypatch)
     _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
+    _stub_make_idp_adapter_success(monkeypatch)
 
-    with pytest.raises(NotImplementedError):
-        run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+    exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code == 0
 
 
 def test_run_eval_composes_the_experiment_name_before_hitting_the_loop_boundary(
@@ -406,9 +559,10 @@ def test_run_eval_composes_the_experiment_name_before_hitting_the_loop_boundary(
     _disable_dotenv_file_loading(monkeypatch, tmp_path)
     _set_all_credential_env(monkeypatch)
     _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
+    _stub_make_idp_adapter_success(monkeypatch)
     monkeypatch.setattr(facade, "generate_run_id", lambda: "0123456789abcdef0123456789abcdef")
 
-    with caplog.at_level(logging.INFO), pytest.raises(NotImplementedError):
+    with caplog.at_level(logging.INFO):
         run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
 
     assert "nightly-01234567" in caplog.text
@@ -431,6 +585,7 @@ def test_run_eval_sanitizes_logged_values_not_just_names_them(
     _disable_dotenv_file_loading(monkeypatch, tmp_path)
     _set_all_credential_env(monkeypatch)
     _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
+    _stub_make_idp_adapter_success(monkeypatch)
     monkeypatch.setattr(facade, "generate_run_id", lambda: "0123456789abcdef0123456789abcdef")
 
     action_id = "12345678-1234-1234-1234-123456789012"
@@ -438,10 +593,393 @@ def test_run_eval_sanitizes_logged_values_not_just_names_them(
     run_name = 'nightly" forged="1'
     experiment_name = run_name + "-01234567"
 
-    with caplog.at_level(logging.INFO), pytest.raises(NotImplementedError):
+    with caplog.at_level(logging.INFO):
         run_eval(action_id, version, run_name)
 
     assert f"run={json.dumps(run_name)}" in caplog.text
     assert f"experiment={json.dumps(experiment_name)}" in caplog.text
     assert f"action={json.dumps(action_id)}" in caplog.text
     assert f"version={json.dumps(version)}" in caplog.text
+
+
+# --- T-01.4.6: the per-document loop + post-loop record_run -------------
+
+
+def _two_item_dataset() -> dict[str, object]:
+    from idp_regression.platform.schema import load_golden_schema
+
+    golden = {"fields": {"total": {"value": "1250.00", "type": "number", "critical": True}}}
+    return {
+        "items": [
+            {"item_id": "item-1", "document_id": "doc-1", "golden": golden},
+            {"item_id": "item-2", "document_id": "doc-2", "golden": golden},
+        ],
+        "expected_output_schema": load_golden_schema(),
+    }
+
+
+def test_run_eval_returns_nonzero_when_idp_document_dir_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+) -> None:
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.delenv("IDP_DOCUMENT_DIR", raising=False)
+
+    def _fail_if_called() -> None:
+        raise AssertionError("make_platform must not be called: zero network calls (N6)")
+
+    monkeypatch.setattr(facade, "make_platform", _fail_if_called)
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    assert "IDP_DOCUMENT_DIR" in caplog.text
+
+
+def test_run_eval_resolves_document_id_to_a_path_under_idp_document_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+) -> None:
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.setenv("IDP_DOCUMENT_DIR", "/custom-dir")
+    _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
+    fake_idp = _stub_make_idp_adapter_success(monkeypatch, document_dir="/custom-dir")
+
+    exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code == 0
+    assert fake_idp.calls == [
+        ("/custom-dir/doc-1", "12345678-1234-1234-1234-123456789012", "1.0")
+    ]
+
+
+def test_run_eval_calls_record_run_exactly_once_with_every_document_record(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+) -> None:
+    dataset = _well_formed_dataset()
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    recording_platform = _RecordingPlatform(dataset)
+    monkeypatch.setattr(facade, "make_platform", lambda: recording_platform)
+    monkeypatch.setattr(facade, "generate_run_id", lambda: "0123456789abcdef0123456789abcdef")
+    _stub_make_idp_adapter_success(monkeypatch)
+
+    exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code == 0
+    assert len(recording_platform.record_run_calls) == 1
+    call = recording_platform.record_run_calls[0]
+    assert call["dataset_name"] == "idp-regression-golden"
+    assert call["run_name"] == "nightly-01234567"
+    assert call["run_id"] == "0123456789abcdef0123456789abcdef"
+    records = call["records"]
+    assert isinstance(records, list)
+    assert len(records) == 1
+    assert records[0]["item_id"] == "item-1"
+    assert records[0]["document_id"] == "doc-1"
+    assert {score["name"] for score in records[0]["scores"]} == {"field:total", "gate"}
+
+
+def test_run_eval_passes_run_metadata_to_record_run_on_every_zero_exit_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+) -> None:
+    """INV-04."""
+    from idp_regression.platform.hashing import hash_dataset
+
+    dataset = _well_formed_dataset()
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    recording_platform = _RecordingPlatform(dataset)
+    monkeypatch.setattr(facade, "make_platform", lambda: recording_platform)
+    _stub_make_idp_adapter_success(monkeypatch)
+
+    exit_code = run_eval("12345678-1234-1234-1234-123456789012", "9.9", "nightly")
+
+    assert exit_code == 0
+    metadata = recording_platform.record_run_calls[0]["metadata"]
+    assert metadata == {
+        "action_id": "12345678-1234-1234-1234-123456789012",
+        "action_version": "9.9",
+        "golden_version": hash_dataset(dataset["items"]),  # type: ignore[arg-type]
+    }
+
+
+def test_run_eval_marks_run_status_complete_after_a_successful_record_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+) -> None:
+    dataset = _well_formed_dataset()
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    recording_platform = _RecordingPlatform(dataset)
+    monkeypatch.setattr(facade, "make_platform", lambda: recording_platform)
+    monkeypatch.setattr(facade, "generate_run_id", lambda: "0123456789abcdef0123456789abcdef")
+    _stub_make_idp_adapter_success(monkeypatch)
+
+    exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code == 0
+    assert recording_platform.mark_run_status_calls == [
+        {
+            "run_id": "0123456789abcdef0123456789abcdef",
+            "status": "complete",
+            "action_id": "12345678-1234-1234-1234-123456789012",
+            "action_version": "1.0",
+            "golden_version": recording_platform.record_run_calls[0]["metadata"]["golden_version"],  # type: ignore[index]
+        }
+    ]
+    # record_run happened strictly before the complete marker (ADR-0005 #9 step 4/5).
+    assert recording_platform.record_run_calls
+    assert recording_platform.mark_run_status_calls
+
+
+def test_run_eval_never_calls_record_run_before_every_gate_is_computed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+) -> None:
+    """INV-08: the gate result is computed BEFORE the platform write. Pin
+    it with a mutation-style probe: `record_run` asserts every record it
+    receives already carries a `gate` score -- if a future change moved
+    `record_run` to be called per-document, mid-loop, before the LAST
+    document's gate was computed, this would still pass per-call but the
+    call-count/record-count assertion below would catch a mid-loop call
+    directly: `record_run` must be called exactly once, with ALL records
+    already built."""
+    dataset = _two_item_dataset()
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    recording_platform = _RecordingPlatform(dataset)
+    monkeypatch.setattr(facade, "make_platform", lambda: recording_platform)
+
+    path1, actual1 = _matching_actual_for("/documents", "doc-1")
+    path2, actual2 = _matching_actual_for("/documents", "doc-2")
+    fake_idp = _FakeIDPAdapter({path1: actual1, path2: actual2})
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda: fake_idp)
+
+    exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code == 0
+    assert len(fake_idp.calls) == 2
+    assert len(recording_platform.record_run_calls) == 1
+    records = recording_platform.record_run_calls[0]["records"]
+    assert isinstance(records, list)
+    assert len(records) == 2
+    for record in records:
+        assert any(score["name"] == "gate" for score in record["scores"])
+
+
+def test_run_eval_aborts_the_whole_run_and_stops_after_the_first_document_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+) -> None:
+    """INV-06: no remaining document is processed after an abort, and
+    `record_run` is never called (no partial run)."""
+    from idp_regression.adapter.errors import IDPAuthenticationError
+
+    dataset = _two_item_dataset()
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    recording_platform = _RecordingPlatform(dataset)
+    monkeypatch.setattr(facade, "make_platform", lambda: recording_platform)
+
+    fake_idp = _FakeIDPAdapter(error=IDPAuthenticationError("token rejected"))
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda: fake_idp)
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    assert len(fake_idp.calls) == 1  # doc-2 never attempted
+    assert recording_platform.record_run_calls == []
+    assert "auth_failure" in caplog.text
+    assert "doc-1" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("exception_factory", "expected_reason"),
+    [
+        (lambda: __import__(
+            "idp_regression.adapter.errors", fromlist=["IDPAuthenticationError"]
+        ).IDPAuthenticationError("bad creds"), "auth_failure"),
+        (lambda: __import__(
+            "idp_regression.adapter.errors", fromlist=["IDPPollTimeoutError"]
+        ).IDPPollTimeoutError("poll budget expired", last_status=None), "unknown_status_timeout"),
+        (lambda: __import__(
+            "idp_regression.adapter.errors", fromlist=["IDPSubmitError"]
+        ).IDPSubmitError("submit rejected"), "hard_failure"),
+        (lambda: __import__(
+            "idp_regression.adapter.errors", fromlist=["IDPExecutionFailedError"]
+        ).IDPExecutionFailedError("terminal failure", status="FAILED"), "hard_failure"),
+        (lambda: __import__(
+            "idp_regression.adapter.errors", fromlist=["MalformedIDPOutputError"]
+        ).MalformedIDPOutputError("unsafe_field_name", "rejected"), "malformed_actual"),
+    ],
+)
+def test_run_eval_maps_each_typed_idp_error_to_its_abort_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+    exception_factory: object,
+    expected_reason: str,
+) -> None:
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
+
+    fake_idp = _FakeIDPAdapter(error=exception_factory())  # type: ignore[operator]
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda: fake_idp)
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    assert expected_reason in caplog.text
+
+
+def test_run_eval_writes_the_aborted_marker_on_a_per_document_abort(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+) -> None:
+    from idp_regression.adapter.errors import IDPAuthenticationError
+
+    dataset = _well_formed_dataset()
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    recording_platform = _RecordingPlatform(dataset)
+    monkeypatch.setattr(facade, "make_platform", lambda: recording_platform)
+    monkeypatch.setattr(facade, "generate_run_id", lambda: "0123456789abcdef0123456789abcdef")
+
+    fake_idp = _FakeIDPAdapter(error=IDPAuthenticationError("token rejected"))
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda: fake_idp)
+
+    exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    assert len(recording_platform.mark_run_status_calls) == 1
+    assert recording_platform.mark_run_status_calls[0]["status"] == "aborted"
+    assert recording_platform.mark_run_status_calls[0]["run_id"] == (
+        "0123456789abcdef0123456789abcdef"
+    )
+
+
+def test_run_eval_mark_run_status_failure_is_best_effort_and_does_not_crash(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+) -> None:
+    """ADR-0004 #14 non-blocking debt: the marker write is best-effort,
+    one attempt, never retried -- a failure here must not itself crash
+    `run_eval` or flip a would-be non-zero exit into something worse."""
+    from idp_regression.adapter.errors import IDPAuthenticationError
+
+    dataset = _well_formed_dataset()
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    recording_platform = _RecordingPlatform(
+        dataset, mark_run_status_error=RuntimeError("platform unreachable")
+    )
+    monkeypatch.setattr(facade, "make_platform", lambda: recording_platform)
+
+    fake_idp = _FakeIDPAdapter(error=IDPAuthenticationError("token rejected"))
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda: fake_idp)
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    assert len(recording_platform.mark_run_status_calls) == 1  # exactly one attempt, no retry
+
+
+def test_run_eval_returns_nonzero_when_record_run_raises_flush_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+) -> None:
+    from idp_regression.platform.errors import FlushFailedError
+
+    dataset = _well_formed_dataset()
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    recording_platform = _RecordingPlatform(
+        dataset, record_run_error=FlushFailedError("flush budget exhausted")
+    )
+    monkeypatch.setattr(facade, "make_platform", lambda: recording_platform)
+    _stub_make_idp_adapter_success(monkeypatch)
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    assert "flush_failed" in caplog.text
+    assert len(recording_platform.mark_run_status_calls) == 1
+    assert recording_platform.mark_run_status_calls[0]["status"] == "aborted"
+
+
+def test_run_eval_returns_nonzero_when_record_run_raises_experiment_record_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+) -> None:
+    from idp_regression.platform.errors import ExperimentRecordFailedError
+
+    dataset = _well_formed_dataset()
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    recording_platform = _RecordingPlatform(
+        dataset, record_run_error=ExperimentRecordFailedError("structural check failed")
+    )
+    monkeypatch.setattr(facade, "make_platform", lambda: recording_platform)
+    _stub_make_idp_adapter_success(monkeypatch)
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    assert "hard_failure" in caplog.text
+
+
+def test_run_eval_returns_nonzero_on_a_failing_gate_but_still_records_the_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+) -> None:
+    """A gate FAIL is not an abort (ADR-0004 exit-code contract): the run
+    still completes, `record_run` still runs with the FAIL score, and the
+    `complete` marker is still written -- only the exit code goes
+    non-zero."""
+    dataset = _well_formed_dataset()
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    recording_platform = _RecordingPlatform(dataset)
+    monkeypatch.setattr(facade, "make_platform", lambda: recording_platform)
+
+    path = os.path.join("/documents", "doc-1")
+    mismatched_actual = {
+        "status": "SUCCEEDED",
+        "fields": {"total": {"value": "9999.99", "confidence": 0.5}},
+    }
+    fake_idp = _FakeIDPAdapter({path: mismatched_actual})
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda: fake_idp)
+
+    exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    assert len(recording_platform.record_run_calls) == 1
+    scores = recording_platform.record_run_calls[0]["records"][0]["scores"]  # type: ignore[index]
+    gate_score = next(score for score in scores if score["name"] == "gate")
+    assert gate_score["value"] == "FAIL"
+    assert recording_platform.mark_run_status_calls == [
+        {
+            "run_id": recording_platform.record_run_calls[0]["run_id"],
+            "status": "complete",
+            "action_id": "12345678-1234-1234-1234-123456789012",
+            "action_version": "1.0",
+            "golden_version": recording_platform.record_run_calls[0]["metadata"]["golden_version"],  # type: ignore[index]
+        }
+    ]
