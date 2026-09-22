@@ -129,7 +129,8 @@ def post_json(
     req.add_header("Content-Type", "application/json")
     for key, value in (headers or {}).items():
         req.add_header(key, value)
-    return _send(req, timeout_seconds)
+    status, resp_body, _response_headers = _send(req, timeout_seconds)
+    return status, resp_body
 
 
 def get_json(
@@ -137,6 +138,23 @@ def get_json(
     timeout_seconds: float,
     headers: dict[str, str] | None = None,
 ) -> tuple[int, Any]:
+    req = urllib.request.Request(url, method="GET")
+    for key, value in (headers or {}).items():
+        req.add_header(key, value)
+    status, body, _response_headers = _send(req, timeout_seconds)
+    return status, body
+
+
+def get_json_with_headers(
+    url: str,
+    timeout_seconds: float,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, Any, dict[str, str]]:
+    """Like ``get_json`` but also returns the response headers (lower-cased
+    keys), needed only by the poll loop's bounded-retry logic (ADR-0004 #3)
+    to read ``Retry-After`` on a 429. Kept as a separate function rather
+    than widening ``get_json``'s return shape so every existing ``get_json``
+    caller/test (submit-leg-adjacent, T-01.2) stays untouched."""
     req = urllib.request.Request(url, method="GET")
     for key, value in (headers or {}).items():
         req.add_header(key, value)
@@ -184,7 +202,8 @@ def post_multipart_file(
     req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
     for key, value in (headers or {}).items():
         req.add_header(key, value)
-    return _send(req, timeout_seconds)
+    status, resp_body, _response_headers = _send(req, timeout_seconds)
+    return status, resp_body
 
 
 def _log_and_raise_transport_error(req: urllib.request.Request, detail: str) -> NoReturn:
@@ -222,7 +241,17 @@ def _read_bounded(readable: Any) -> bytes:
     return bytes(data)
 
 
-def _send(req: urllib.request.Request, timeout_seconds: float) -> tuple[int, Any]:
+def _response_headers(source: Any) -> dict[str, str]:
+    """Lower-cased response headers, defensively -- a fake/stub response
+    used by a unit test may not define ``.headers`` at all, and that must
+    never raise (only the real poll-retry path reads this)."""
+    raw_headers = getattr(source, "headers", None)
+    if raw_headers is None:
+        return {}
+    return {str(key).lower(): str(value) for key, value in raw_headers.items()}
+
+
+def _send(req: urllib.request.Request, timeout_seconds: float) -> tuple[int, Any, dict[str, str]]:
     # Deferred-raise: a header value containing CR/LF (e.g. a corrupted
     # token) makes http.client raise a raw ValueError whose message embeds
     # the value (as a bytes repr — Atchim R8's redact()-regex approach
@@ -232,10 +261,12 @@ def _send(req: urllib.request.Request, timeout_seconds: float) -> tuple[int, Any
     # as idp_client.py's _fetch_token/_submit).
     invalid_header_value = False
     unexpected_redirect = False
+    response_headers: dict[str, str] = {}
     try:
         with _urlopen(req, timeout_seconds) as resp:  # noqa: S310 - internal MuleSoft IDP host only
             raw_bytes = _read_bounded(resp)
             status = resp.status
+            response_headers = _response_headers(resp)
     except ValueError:
         invalid_header_value = True
         raw_bytes = b""
@@ -263,6 +294,7 @@ def _send(req: urllib.request.Request, timeout_seconds: float) -> tuple[int, Any
             except _TRANSPORT_FAILURE_TYPES as read_exc:
                 _log_and_raise_transport_error(req, str(read_exc))
             status = exc.code
+            response_headers = _response_headers(exc)
     except _TRANSPORT_FAILURE_TYPES as exc:
         _log_and_raise_transport_error(req, str(exc))
     if invalid_header_value:
@@ -275,10 +307,10 @@ def _send(req: urllib.request.Request, timeout_seconds: float) -> tuple[int, Any
     except UnicodeDecodeError:
         _log_and_raise_transport_error(req, "response body was not valid UTF-8")
     if not raw:
-        return status, None
+        return status, None, response_headers
     try:
-        return status, json.loads(raw)
+        return status, json.loads(raw), response_headers
     except json.JSONDecodeError:
-        return status, raw
+        return status, raw, response_headers
     except (RecursionError, ValueError):
         _log_and_raise_transport_error(req, "response body could not be parsed as JSON")

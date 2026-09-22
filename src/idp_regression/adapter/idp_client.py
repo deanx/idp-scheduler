@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import random
 import time
 from collections.abc import Callable
 
@@ -38,6 +39,22 @@ DEFAULT_SUBMIT_TIMEOUT_SECONDS = 30.0
 DEFAULT_POLL_TIMEOUT_SECONDS = 120.0
 DEFAULT_POLL_INTERVAL_SECONDS = 3.0
 DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS = 60.0
+
+#: DEBT-24 / ADR-0004 #3 -- bounded poll retry for a transient 5xx/429 HTTP
+#: response (distinct from a connection-level ``IDPTransportError``, which
+#: already keeps polling within the deadline unchanged by this task). Pinned
+#: literal values per the ADR ("Backoff spec: exponential full jitter, base
+#: 1s, cap 8s, max-attempts from config (default 3)") -- only max-attempts
+#: is config, base/cap are not placeholders awaiting the S-01.6 spike.
+DEFAULT_POLL_RETRY_MAX_ATTEMPTS = 3
+MAX_POLL_RETRY_MAX_ATTEMPTS = 20
+_POLL_RETRY_BACKOFF_BASE_SECONDS = 1.0
+_POLL_RETRY_BACKOFF_CAP_SECONDS = 8.0
+
+#: A sane upper bound on an IDP-controlled ``Retry-After`` value (QA F-1
+#: style) -- a huge or negative value is never "sane", so it falls back to
+#: the exponential backoff instead of being honoured verbatim.
+MAX_RETRY_AFTER_SECONDS = 3_600.0
 
 #: A sane upper bound on a token's advertised lifetime (1 year) — anything
 #: beyond this is treated as malformed, not "very long-lived" (/test
@@ -80,6 +97,36 @@ def _validate_timing(name: str, value: object, *, allow_zero: bool, max_value: f
     return fvalue
 
 
+def _validate_positive_int(name: str, value: object, *, max_value: int) -> int:
+    """Fail closed on a non-int/non-positive/absurd retry-attempts config
+    value, mirroring ``_validate_timing``'s posture for the numeric timing
+    fields (QA F-1 precedent)."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise IDPConfigurationError(f"{name} must be an integer")
+    if value <= 0:
+        raise IDPConfigurationError(f"{name} must be > 0")
+    if value > max_value:
+        raise IDPConfigurationError(f"{name} exceeds the sane upper bound of {max_value}")
+    return value
+
+
+def _parse_retry_after_seconds(value: str | None) -> float | None:
+    """Only the delay-seconds form of ``Retry-After`` is honoured (ADR-0004
+    #3: "honors Retry-After capped at the remaining poll budget"). The
+    HTTP-date form, and any non-numeric/negative/absurd value, is treated
+    as absent -- an IDP-controlled header must never be able to stall or
+    crash the poll loop; it just falls back to exponential backoff."""
+    if value is None:
+        return None
+    try:
+        seconds = float(value.strip())
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(seconds) or seconds < 0 or seconds > MAX_RETRY_AFTER_SECONDS:
+        return None
+    return seconds
+
+
 def _executions_base_url(region: str, org_id: str, action_id: str, version: str) -> str:
     return (
         f"https://idp-rt.{region}.anypoint.mulesoft.com/api/v1"
@@ -102,8 +149,10 @@ class MuleSoftIDPAdapter:
         poll_timeout_seconds: float = DEFAULT_POLL_TIMEOUT_SECONDS,
         poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
         token_refresh_margin_seconds: float = DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS,
+        poll_retry_max_attempts: int = DEFAULT_POLL_RETRY_MAX_ATTEMPTS,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        random_func: Callable[[], float] = random.random,
     ) -> None:
         if not success_statuses <= terminal_statuses:
             raise ValueError("success_statuses must be a subset of terminal_statuses")
@@ -131,6 +180,11 @@ class MuleSoftIDPAdapter:
             allow_zero=True,
             max_value=MAX_TOKEN_REFRESH_MARGIN_SECONDS,
         )
+        poll_retry_max_attempts = _validate_positive_int(
+            "poll_retry_max_attempts",
+            poll_retry_max_attempts,
+            max_value=MAX_POLL_RETRY_MAX_ATTEMPTS,
+        )
         self._client_id = client_id
         self._client_secret = client_secret
         self._region = region
@@ -140,8 +194,10 @@ class MuleSoftIDPAdapter:
         self._submit_timeout_seconds = submit_timeout_seconds
         self._poll_timeout_seconds = poll_timeout_seconds
         self._poll_interval_seconds = poll_interval_seconds
+        self._poll_retry_max_attempts = poll_retry_max_attempts
         self._clock = clock
         self._sleep = sleep
+        self._random = random_func
         self._token_cache = TokenCache(
             fetch=self._fetch_token,
             refresh_margin_seconds=token_refresh_margin_seconds,
@@ -250,6 +306,69 @@ class MuleSoftIDPAdapter:
 
     # -- Poll (configurable allowlist, monotonic budget — INV-07/BR9) -----
 
+    def _poll_get_with_auth_retry(
+        self, url: str, token: str, timeout_seconds: float
+    ) -> tuple[str, int, object, dict[str, str]]:
+        """A single poll GET, with the mid-poll 401/403 refresh-then-retry
+        (DEBT-21, ADR-0004 #7). Once ``extract()`` has started polling, the
+        loop can no longer re-submit to recover from an expired token — the
+        POST executions call is not idempotent for the same document — so
+        the refresh-and-retry has to live here, in the adapter's poll loop,
+        not in the orchestrator (which only sees ``extract()`` raise or
+        return). This does NOT touch A3 (the *initial* token fetch in
+        ``_fetch_token``/``TokenCache._refresh`` before the first poll,
+        called from ``extract()``) — that path stays fail-closed, no retry.
+        """
+        status_code, body, headers = transport.get_json_with_headers(
+            url, timeout_seconds=timeout_seconds, headers={"Authorization": f"Bearer {token}"}
+        )
+        if status_code not in (401, 403):
+            return token, status_code, body, headers
+        # Refresh triggers unconditionally here (not gated on the token's
+        # advertised expiry) -- IDP told us the token is no longer good, so
+        # there's nothing to gain by trusting the cached expires_at. One
+        # refresh, one retry of the SAME GET, then fail closed (ADR-0004
+        # #7) -- `TokenCache.get()` raises `IDPAuthenticationError` itself
+        # (fail-closed, no retry inside the cache) if the refresh is
+        # rejected, and that propagates here unchanged.
+        self._token_cache.invalidate()
+        token = self._token_cache.get()
+        status_code, body, headers = transport.get_json_with_headers(
+            url, timeout_seconds=timeout_seconds, headers={"Authorization": f"Bearer {token}"}
+        )
+        if status_code in (401, 403):
+            raise IDPAuthenticationError(
+                "IDP rejected the request mid-run (401/403) after a token refresh"
+            )
+        return token, status_code, body, headers
+
+    def _poll_retry_sleep_seconds(
+        self,
+        attempt: int,
+        status_code: int,
+        headers: dict[str, str],
+        remaining_budget: float,
+    ) -> float:
+        """Exponential full-jitter backoff (ADR-0004 #3: base 1s, cap 8s),
+        or the response's ``Retry-After`` on a 429 when present and sane —
+        either way, never more than what's left of the absolute poll
+        deadline (the retry budget is INCLUDED in, never extends, the
+        per-document timeout)."""
+        retry_after = (
+            _parse_retry_after_seconds(headers.get("retry-after"))
+            if status_code == 429
+            else None
+        )
+        if retry_after is not None:
+            sleep_seconds = retry_after
+        else:
+            cap = min(
+                _POLL_RETRY_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)),
+                _POLL_RETRY_BACKOFF_CAP_SECONDS,
+            )
+            sleep_seconds = self._random() * cap
+        return min(sleep_seconds, remaining_budget)
+
     def _poll(
         self,
         execution_id: str,
@@ -261,6 +380,7 @@ class MuleSoftIDPAdapter:
         base_url = _executions_base_url(self._region, self._org_id, action_id, version)
         url = f"{base_url}/{execution_id}"
         last_status: str | None = None
+        poll_retry_count = 0
         while True:
             now = self._clock()
             if now >= deadline:
@@ -275,17 +395,30 @@ class MuleSoftIDPAdapter:
             # (Atchim suggestion).
             per_call_timeout = min(self._poll_interval_seconds * 2, remaining) or remaining
             try:
-                status_code, body = transport.get_json(
-                    url,
-                    timeout_seconds=per_call_timeout,
-                    headers={"Authorization": f"Bearer {token}"},
+                token, status_code, body, headers = self._poll_get_with_auth_retry(
+                    url, token, per_call_timeout
                 )
             except IDPTransportError:
                 # Transient transport error — keep polling within the same budget.
                 self._sleep(min(self._poll_interval_seconds, max(deadline - self._clock(), 0.0)))
                 continue
-            if status_code in (401, 403):
-                raise IDPAuthenticationError("IDP rejected the request mid-run (401/403)")
+            if status_code == 429 or 500 <= status_code < 600:
+                # DEBT-24 / ADR-0004 #6: a transient 5xx/429 is retried,
+                # bounded (never a bare "abort immediately") -- but a
+                # non-429 4xx (400, 404, ...) still falls through to the
+                # immediate-hard-failure branch below, unchanged.
+                poll_retry_count += 1
+                if poll_retry_count > self._poll_retry_max_attempts:
+                    raise IDPPollHardFailureError(
+                        "IDP poll retry budget exhausted for a transient failure",
+                        http_status=status_code,
+                    )
+                remaining_budget = max(deadline - self._clock(), 0.0)
+                sleep_seconds = self._poll_retry_sleep_seconds(
+                    poll_retry_count, status_code, headers, remaining_budget
+                )
+                self._sleep(sleep_seconds)
+                continue
             if not (200 <= status_code < 300):
                 # ADR-0004 #5: any other non-2xx is a hard failure, aborted
                 # immediately — the body's "status" is never read on this
@@ -368,6 +501,15 @@ def make_idp_adapter() -> MuleSoftIDPAdapter:
         except ValueError:
             raise IDPConfigurationError(f"{name} env var is not numeric") from None
 
+    def _int_env(name: str, default: int) -> int:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            raise IDPConfigurationError(f"{name} env var is not an integer") from None
+
     return MuleSoftIDPAdapter(
         client_id=_require("IDP_CLIENT_ID"),
         client_secret=_require("IDP_CLIENT_SECRET"),
@@ -383,5 +525,8 @@ def make_idp_adapter() -> MuleSoftIDPAdapter:
         ),
         token_refresh_margin_seconds=_timing_env(
             "IDP_TOKEN_REFRESH_MARGIN_SECONDS", DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS
+        ),
+        poll_retry_max_attempts=_int_env(
+            "IDP_POLL_RETRY_MAX_ATTEMPTS", DEFAULT_POLL_RETRY_MAX_ATTEMPTS
         ),
     )
