@@ -1,0 +1,110 @@
+{
+  "documentName": "seed-001-clean.pdf",
+  "fields": {
+    "bill_to": {
+      "confidenceScore": 99.0,
+      "geometry": null,
+      "value": "Northwind Traders"
+    },
+    "currency": {
+      "confidenceScore": 95.0,
+      "geometry": null,
+      "value": "USD"
+    },
+    "invoice_date": {
+      "confidenceScore": 98.0,
+      "geometry": null,
+      "value": "2024-06-28"
+    },
+    "invoice_number": {
+      "confidenceScore": 99.0,
+      "geometry": null,
+      "value": "INV-1001"
+    },
+    "po_number": {
+      "confidenceScore": 99.0,
+      "geometry": null,
+      "value": "PO-5567"
+    },
+    "subtotal": {
+      "confidenceScore": 99.0,
+      "geometry": null,
+      "value": "81.00"
+    },
+    "tax": {
+      "confidenceScore": 99.0,
+      "geometry": null,
+      "value": "6.48"
+    },
+    "total": {
+      "confidenceScore": 99.0,
+      "geometry": null,
+      "value": "87.48"
+    },
+    "vendor_name": {
+      "confidenceScore": 99.0,
+      "geometry": null,
+      "value": "Acme Office Supplies"
+    }
+  },
+  "id": "REDACTED-EXECUTION-ID",
+  "status": "SUCCEEDED",
+  "tables": {
+    "line_items": [
+      {
+        "amount": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "65.00"
+        },
+        "description": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "Printer paper, A4, 500 sheets"
+        },
+        "quantity": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "10"
+        },
+        "sku": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "A-100"
+        },
+        "unit_price": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "6.50"
+        }
+      },
+      {
+        "amount": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "16.00"
+        },
+        "description": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "Ballpoint pens, box of 12"
+        },
+        "quantity": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "5"
+        },
+        "sku": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "B-200"
+        },
+        "unit_price": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "3.20"
+        }
+      }
+    ]
+  }
+}
