@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 
 import pytest
 
@@ -983,3 +984,97 @@ def test_run_eval_returns_nonzero_on_a_failing_gate_but_still_records_the_run(
             "golden_version": recording_platform.record_run_calls[0]["metadata"]["golden_version"],  # type: ignore[index]
         }
     ]
+
+
+# --- Path containment (security fix, N28 is JSON-shape only) -----------
+
+
+def _dataset_with_document_id(document_id: str) -> dict[str, object]:
+    from idp_regression.platform.schema import load_golden_schema
+
+    return {
+        "items": [
+            {
+                "item_id": "item-1",
+                "document_id": document_id,
+                "golden": {
+                    "fields": {
+                        "total": {"value": "1250.00", "type": "number", "critical": True}
+                    }
+                },
+            }
+        ],
+        "expected_output_schema": load_golden_schema(),
+    }
+
+
+@pytest.mark.parametrize(
+    "hostile_document_id",
+    [
+        "../../etc/passwd",
+        "../outside.json",
+        "a/../../outside.json",
+        "/etc/passwd",
+    ],
+)
+def test_resolve_document_path_rejects_traversal_and_absolute_ids(
+    hostile_document_id: str,
+) -> None:
+    with pytest.raises(facade._PathContainmentViolation):
+        facade._resolve_document_path("/documents", hostile_document_id)
+
+
+def test_resolve_document_path_rejects_a_symlink_escaping_the_root(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "documents"
+    root.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}")
+    escape_link = root / "escape.json"
+    escape_link.symlink_to(outside)
+
+    with pytest.raises(facade._PathContainmentViolation):
+        facade._resolve_document_path(str(root), "escape.json")
+
+
+def test_resolve_document_path_happy_path_still_resolves(tmp_path: Path) -> None:
+    root = tmp_path / "documents"
+    root.mkdir()
+    (root / "doc-1.json").write_text("{}")
+
+    resolved = facade._resolve_document_path(str(root), "doc-1.json")
+
+    assert resolved == str((root / "doc-1.json").resolve())
+
+
+def test_run_eval_aborts_on_path_containment_violation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    hostile_document_id = "../../etc/passwd"
+    document_dir = tmp_path / "documents"
+    document_dir.mkdir()
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.setenv("IDP_DOCUMENT_DIR", str(document_dir))
+    _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
+    monkeypatch.setattr(
+        facade,
+        "make_platform",
+        lambda: _FakePlatform(_dataset_with_document_id(hostile_document_id)),
+    )
+    fake_idp = _FakeIDPAdapter({})
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda: fake_idp)
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    assert "path_containment_violation" in caplog.text
+    assert fake_idp.calls == []
+    # The sanitized document_id is logged (INV-02-compliant identification)
+    # but the resolved/candidate filesystem path never is.
+    assert json.dumps(hostile_document_id) in caplog.text
+    assert "/etc/passwd" not in caplog.text.replace(json.dumps(hostile_document_id), "")

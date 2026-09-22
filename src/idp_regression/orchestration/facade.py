@@ -92,24 +92,60 @@ GOLDEN_DATASET_NAME_VAR = "GOLDEN_DATASET_NAME"
 IDP_DOCUMENT_DIR_VAR = "IDP_DOCUMENT_DIR"
 
 
+class _PathContainmentViolation(Exception):
+    """Raised by `_resolve_document_path` when `document_id` would resolve
+    outside `IDP_DOCUMENT_DIR` -- an absolute `document_id`, a `..`
+    traversal, or a symlink escape (security fix, 2026-09-21: N28
+    validates JSON shape only, never filesystem safety). Carries the
+    offending `document_id` as `.document_id` -- callers must route it
+    through `sanitize_for_log` before it ever reaches a log line or
+    exception message (INV-02); the resolved/candidate path itself is
+    NEVER attached to this exception or logged anywhere."""
+
+    def __init__(self, document_id: str) -> None:
+        super().__init__("document_id resolved outside IDP_DOCUMENT_DIR")
+        self.document_id = document_id
+
+
 def _resolve_document_path(document_dir: str, document_id: str) -> str:
     """Resolve `document_id` to a local path under `IDP_DOCUMENT_DIR`
     (ADR-0004 Flow step 5a). The orchestrator owns this resolution; the
     adapter takes only an already-resolved path (INV-01 -- the platform
     stores `document_id` only, and no path blob ever reaches it; this
-    function is purely local composition, no I/O of its own).
+    function is purely local composition plus a containment check, no
+    I/O of its own beyond `os.path.realpath`'s symlink resolution).
 
-    ⚠️ **Design call for review**: this is a plain `os.path.join`, the
-    minimal convention pinned by ADR-0004. `document_id` is platform
-    (golden-set) content, already pre-run-validated as a non-empty string
-    by `validate_golden_set` (N28), but that check is about JSON shape,
-    not filesystem safety -- it does not rule out e.g. a `document_id`
-    containing `../`. No stricter containment (basename-only, a resolved-
-    path-stays-under-`document_dir` assertion) is applied here because no
-    task pinned one; flagged so a reviewer can decide whether the golden
-    set is a trusted-enough input for that gap to be acceptable for MVP.
+    **Containment (security fix, 2026-09-21)**: `document_id` is platform
+    (golden-set) content -- data a Curator or anyone with platform write
+    access controls -- already pre-run-validated as a non-empty string by
+    `validate_golden_set` (N28), but that check is about JSON shape, not
+    filesystem safety. Both the configured root and the candidate are
+    resolved to real absolute paths (`os.path.realpath` -- this also
+    resolves a symlink to its real target, so a symlink planted *inside*
+    `document_dir` that points *outside* it is caught, not just a literal
+    `..` in `document_id`), and the candidate must land strictly inside
+    the root (`root + os.sep` prefix -- the root itself is never a valid
+    resolution, since it is a directory, not a document). An absolute
+    `document_id` is rejected up front for a clearer failure signal, even
+    though the containment check below would also catch it (`os.path.join`
+    discards `document_dir` entirely when its second argument is
+    absolute, so an unchecked absolute `document_id` would otherwise
+    resolve to itself verbatim).
+
+    Raises `_PathContainmentViolation` (never returns a path outside the
+    root) -- the caller (`run_eval`'s per-document loop) converts this
+    into a typed `path_containment_violation` abort (CT-04: 0-vs-non-zero
+    exit-code contract stays intact) and logs the `document_id` only via
+    `sanitize_for_log`, never the resolved/candidate path.
     """
-    return os.path.join(document_dir, document_id)
+    if os.path.isabs(document_id):
+        raise _PathContainmentViolation(document_id)
+
+    root = os.path.realpath(document_dir)
+    candidate = os.path.realpath(os.path.join(document_dir, document_id))
+    if not candidate.startswith(root + os.sep):
+        raise _PathContainmentViolation(document_id)
+    return candidate
 
 
 def _mark_run_status_best_effort(
@@ -294,7 +330,12 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
         for item in dataset["items"]:
             document_id = item["document_id"]
             golden = item["golden"]
-            document_path = _resolve_document_path(document_dir, document_id)
+            try:
+                document_path = _resolve_document_path(document_dir, document_id)
+            except _PathContainmentViolation as exc:
+                raise _abort(
+                    "path_containment_violation", exc.document_id, "containment check failed"
+                ) from None
 
             try:
                 actual = idp_adapter.extract(document_path, action_id, version)

@@ -34,6 +34,12 @@ contract stays 0/non-zero).
 - `flush_failed` -- `FlushFailedError` from `record_run` (ADR-0005 #9
   step 4, superseding ADR-0004 #13's bounded flush retry -- never
   retried).
+- `path_containment_violation` -- `facade._PathContainmentViolation`: a
+  `document_id` (golden-set content) resolved outside `IDP_DOCUMENT_DIR`
+  -- an absolute path, `..` traversal, or a symlink escape (security fix,
+  2026-09-21; N28 validates JSON shape only, never filesystem safety).
+  Raised BEFORE any IDP call for that document -- the adapter never sees
+  the escaped path.
 """
 
 from __future__ import annotations
@@ -50,6 +56,7 @@ AbortReason = Literal[
     "unknown_status_timeout",
     "malformed_actual",
     "flush_failed",
+    "path_containment_violation",
 ]
 
 
