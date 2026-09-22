@@ -1,19 +1,24 @@
 # HARDEN-01 — Containment report — UC-01 baseline regression
 
-**Verdict: ❌ GAPS** — re-run 2026-09-21 (see §7)
+**Verdict: ⚠️ PASS WITH RESIDUALS** — re-run #2 2026-09-21 (see §8)
 
 ```
-Verdict: GAPS
-Date: 2026-09-21 (re-run #1)
-Commit: 33aaca0
-GAP-1: STILL OPEN (Major, blocking) - 12 of 13 reproductions closed; the untyped-escape class survives on the unguarded seams (get_dataset, make_platform, make_idp_adapter, validate_platform_credentials, and the window between the two catch-alls)
-GAP-2: CLOSED (run_experiment / flush / missing item_results now typed)
+Verdict: PASS_WITH_RESIDUALS
+Date: 2026-09-21 (re-run #2)
+Commit: 5c0f1ac
+GAP-1: CLOSED (all 13 reproductions + all 5 named pre-run seams contained: exit 1, typed reason, run_end, marker iff a run exists)
+GAP-2: CLOSED (re-confirmed)
 GAP-3: OPEN - Minor, accepted + carded (DEBT-53)
-GAP-4: NEW - Minor, non-blocking - residual SDK-drift seams in record_experiment
-GAP-5: NEW - Minor, non-blocking - a BaseException that is not KeyboardInterrupt/SystemExit escapes every catch-all
-Leak: PASS (0 sentinel hits on all new paths)
-Fail-open: PASS (no new guard can produce a GREEN build)
-Containment-REQUIRED: NOT DISCHARGED
+GAP-4: CLOSED (item_results block fully guarded; 5 drift probes all typed)
+GAP-5: PARTIALLY CLOSED - closed in platform/tracing.py; STILL OPEN in orchestration/facade.py and orchestration/cli.py (asyncio.CancelledError escapes both) - Minor, non-blocking
+GAP-6: NEW - Minor, non-blocking - the widened pre-run typed except-clause logs raw str(exc) for the WHOLE pre-run chain (6 sentinel leaks reproduced)
+GAP-7: NEW - Minor, non-blocking - load_dotenv() sits OUTSIDE the merged try in BOTH run_eval and cli.main; an OSError there escapes both, no run_end
+A-4: unchanged (whitespace-only item_id) - DEBT-57
+A-5: unchanged + one new sub-case (an exception inside the catch-all's OWN handling) - DEBT-57
+__context__: PASS (None on every wrapped tracing raise, verified with a planted SDK secret sentinel)
+Leak: PASS on all GAP-1/GAP-4 paths and on the frame-location string; ⚠️ GAP-6 on the pre-run typed clause
+Fail-open: PASS (no probe produced a GREEN build; every deviation exits non-zero)
+Containment-REQUIRED: DISCHARGED (residuals GAP-5/6/7 carded, none blocking)
 ```
 
 **Use case:** UC-01 · **Story under gate:** S-01.4 (orchestrator + CLI) · **Date:** 2026-09-21
@@ -328,3 +333,115 @@ Sentinels planted in the golden value, the extracted value, `LANGFUSE_SECRET_KEY
 **Required (Dengoso):** move the `except Exception` so it covers **the whole pre-run chain** — `validate_platform_credentials`, `make_idp_adapter`, `make_platform`, `get_dataset` + `_validate_dataset_shape`, the pre-run guards, and the `hash_dataset`/`generate_run_id`/`compose_experiment_name` window — rather than one `try` inside it. A single pre-run `try:` spanning from `load_dotenv()` to just before `run_id` generation, with the existing typed `except` clauses kept in front of a final `except Exception`, closes all five at once and restores `_log_run_end`'s "EVERY exit point" contract. **GAP-4 / GAP-5 / A-4 / A-5 → `/debt`, not blocking.**
 
 **Re-run scope for the next pass:** R1, P6–P9 only, plus a re-confirm of F2/F4. The GAP-2 probes and the 24 probe families of §3 need no third run unless `platform/tracing.py` changes again.
+
+---
+
+## 8. Re-run #2 — 2026-09-21 — GAP-1's five seams, GAP-4, GAP-5, A-4/A-5
+
+**Red-team:** Branca · **Commit under gate:** `5c0f1ac` (`feat/S-01.2-idp-adapter`) · **Fixes examined:** `7d7aed3` (pre-run merge + `_frame_location`), `291bd23` (CLI fallback), `bf6b701` (`tracing.py` `__context__` / GAP-4 / GAP-5).
+
+> **Method.** Detached `git worktree` at `5c0f1ac` in the session scratchpad, `PYTHONPATH` pinned to **that** tree's `src`, resolution asserted in-probe (`facade.__file__` resolves under `…/wt2/src/…` — the first attempt silently fell through to the editable install and was discarded and re-run). Project `.venv` interpreter. 60 throwaway probes; `src/` and `tests/` untouched. Repo suite re-verified in the same worktree: **818 passed / 14 skipped**. No live IDP or platform call; no document submitted. GAP-3 and A-1/A-2/A-3 were **not** re-probed (carded DEBT-53/54) and stand as written in §4.
+
+### 8.1 GAP-1 — **CLOSED** (was Major, blocking)
+
+The single merged pre-run `try` does what `7d7aed3` claims. **All 13 original reproductions and all five seams named in §7 are contained.** Each: exit 1, a reason line carrying `type(exc).__name__` + frame location only, `run_end` emitted, and a `run_status` marker written **iff** a `run_id` exists.
+
+| Probe | Seam / injection | Escaped? | exit | `run_end` | Markers |
+|---|---|---|---|---|---|
+| R1 | `get_dataset` → `TimeoutError` | ✅ no | 1 | yes | none (pre-run) ✅ |
+| R2 | `extract` → `TimeoutError` | ✅ no | 1 | yes | `['aborted']` ✅ |
+| R3 | `record_run` → `TimeoutError` | ✅ no | 1 | yes | `['aborted']` ✅ |
+| R4–R12 | `items` = `"not-a-list"`/`42`/`{…}`/`[None]`/`[42]`/`["str"]`, no `items` key, no `document_id`, non-`str` `document_id` | ✅ no (9/9) | 1 | yes | none ✅ |
+| R13 | drifted gate literal (`ValueError` from `build_score_inputs`) | ✅ no | 1 | yes | `['aborted']` ✅ |
+| P6 | `make_platform()` → `TimeoutError` | ✅ no | 1 | yes | none ✅ |
+| P7 | `make_idp_adapter()` → `OSError` | ✅ no | 1 | yes | none ✅ |
+| P9 | `validate_platform_credentials()` → `OSError` | ✅ no | 1 | yes | none ✅ |
+| P8 / P8b / P8c | `hash_dataset` → `RecursionError` · `generate_run_id` → `OSError` · `compose_experiment_name` → `ValueError` (the window that had no `try` at all) | ✅ no (3/3) | 1 | yes | none ✅ |
+| N2 | a **real** `RecursionError` (genuine deep recursion, not a synthetic raise) — does `_frame_location` survive walking it? | ✅ no | 1 | yes | none ✅ |
+
+**Marker discipline is exact:** never on a pre-run abort (all pre-run probes: `marks == []`), always once on an in-loop/record-phase abort. `run_end` present on every contained path. No probe returned 0 on a failure (fail-open re-check, §8.5).
+
+### 8.2 Probing past the fix — four residual escapes, all of the *same* class, none blocking
+
+| Probe | Injection | `run_eval` | `cli.main` | Consequence |
+|---|---|---|---|---|
+| X5 / C2 / C3 | `load_dotenv()` raises (`OSError`, `UnicodeDecodeError`) | ❌ **escapes** | ❌ escapes when it is **cli's own** `load_dotenv` (C2); caught with rc 1 but **no `run_end`** when it is the facade's (C3) | **GAP-7** |
+| X7 / X10 / C1 | `asyncio.CancelledError` from `extract` / `get_dataset` | ❌ escapes | ❌ **escapes `cli.main` raw** | **GAP-5**, still open here |
+| X3 / X3b / C4 | `traceback.extract_tb` raises → `_frame_location` fails **inside the catch-all's own handler** | ❌ escapes (marker already written) | ❌ escapes — cli's `_frame_location` shares the same module and fails identically | **A-5 sub-case** |
+| X2 | a logging handler that raises while emitting `run_end` | ❌ escapes (marker written, `run_end` and the return value lost) | — | **A-5**, unchanged |
+| X6 | the window between the end of the pre-run `try` and the loop `try` (the `pre-run checks passed` `logger.info`, forced via a raising `sanitize_for_log`) | ❌ escapes | — | **A-5 family** |
+
+**Probes that came back clean:** X1 (the `aborted` marker write itself raising **inside** the catch-all → swallowed by `_mark_run_status_best_effort`, run still exits 1 with `run_end`); X4 (an exception whose **`__str__` itself raises** → falls through to the in-loop catch-all, exit 1, marker, `run_end`); X8 `KeyboardInterrupt` and X9 `SystemExit` → **propagate, as pinned**; F4/C5 a clean run → exit 0, single `complete` marker, `run_end`.
+
+### 8.3 GAP-4 / GAP-5 in `platform/tracing.py` — **GAP-4 CLOSED, GAP-5 CLOSED here**
+
+| Probe | Injection | Result |
+|---|---|---|
+| G5 | `item_results` a lazy iterator raising mid-iteration (secret sentinel in the message) | ✅ `ExperimentRecordFailedError: … structural check failed: RuntimeError (SDK return shape drift?)` — **sentinel gone** |
+| G6 | `item_results = 42` (non-iterable) | ✅ typed (`TypeError` → same mapping) |
+| G7 | `item_results` **property** raises | ✅ typed |
+| G8 / G9 | item result with no `.trace_id` · `item_result.item` with no `.id` (deeper attribute drift) | ✅ typed (2/2) |
+| G10 / G10b / G12 | `asyncio.CancelledError` from `run_experiment` · from `flush()` · from the structural walk | ✅ all three mapped (`ExperimentRecordFailedError` / `FlushFailedError`) |
+| G13 / G14 | `KeyboardInterrupt` · `SystemExit` | ✅ **propagate** — cancellation semantics are not wedged; only `CancelledError` is absorbed, and only at a seam where the caller is `run_eval`, which owns the abort |
+| G1 / G3 / G11 | `run_experiment`/`flush` raising `RuntimeError`; happy path | ✅ unchanged from §7.2 |
+
+**GAP-5 is closed in `tracing.py` and only there.** `run_eval`'s two catch-alls and `cli.main`'s are still `except Exception`, so a `CancelledError` originating at the IDP seam (X7) or the dataset seam (X10) still escapes to the terminal. Non-zero exit is preserved by Python's own unhandled-exception path — no GREEN build — but no marker, no `run_end`, no reason.
+
+### 8.4 `__context__` — **PASS**
+
+A secret sentinel was planted **inside the SDK exception's own message** (`RuntimeError("SDK Bearer <SENTINEL>")`) and the raised exception's chain walked to depth 10 following both `__context__` and `__cause__`:
+
+```
+chain == [('ExperimentRecordFailedError', 'record_experiment: run_experiment raised RuntimeError')]
+__context__ is None · __cause__ is None · sentinel in repr(chain): False
+```
+
+Verified identically on the `flush()` mapping and on the structural-check catch-all. The deferred-raise pattern holds: `__context__` is **genuinely `None`**, not merely `__suppress_context__`-hidden.
+
+### 8.5 Leak and fail-open re-check — **one new leak class (GAP-6), otherwise PASS**
+
+- **Frame-location string:** `frame.filename:lineno:name` only. Probed with `IDP_DOCUMENT_DIR=/SENTINEL-DOCDIR-9f21`: the document dir does **not** appear; no golden value, no extracted value, no credential. ✅ INV-02-safe as claimed.
+- **CLI fallback (`291bd23`):** forced `run_eval` itself to raise `RuntimeError("raw <SECRET-SENTINEL>")` → exit 1, **0 sentinel hits** (C6). The `sanitize_for_log(str(exc))` leak is gone. ✅
+- **Fail-open:** 60 probes, **not one returned 0 on a failure**; the clean run still returns 0 with a `complete` marker. No path produces a silently-green build. ✅
+- ⚠️ **GAP-6 (below)** is the one leak class found.
+
+### 8.6 New gaps
+
+#### GAP-6 — Minor, non-blocking — the merge widened an `str(exc)`-logging clause over the whole pre-run chain
+
+`facade.py:391` — `except (RuntimeError, IDPConfigurationError, ValueError, PlatformConfigurationError) as exc: logger.error("run_eval: %s", sanitize_for_log(str(exc)))`. Its own comment vets it against `make_idp_adapter` / `make_platform` / `MuleSoftIDPAdapter._validate_timing` — the only raisers it covered **before** `7d7aed3`. The merge moved it in front of the *entire* pre-run chain, so it now also covers `validate_platform_credentials`, `get_dataset` (the platform SDK / transport), `check_schema_drift`, `validate_golden_set`, `hash_dataset`, `generate_run_id` and `compose_experiment_name` — none of them vetted for that clause. `sanitize_for_log` escapes, it does not redact (A-1 / DEBT-54).
+
+Six reproductions, each planting a sentinel in the raised message and finding it in `caplog`:
+
+| Probe | Raiser | Leaked |
+|---|---|---|
+| N1a | `get_dataset` → `ValueError("platform said: Bearer <SECRET>")` | secret sentinel |
+| N1b | `get_dataset` → `RuntimeError("resp body golden=<GOLDEN>")` | golden value |
+| N1c | `get_dataset` → `RecursionError` (a `RuntimeError` subclass — lands here, not in the catch-all) | secret sentinel |
+| N1d | `check_schema_drift` → `ValueError` | secret sentinel |
+| N1e | `validate_golden_set` → `RuntimeError` | golden value |
+| N1f | `validate_platform_credentials` → `ValueError` | secret sentinel |
+| P8 / P8c | `hash_dataset` → `RecursionError` · `compose_experiment_name` → `ValueError` (golden sentinel in the message) | golden value |
+
+`check_schema_drift` and `validate_golden_set` handle **golden content directly**, which is what turns A-1 from a theoretical obligation into a live one. **Why non-blocking:** no raiser in the widened perimeter embeds a value *today* (A-1's construction argument still holds, now over a much larger and unvetted surface), and the leak is to the log, not to the platform, and never produces a GREEN build. **Fix shape:** drop `str(exc)` from this clause (log `type(exc).__name__` + `_frame_location`, as the catch-all beside it already does), or narrow the clause back to `IDPConfigurationError`/`PlatformConfigurationError` and let `RuntimeError`/`ValueError` fall to the catch-all.
+
+#### GAP-7 — Minor, non-blocking — `load_dotenv()` is outside the merged `try`, in **both** entry points
+
+`facade.py`'s `load_dotenv()` is the statement immediately **before** the merged pre-run `try`; `cli.py:122`'s is before `main()`'s own. `dotenv_support.load_dotenv` does real I/O (`Path.cwd()`, then python-dotenv reading and decoding `./.env`) — a deleted cwd, an unreadable file or a mis-encoded `.env` raises `OSError`/`UnicodeDecodeError`. Reproduced: escapes `run_eval` raw (X5); escapes `cli.main` raw when it is cli's own call (C2); caught by cli's fallback with exit 1 but **no `run_end`** when it is the facade's (C3). Same class as GAP-1, one statement short of the fix. Trivial to close: move both calls inside their existing `try`. Nothing is owed a marker at that point (no `run_id`), so only the `run_end` line and the `-> int` contract are at stake.
+
+### 8.7 A-4 / A-5 — confirmed still only those
+
+- **A-4** — a whitespace-only `item_id` (`"   "`) still runs green end-to-end (exit 0, `complete` marker). Re-probed: it is **not** larger than stated — the write side (`_require_record_shape`) still governs, nothing is coerced, no leak, no fail-open. Stays DEBT-57.
+- **A-5** — a raising `run_end` log handler still escapes (X2), after the marker is written. One **new sub-case**, same family: an exception raised inside the catch-all's *own* handling — `_frame_location` failing (X3/X3b/C4) — escapes both `run_eval` and `cli.main`, because both call the same `traceback.extract_tb`. Realism is low (`extract_tb` is iterative and `linecache` swallows I/O errors — a genuine deep `RecursionError` was handled fine, N2), so this remains an advisory on DEBT-57, not a gap. Note it as the general principle: **neither catch-all is itself guarded**.
+
+### 8.8 Verdict — `Containment: REQUIRED` is **DISCHARGED**
+
+GAP-1 and GAP-2 — the two Major, blocking findings — are **closed**, verified against all 13 original reproductions, all five named seams, and eleven fresh probes past the fix. GAP-4 is closed. GAP-5 is closed where it was reachable through the SDK and remains open only as a facade/CLI observability loss. The `__context__` leak is genuinely closed. Nothing found is fail-open; **no probe on any of the 60 produced a GREEN build**, and every residual costs *observability*, never *safety*.
+
+**`Containment: REQUIRED` (NFR-01, UC-01) is discharged as of `5c0f1ac`.** S-01.4 is unblocked from this gate.
+
+**Carry forward to `/debt` (Dunga), none blocking:** GAP-5 (facade + cli `CancelledError`), **GAP-6** (the widened `str(exc)` clause — the highest-value of the three, it is the only reproduced leak), **GAP-7** (`load_dotenv` outside the `try`), plus the unchanged GAP-3 (DEBT-53), A-1/A-2/A-3 (DEBT-54) and A-4/A-5 (DEBT-57).
+
+**Re-run scope if `orchestration/` or `platform/` changes again:** N1a–N1f, X5/X7/X10 and C1–C3 only. The GAP-1/GAP-2/GAP-4 suites and the 24 probe families of §3 are settled.
+
+> ⚠️ **Scope pin, recorded 2026-09-21 at hand-off.** This verdict is pinned to **committed `5c0f1ac`**, which is what the worktree and every probe in §8 ran against. While §8 was being written, **uncommitted changes appeared in the main checkout's `src/` and `tests/`** (`orchestration/facade.py`, a new `log_sanitize.frame_location`, `tests/orchestration/test_facade.py`, `tests/orchestration/test_cli.py`) — they appear to move `load_dotenv()` inside the merged `try` (GAP-7) and to relocate `_frame_location`. **Branca did not author them and has not red-teamed them.** The discharge below does **not** extend to that working tree; if those changes land, re-run the §8.8 scope (N1a–N1f, X5/X7/X10, C1–C3) against the resulting commit.
