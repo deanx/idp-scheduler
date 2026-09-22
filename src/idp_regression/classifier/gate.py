@@ -92,6 +92,17 @@ def _validate_golden(golden: Golden) -> None:
             raise MalformedGoldenError(f"golden prompt {pname!r} critical must be bool")
 
 
+#: N28 (T-01.4.5, ADR-0005 Decision #8): the orchestration pre-run
+#: structural validator over the whole golden set MUST be the classifier's
+#: own N22 golden validator -- never a second validator/dialect (ADR-0005
+#: #8 rejected a second `jsonschema` pass because its strictness could
+#: disagree with this one). This is an additive public alias, not a copy:
+#: it `is` `_validate_golden` (see
+#: ``tests/classifier/test_gate.py::test_validate_golden_structure_is_validate_golden``),
+#: so N28 can never silently drift from N22 as this function evolves.
+validate_golden_structure = _validate_golden
+
+
 def _validate_actual(actual: NormalizedOutput) -> None:
     if not isinstance(actual, dict):
         raise MalformedActualError("actual must be a mapping")

@@ -240,3 +240,17 @@ def test_actual_prompt_cell_non_mapping_raises_malformed_actual() -> None:
     actual["prompts"] = {"q1": "plain string answer"}  # type: ignore[dict-item]
     with pytest.raises(MalformedActualError):
         classify(_good_golden_with_prompt(), actual)
+
+
+# --- N28 (T-01.4.5, ADR-0005 Decision #8): orchestration reuses N22 -----
+
+
+def test_validate_golden_structure_is_validate_golden() -> None:
+    """`validate_golden_structure` (the orchestration-facing N28 alias)
+    must `is` `_validate_golden` -- the SAME function object, not a copy
+    -- so N28 can never silently drift from N22 as `_validate_golden`
+    evolves. A copy-paste "reuse" would defeat the whole point of the
+    alias and this test exists specifically to catch that mutation."""
+    from idp_regression.classifier.gate import _validate_golden, validate_golden_structure
+
+    assert validate_golden_structure is _validate_golden
