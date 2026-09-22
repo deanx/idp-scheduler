@@ -100,7 +100,8 @@ def _adapter(
             return result[0], result[1], {}
         return result
 
-    results = [_padded(r) for r in (poll_results or [(200, {"status": "SUCCEEDED", "pages": []})])]
+    default_poll_result = (200, {"status": "SUCCEEDED", "fields": {}, "tables": {}})
+    results = [_padded(r) for r in (poll_results or [default_poll_result])]
     poll_iter = iter(results)
     last_poll_result = results[-1]
 
@@ -207,7 +208,7 @@ def test_poll_get_url_carries_value_only_false_query_param(
         url: str, *args: object, **kwargs: object
     ) -> tuple[int, dict[str, Any], dict[str, str]]:
         requested_urls.append(url)
-        return 200, {"status": "SUCCEEDED", "pages": []}, {}
+        return 200, {"status": "SUCCEEDED", "fields": {}, "tables": {}}, {}
 
     adapter = _adapter(
         monkeypatch,
@@ -250,7 +251,7 @@ def test_poll_get_url_carries_value_only_false_on_every_url_across_an_auth_retry
         requested_urls.append(url)
         if len(requested_urls) == 1:
             return 401, {"error": "expired"}, {}
-        return 200, {"status": "SUCCEEDED", "pages": []}, {}
+        return 200, {"status": "SUCCEEDED", "fields": {}, "tables": {}}, {}
 
     adapter = _adapter(
         monkeypatch,
@@ -284,7 +285,7 @@ def test_poll_get_url_carries_value_only_false_on_every_url_across_a_transient_r
         requested_urls.append(url)
         if len(requested_urls) == 1:
             return 429, {"error": "rate limited"}, {}
-        return 200, {"status": "SUCCEEDED", "pages": []}, {}
+        return 200, {"status": "SUCCEEDED", "fields": {}, "tables": {}}, {}
 
     adapter = _adapter(
         monkeypatch,
@@ -318,7 +319,7 @@ def test_poll_transport_error_keeps_polling_within_budget_then_succeeds(
         call_count["n"] += 1
         if call_count["n"] == 1:
             raise IDPTransportError("transient connection reset")
-        return 200, {"status": "SUCCEEDED", "pages": []}, {}
+        return 200, {"status": "SUCCEEDED", "fields": {}, "tables": {}}, {}
 
     adapter = _adapter(
         monkeypatch,
@@ -556,7 +557,7 @@ def test_poll_returns_on_configured_success_status(
         monkeypatch,
         terminal_statuses={"DONE"},
         success_statuses={"DONE"},
-        poll_results=[(200, {"status": "DONE", "pages": []})],
+        poll_results=[(200, {"status": "DONE", "fields": {}, "tables": {}})],
         clock=_clock_from([0.0, 0.0, 0.5, 1.0]),
     )
     out = adapter.extract(str(doc), "action-1", "v1")
@@ -574,7 +575,7 @@ def test_poll_never_hard_codes_succeeded_and_honours_the_configured_allowlist(
         monkeypatch,
         terminal_statuses={"SUCCEEDED"},
         success_statuses=set(),  # nothing counts as success
-        poll_results=[(200, {"status": "SUCCEEDED", "pages": []})],
+        poll_results=[(200, {"status": "SUCCEEDED", "fields": {}, "tables": {}})],
         clock=_clock_from([0.0, 0.0, 0.5, 1.0]),
     )
     with pytest.raises(IDPExecutionFailedError):
@@ -590,7 +591,7 @@ def test_poll_keeps_polling_on_non_terminal_status_then_succeeds(
         monkeypatch,
         poll_results=[
             (200, {"status": "RUNNING", "pages": []}),
-            (200, {"status": "SUCCEEDED", "pages": []}),
+            (200, {"status": "SUCCEEDED", "fields": {}, "tables": {}}),
         ],
         # extract: clock() for start, TokenCache._refresh clock(), then poll loop
         # calls clock() each iteration for the deadline check (2 iterations).
@@ -666,7 +667,7 @@ def test_poll_unknown_but_present_status_keeps_polling_then_succeeds(
         monkeypatch,
         poll_results=[
             (200, {"status": "SOME_UNKNOWN_STATUS", "pages": []}),
-            (200, {"status": "SUCCEEDED", "pages": []}),
+            (200, {"status": "SUCCEEDED", "fields": {}, "tables": {}}),
         ],
         clock=_clock_from([0.0, 0.0, 1.0, 2.0, 3.0]),
         sleep=lambda _seconds: None,
@@ -715,7 +716,7 @@ def test_poll_401_or_403_refresh_then_retry_succeeds_and_invalidates_once(
         monkeypatch,
         poll_results=[
             (http_status, {"error": "expired"}),
-            (200, {"status": "SUCCEEDED", "pages": []}),
+            (200, {"status": "SUCCEEDED", "fields": {}, "tables": {}}),
         ],
         clock=_clock_from([0.0, 0.0, 0.5, 1.0, 1.5, 2.0]),
     )
@@ -768,7 +769,7 @@ def test_poll_second_get_after_401_uses_the_refreshed_token_not_the_old_one(
         captured_auth_headers.append(headers["Authorization"])
         if poll_call_count["n"] == 1:
             return 401, {"error": "expired"}, {}
-        return 200, {"status": "SUCCEEDED", "pages": []}, {}
+        return 200, {"status": "SUCCEEDED", "fields": {}, "tables": {}}, {}
 
     adapter = _adapter(
         monkeypatch,
@@ -872,7 +873,7 @@ def test_poll_5xx_is_retried_then_succeeds(
         calls.append(1)
         if len(calls) == 1:
             return http_status, {"error": "transient"}, {}
-        return 200, {"status": "SUCCEEDED", "pages": []}, {}
+        return 200, {"status": "SUCCEEDED", "fields": {}, "tables": {}}, {}
 
     adapter = _adapter(
         monkeypatch,
@@ -934,7 +935,7 @@ def test_poll_429_honours_sane_retry_after_capped_to_remaining_budget(
         calls.append(1)
         if len(calls) == 1:
             return 429, {"error": "rate limited"}, {"retry-after": "1000"}
-        return 200, {"status": "SUCCEEDED", "pages": []}, {}
+        return 200, {"status": "SUCCEEDED", "fields": {}, "tables": {}}, {}
 
     adapter = _adapter(
         monkeypatch,
@@ -969,7 +970,7 @@ def test_poll_429_with_insane_retry_after_falls_back_to_exponential_backoff(
         calls.append(1)
         if len(calls) == 1:
             return 429, {"error": "rate limited"}, {"retry-after": "not-a-number"}
-        return 200, {"status": "SUCCEEDED", "pages": []}, {}
+        return 200, {"status": "SUCCEEDED", "fields": {}, "tables": {}}, {}
 
     adapter = _adapter(
         monkeypatch,
@@ -1375,7 +1376,7 @@ def test_default_clock_and_sleep_are_time_monotonic_and_time_sleep_not_time_time
     monkeypatch.setattr(
         transport,
         "get_json_with_headers",
-        lambda *a, **kw: (200, {"status": "SUCCEEDED", "pages": []}, {}),
+        lambda *a, **kw: (200, {"status": "SUCCEEDED", "fields": {}, "tables": {}}, {}),
     )
     adapter = MuleSoftIDPAdapter(
         client_id="cid",

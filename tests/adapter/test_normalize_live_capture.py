@@ -35,6 +35,25 @@ EXPECTED_FIELD_NAMES = {
 }
 
 
+def test_live_capture_fixture_shape_is_the_real_top_level_wire_contract() -> None:
+    # R-2 (2026-09-22 REQUEST CHANGES round). The pinned VALUES above don't
+    # by themselves pin the ENVELOPE SHAPE: re-wrapping this exact fixture
+    # into the legacy `pages[]` envelope leaves every value-pinning test in
+    # this file green, because `normalize()` still walks a single logical
+    # page either way — so a later "tidy up the fixture" pass could quietly
+    # reshape it back to `pages[]` and delete the only real-shape coverage
+    # in the project without a single test noticing. This is the wire
+    # contract (ADR-0002 A11): assert the shape directly, not just what
+    # comes out of it.
+    assert "pages" not in LIVE_FIXTURE, (
+        "the live capture must stay in the real top-level 'fields'/'tables' "
+        "shape — reshaping it into 'pages[]' would delete the only "
+        "real-wire-shape coverage in the project while every value-pinning "
+        "test in this file stays green"
+    )
+    assert {"fields", "tables"} <= set(LIVE_FIXTURE)
+
+
 def test_normalize_over_the_live_capture_does_not_raise() -> None:
     normalize(LIVE_FIXTURE, success_statuses={"SUCCEEDED"})
 

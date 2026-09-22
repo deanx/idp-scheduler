@@ -158,3 +158,21 @@ def test_a_normalized_output_is_accepted_by_classify_without_a_shape_error() -> 
     }
     verdicts = classify(golden, actual)
     assert verdicts["invoice_number"]["verdict"] == "match"
+    # R-2 secondary finding (2026-09-22 REQUEST CHANGES round): the original
+    # assertion only checked `invoice_number`, so a changed `total` or a
+    # changed table-row value would still pass this test — content beyond
+    # one field was never actually asserted. Widen it.
+    assert verdicts["total"]["verdict"] == "match"
+    line_items = verdicts["line_items"]
+    assert line_items["verdict"] == "detail"
+    # The golden only lists row A-100; the actual's second row (B-200) has
+    # no golden counterpart and correctly surfaces as a "new_line" — that
+    # is itself part of what this widened assertion pins (a changed value
+    # on the matched row, or a golden update collapsing this to "match",
+    # would both be caught here).
+    matched_rows = [row for row in line_items["rows"] if row["match_key"] == "A-100"]
+    assert {row["column"] for row in matched_rows} == {"description", "quantity", "unit_price"}
+    assert all(row["verdict"] == "match" for row in matched_rows)
+    unmatched_rows = [row for row in line_items["rows"] if row["match_key"] == "B-200"]
+    assert len(unmatched_rows) == 1
+    assert unmatched_rows[0]["verdict"] == "new_line"

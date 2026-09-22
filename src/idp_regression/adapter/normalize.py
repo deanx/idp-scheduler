@@ -63,28 +63,44 @@ def normalize(raw: object, success_statuses: set[str]) -> NormalizedOutput:
             "status_not_success", "raw IDP response 'status' is not in success_statuses"
         )
 
-    # ADR-0002 A11 (REG-11 fix). The real MuleSoft Anypoint IDP execution
-    # body carries `fields`/`tables` at the TOP LEVEL and has no `pages`
-    # key at all — confirmed 2026-09-22 by the first live extraction ever
-    # run (seed-001-clean.pdf). `pages[]` was the shape every hand-authored
-    # fixture used, never observed live; it is kept as an OPTIONAL, still-
-    # supported envelope (a genuine multi-page document may yet use it —
-    # unverified) rather than removed outright. Whichever shape wins, a
-    # response with NEITHER present must raise, never silently return an
-    # empty success (the fail-open regression this amendment exists to
-    # close) — `raw.get("pages", [])` used to default a missing key to an
-    # empty list and walk zero pages without raising.
-    has_pages = "pages" in raw
+    # ADR-0002 A11 (REG-11 fix) + 2026-09-22 REQUEST CHANGES round (R-1).
+    # The real MuleSoft Anypoint IDP execution body carries `fields`/
+    # `tables` at the TOP LEVEL and has no `pages` key at all — confirmed
+    # 2026-09-22 by the first live extraction ever run (seed-001-clean.pdf).
+    # `pages[]` was the shape every hand-authored fixture used, never
+    # observed live; it is kept as an OPTIONAL, still-supported envelope (a
+    # genuine multi-page document may yet use it — unverified) rather than
+    # removed outright.
+    #
+    # Precedence is CONTENT-based, not presence-based. (R-1: the original
+    # A11 fix keyed precedence on `"pages" in raw` — so a present-but-EMPTY
+    # `pages: []` outranked a populated top-level `fields`/`tables`
+    # container and silently discarded it, reopening the exact fail-open
+    # class this amendment exists to close, through its own new rule.)
+    #   - a NON-EMPTY `pages` list wins outright, regardless of any
+    #     top-level container sitting beside it;
+    #   - an empty or absent `pages` falls through to the top-level
+    #     `fields`/`tables` container;
+    #   - neither a non-empty `pages` nor a top-level container is present
+    #     -> raises `missing_envelope`, never a silent empty success.
+    # A non-list `pages` value always raises `invalid_pages` outright and
+    # never falls through, even when a top-level container is present —
+    # that would hide a genuinely corrupt response shape.
+    #
+    # Empty-extraction decision (R-1, recorded in ADR-0002 A11): a
+    # top-level container (or a `pages` entry) that is PRESENT but
+    # genuinely EMPTY is accepted and returns an empty NormalizedOutput —
+    # "IDP looked and found nothing" is a legitimate result. Only the
+    # ABSENCE of every recognisable container raises `missing_envelope`.
+    pages_key_present = "pages" in raw
+    raw_pages = raw.get("pages")
+    if pages_key_present and not isinstance(raw_pages, list):
+        raise MalformedIDPOutputError("invalid_pages", "raw IDP response 'pages' must be a list")
     has_top_level_container = "fields" in raw or "tables" in raw
 
     logical_pages: list[object]
-    if has_pages:
-        pages = raw["pages"]
-        if not isinstance(pages, list):
-            raise MalformedIDPOutputError(
-                "invalid_pages", "raw IDP response 'pages' must be a list"
-            )
-        logical_pages = pages
+    if pages_key_present and raw_pages:
+        logical_pages = raw_pages
     elif has_top_level_container:
         # Treat the top-level body itself as the single logical page: it
         # already carries `fields`/`tables`/(optionally) `prompts` at the
@@ -94,8 +110,8 @@ def normalize(raw: object, success_statuses: set[str]) -> NormalizedOutput:
     else:
         raise MalformedIDPOutputError(
             "missing_envelope",
-            "raw IDP response has neither a 'pages' list nor a top-level "
-            "'fields'/'tables' container",
+            "raw IDP response has no non-empty 'pages' list and no "
+            "top-level 'fields'/'tables' container",
         )
 
     fields: dict[str, FieldValue] = {}
@@ -171,6 +187,18 @@ _CONFIDENCE_SCALES: tuple[tuple[str, float, float, float], ...] = (
 
 
 def _coerce_confidence(raw_cell: dict[str, object], kind: str) -> float | None:
+    # M-2 (2026-09-22 REQUEST CHANGES round). Two confidence-scale keys on
+    # one cell is a structural conflict, not a preference — the module's
+    # contract everywhere else is fail-closed on contradiction, and
+    # silently letting `confidenceScore` win meant an out-of-range
+    # `confidence` sitting next to it was never even validated.
+    present_keys = [key for key, *_ in _CONFIDENCE_SCALES if key in raw_cell]
+    if len(present_keys) > 1:
+        raise MalformedIDPOutputError(
+            "conflicting_confidence_keys",
+            f"a {kind} cell has more than one confidence-scale key present",
+        )
+
     for key, divisor, lo, hi in _CONFIDENCE_SCALES:
         if key not in raw_cell:
             continue
@@ -194,6 +222,21 @@ def _coerce_confidence(raw_cell: dict[str, object], kind: str) -> float | None:
             raise MalformedIDPOutputError(
                 "invalid_confidence",
                 f"a {kind} confidence value is outside the expected [{lo}, {hi}] range",
+            )
+        # M-1 (2026-09-22 REQUEST CHANGES round). A `confidenceScore` value
+        # strictly between 0 and 1 is scale-ambiguous, not a legitimate low
+        # score: every legitimate 0-1-scale value sits inside the [0, 100]
+        # range check above and would otherwise be silently divided by 100
+        # into a value two orders of magnitude wrong. 0.0 and 1.0 are the
+        # endpoints of the ambiguous OPEN interval, not inside it, and stay
+        # legitimate (0%/1% confidence on the real 0-100 scale). The
+        # `confidence` key's own native scale is already 0-1, so it is not
+        # ambiguous and is exempt.
+        if key == "confidenceScore" and 0.0 < fval < 1.0:
+            raise MalformedIDPOutputError(
+                "confidence_scale_ambiguous",
+                f"a {kind} confidenceScore value is between 0 and 1, ambiguous "
+                "between its declared 0-100 scale and a possible 0-1 scale",
             )
         return fval / divisor
     return None  # key absent entirely -> "not provided"

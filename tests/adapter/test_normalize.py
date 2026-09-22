@@ -559,7 +559,7 @@ def test_status_outside_success_statuses_raises_typed_error() -> None:
 
 
 def test_status_within_success_statuses_is_accepted() -> None:
-    raw = {"status": "DONE", "pages": []}
+    raw = {"status": "DONE", "fields": {}}
     out = normalize(raw, success_statuses={"DONE", "SUCCEEDED"})
     assert out["status"] == "DONE"
 
@@ -668,3 +668,138 @@ def test_response_with_neither_container_does_not_return_an_empty_success() -> N
             "normalize() must never return an empty NormalizedOutput for an "
             "unrecognisable envelope (REG-11) — it must raise"
         )
+
+
+# ---- R-1 (2026-09-22 REQUEST CHANGES round): precedence must be
+# CONTENT-based, not PRESENCE-based. The original A11 fix keyed precedence
+# on `"pages" in raw`, so an empty `pages: []` outranked a populated
+# top-level `fields`/`tables` container and silently discarded it — the
+# same fail-open defect class REG-11 exists to close, reopened by its own
+# fix. Reproduced live: re-wrapping a genuine 9-field/2-table extraction
+# with a bare `"pages": []` alongside it made all its content vanish
+# without raising.
+
+
+def test_empty_pages_list_does_not_outrank_a_populated_top_level_container() -> None:
+    # THE R-1 REGRESSION PIN. Before the fix, `"pages" in raw` was True
+    # (even though the list is empty) so the top-level 'fields'/'tables'
+    # container next to it was silently discarded and normalize() returned
+    # an empty success — nine real fields thrown away with no raise.
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [],
+        "fields": {"total": {"value": "87.48", "confidenceScore": 99.0}},
+        "tables": {"line_items": [{"sku": {"value": "A-100", "confidenceScore": 99.0}}]},
+    }
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert out["fields"]["total"]["value"] == "87.48"
+    assert out["tables"]["line_items"][0]["sku"]["value"] == "A-100"
+
+
+def test_empty_pages_list_alone_with_no_top_level_container_still_raises() -> None:
+    # The other reproduced NO-RAISE case from the R-1 finding: an empty
+    # 'pages' list with nothing else recognisable is the same
+    # "unrecognisable envelope" as 'pages' being absent entirely — it must
+    # raise, not return an empty success.
+    raw = {"status": "SUCCEEDED", "pages": []}
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "missing_envelope"
+
+
+def test_pages_list_containing_only_an_empty_page_still_wins_over_nothing_else() -> None:
+    # Content-based precedence means a NON-EMPTY 'pages' list (even one
+    # whose sole page carries no fields) still legitimately wins and is
+    # NOT the missing-envelope case — distinguishing "an empty pages LIST"
+    # (falls through) from "a pages list containing an empty PAGE" (a
+    # genuine, if content-free, page).
+    raw = {"status": "SUCCEEDED", "pages": [{}]}
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert out["fields"] == {}
+
+
+def test_non_list_pages_raises_even_with_a_populated_top_level_container_present() -> None:
+    # A malformed 'pages' value must raise outright, never silently fall
+    # through to the top-level container — falling through here would hide
+    # a genuinely corrupt response shape.
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": "not-a-list",
+        "fields": {"total": {"value": "87.48"}},
+    }
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "invalid_pages"
+
+
+def test_well_formed_envelope_with_genuinely_empty_containers_is_not_an_error() -> None:
+    # The explicit empty-extraction decision (R-1): a top-level container
+    # that is PRESENT but empty means "IDP looked and found nothing" — a
+    # legitimate result, not a rejected envelope. Only the ABSENCE of every
+    # recognisable container (missing_envelope) raises.
+    raw = {"status": "SUCCEEDED", "fields": {}, "tables": {}}
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert out == {"status": "SUCCEEDED", "fields": {}, "tables": {}, "prompts": {}}
+
+
+# ---- M-1 (2026-09-22 REQUEST CHANGES round): a 0-1 confidenceScore is a
+# scale-ambiguous value, not a legitimate low score — rejected fail-closed
+# rather than silently divided by 100 into a wrong two-orders-of-magnitude
+# value.
+
+
+@pytest.mark.parametrize("ambiguous_score", [0.99, 0.5, 0.01])
+def test_confidence_score_strictly_between_0_and_1_is_scale_ambiguous_and_raises(
+    ambiguous_score: float,
+) -> None:
+    raw = {
+        "status": "SUCCEEDED",
+        "fields": {"total": {"value": "87.48", "confidenceScore": ambiguous_score}},
+    }
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "confidence_scale_ambiguous"
+
+
+@pytest.mark.parametrize("boundary_score,expected", [(0.0, 0.0), (1.0, 0.01)])
+def test_confidence_score_at_0_or_1_is_a_legitimate_boundary_not_ambiguous(
+    boundary_score: float, expected: float
+) -> None:
+    # 0.0 and 1.0 are the endpoints of the ambiguous OPEN interval, not
+    # inside it — 0.0 is "0% confidence" and 1.0 is "1% confidence" on the
+    # documented 0-100 confidenceScore scale, both legitimate.
+    raw = {
+        "status": "SUCCEEDED",
+        "fields": {"total": {"value": "87.48", "confidenceScore": boundary_score}},
+    }
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert out["fields"]["total"]["confidence"] == pytest.approx(expected)
+
+
+# ---- M-2 (2026-09-22 REQUEST CHANGES round): both confidence keys present
+# on one cell is a structural conflict — two scales on one cell is an
+# unrecognised envelope, not a preference — and must raise rather than
+# silently letting `confidenceScore` win and skip validating `confidence`.
+
+
+def test_both_confidence_keys_present_raises_even_when_confidencescore_is_valid() -> None:
+    # THE M-2 REGRESSION PIN. Before the fix, `confidenceScore` silently
+    # won and the out-of-range `confidence: 5.0` — which alone would raise
+    # `invalid_confidence` — was never even looked at.
+    raw = {
+        "status": "SUCCEEDED",
+        "fields": {"total": {"value": "87.48", "confidenceScore": 99.0, "confidence": 5.0}},
+    }
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "conflicting_confidence_keys"
+
+
+def test_both_confidence_keys_present_raises_even_when_both_are_individually_valid() -> None:
+    raw = {
+        "status": "SUCCEEDED",
+        "fields": {"total": {"value": "87.48", "confidenceScore": 99.0, "confidence": 0.9}},
+    }
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "conflicting_confidence_keys"
