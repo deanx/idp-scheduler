@@ -41,7 +41,7 @@ def _read(relpath: str) -> str:
     return (REPO_ROOT / relpath).read_text()
 
 
-def _load_workflow(relpath: str) -> dict[str, Any]:
+def _load_workflow(relpath: str) -> dict[Any, Any]:
     """Parse a workflow file and resolve it against ITS ACTUAL structure,
     never a substring of its text (Atchim review finding 6, DEBT-44 gate
     #2: a string surviving in a *comment* satisfied a substring
@@ -55,7 +55,7 @@ def _load_workflow(relpath: str) -> dict[str, Any]:
     return loaded
 
 
-def _triggers(workflow: dict[str, Any]) -> Any:
+def _triggers(workflow: dict[Any, Any]) -> Any:
     """The `on:` block, resolved past PyYAML's YAML-1.1 boolean-key quirk."""
     return workflow.get("on", workflow.get(True))
 
