@@ -762,11 +762,35 @@ def test_make_platform_raises_when_langfuse_base_url_disagrees_with_langfuse_hos
     [
         "not-a-url-at-all",
         "ftp://example.invalid",
+        "file:///etc/passwd",
         "//example.invalid",
         "https:///no-host-component",
         "example.invalid",
         "javascript:alert(1)",
         "",
+        # 2026-09-22 QA F-4/FO-9 fix round: plain http:// is no longer
+        # accepted for a non-local host -- only https://, plus http://
+        # for an explicit local-dev host (localhost/loopback). Sending a
+        # real credential to an unencrypted, non-local host is exactly
+        # the class of bug this guard exists to catch.
+        "http://evil.example",
+        "http://example.invalid",
+        "http://example.invalid:3000",
+        # whitespace / control characters -- Python's urlsplit silently
+        # strips \t/\n/\r (bpo-43882), so these must be rejected on the
+        # RAW value before urlsplit ever sees them, or a trailing
+        # newline would slip a non-local host past this guard disguised
+        # as a well-formed one.
+        " https://example.invalid",
+        "https://example.invalid ",
+        "https://example.invalid\n",
+        "https://example.invalid\r\n",
+        "https://exa\tmple.invalid",
+        # \x00 (NUL) is excluded here -- os.environ itself rejects an
+        # embedded NUL byte (ValueError) before this guard ever runs, so
+        # it can't be exercised via monkeypatch.setenv; a non-NUL control
+        # character below covers the same class this guard must catch.
+        "https://exa\x01mple.invalid",
     ],
 )
 def test_make_platform_raises_on_malformed_langfuse_host(
@@ -819,8 +843,15 @@ def test_make_platform_raises_on_langfuse_host_with_embedded_credential(
     "good_host",
     [
         "https://example.invalid",
-        "http://example.invalid",
         "https://example.invalid:3000",
+        # 2026-09-22 QA F-4/FO-9 fix round: http:// is accepted ONLY for
+        # an explicit local-dev host -- this project runs a local
+        # Langfuse (CLAUDE.md External services), so this case is real
+        # and must keep working.
+        "http://localhost:3000",
+        "http://localhost",
+        "http://127.0.0.1:3000",
+        "http://[::1]:3000",
         # Atchim review R-6, 2026-09-21: this used to be the real
         # "https://cloud.langfuse.com" -- calling make_platform() against
         # it constructs a LIVE SDK client aimed at production (a real

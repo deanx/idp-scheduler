@@ -15,6 +15,7 @@ have written no records at all.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import random
@@ -892,33 +893,72 @@ class LangfuseAdapter:
             raise RunStatusWriteFailedError(f"mark_run_status failed with HTTP {resp_status}")
 
 
+def _is_local_dev_host(hostname: str) -> bool:
+    """True only for a host that names THIS machine -- ``localhost`` or a
+    loopback address. The only case where an unencrypted ``http://``
+    LANGFUSE_HOST is legitimate (this project runs a local, self-hosted
+    Langfuse per CLAUDE.md External services)."""
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
 def _validate_host_url(var_name: str, value: str) -> None:
-    """FO-9 (DEBT-48) -- fail closed on a malformed/unscoped host env var,
-    before it reaches either transport. Same threat family as the
-    LANGFUSE_BASE_URL split-brain guard and both transports' cross-host
-    redirect refusal: a credential reaching a host the caller did not
-    choose (REG-07/REG-10). Requires an ``http``/``https`` scheme, a
-    non-empty host component, and NO embedded userinfo (a host string can
-    itself carry a credential, e.g. ``https://user:pass@host`` -- a prior
-    probe confirmed that exact shape reaches this path).
+    """FO-9 (DEBT-48; QA-01 S-01.4 F-4 fix round, 2026-09-22) -- fail
+    closed on a malformed/unscoped host env var, before it reaches either
+    transport. Same threat family as the LANGFUSE_BASE_URL split-brain
+    guard and both transports' cross-host redirect refusal: a credential
+    reaching a host the caller did not choose (REG-07/REG-10).
+
+    Requires:
+    - an ``https://`` scheme, OR ``http://`` but ONLY for an explicit
+      local-development host (``localhost`` or a loopback address) --
+      any other ``http://`` host would send the platform API key
+      unencrypted to a network-reachable host;
+    - a non-empty host component;
+    - NO embedded userinfo (a host string can itself carry a credential,
+      e.g. ``https://user:pass@host`` -- a prior probe confirmed that
+      exact shape reaches this path);
+    - no leading/trailing whitespace, no control characters (incl. a
+      trailing newline) anywhere in the raw value. This check runs
+      BEFORE ``urlsplit`` deliberately: Python's ``urlsplit`` silently
+      strips ``\\t``/``\\n``/``\\r`` from the input (bpo-43882), so a
+      value like ``"http://evil.example\\n"`` would otherwise parse as
+      the clean, acceptable-looking ``http://evil.example``.
 
     INV-02: the error names ``var_name`` only, never ``value`` -- a
     malformed host can be malformed *because* it embeds a credential.
     """
+
+    def _reject() -> None:
+        raise PlatformConfigurationError(
+            f"make_platform: {var_name} is not a well-formed, safe host URL "
+            "-- refusing to send credentials to it. It must have an "
+            "https:// scheme (http:// only for an explicit localhost/"
+            "loopback host), a non-empty host, no embedded userinfo, and "
+            f"no whitespace or control characters (credentials do not "
+            f"belong in {var_name})."
+        )
+
+    if value.strip() != value or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+        _reject()
+
     parsed = urllib.parse.urlsplit(value)
+    hostname = parsed.hostname
+    scheme_ok = parsed.scheme == "https" or (
+        parsed.scheme == "http" and hostname is not None and _is_local_dev_host(hostname)
+    )
     is_valid = (
-        parsed.scheme in ("http", "https")
-        and bool(parsed.hostname)
+        scheme_ok
+        and bool(hostname)
         and parsed.username is None
         and parsed.password is None
     )
     if not is_valid:
-        raise PlatformConfigurationError(
-            f"make_platform: {var_name} is not a well-formed http(s) URL -- "
-            "refusing to send credentials to it. It must have an http:// or "
-            "https:// scheme, a non-empty host, and no embedded userinfo "
-            f"(credentials do not belong in {var_name})."
-        )
+        _reject()
 
 
 def make_platform() -> PlatformAdapter:
