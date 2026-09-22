@@ -1,18 +1,18 @@
 {
   "schema": 1,
-  "generated": "2026-09-22T01:00:32+00:00",
+  "generated": "2026-09-22T11:52:30+00:00",
   "note": "Derived from on-disk artifacts. Local verification status, not the board column (which stays canonical). Never hand-edit — regenerated on Stop.",
   "summary": {
     "total": 6,
     "done_eligible": 0,
-    "in_qa": 3,
+    "in_qa": 4,
     "in_progress": 0,
-    "planned": 3
+    "planned": 2
   },
   "registers": {
     "assumptions_high_open": 0,
     "regressions_pending": 3,
-    "debt_items": 50
+    "debt_items": 67
   },
   "stories": [
     {
@@ -69,8 +69,8 @@
     {
       "id": "S-1.4",
       "uc": 1,
-      "status": "planned",
-      "stamp": "none",
+      "status": "in-qa",
+      "stamp": "passed",
       "qa_report": true,
       "markers": {
         "containment": "required",

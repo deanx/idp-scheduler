@@ -14,7 +14,7 @@ sequenceDiagram
     participant CLS as classifier
     participant GATE as overall_gate
 
-    PE->>ORC: run_eval --version <v> --run <name> [--action <id>]
+    PE->>ORC: run_eval --action <id> --version <v> --dataset <name> --run <name> (all required, ADR-0004 A8)
     ORC->>ENV: load_dotenv()
     Note over ORC: read IDP_* , platform key,<br/>IDP_TERMINAL_STATUSES,<br/>IDP_SUCCESS_STATUSES,<br/>IDP_EXECUTION_TIMEOUT_SECONDS
     ORC->>PLAT: make_platform()

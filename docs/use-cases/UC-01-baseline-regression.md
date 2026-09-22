@@ -21,13 +21,13 @@
 - **Goal:** Run the current baseline action version over an entire golden set, classify each extracted field against the golden, persist per-field scores and a gate to a named run on the evaluation platform, and record the action version and golden version used — producing the reproducible reference against which any candidate change is compared.
 - **Preconditions:**
   1. A golden set exists on the evaluation platform (at least one dataset item: `document_id` + expected golden fields).
-  2. The Prompt Engineer knows the IDP action ID and the published baseline action version to run; both are supplied per run on the command line (`--action`, `--version`). `IDP_ACTION_ID` in env may supply a default action.
+  2. The Prompt Engineer knows the IDP action ID and the published baseline action version to run; both are supplied per run on the command line (`--action`, `--version`), **each required with no env fallback** (ADR-0004 A8, 2026-09-22 — `IDP_ACTION_ID` no longer supplies a default). The golden-set name is likewise supplied as `--dataset`.
   3. IDP credentials (`IDP_CLIENT_ID`, `IDP_CLIENT_SECRET`, `IDP_REGION`, `IDP_ORG_ID`) are set in env/secrets.
   4. The evaluation-platform API key is set in env/secrets and `load_dotenv()` has been called before any SDK client is constructed.
   5. The document files corresponding to the golden-set items are accessible at the paths referenced by each `document_id`.
 
 - **Main flow:**
-  1. Prompt Engineer (or CI) invokes `run_eval --version <baseline_version> --run <run_name> [--action <action_id>]` (or equivalent CLI).
+  1. Prompt Engineer (or CI) invokes `run_eval --action <action_id> --version <baseline_version> --dataset <golden_set_name> --run <run_name>` — all four required (ADR-0004 A8).
   2. The orchestrator reads credentials and config from env via `load_dotenv()`.
   3. For each dataset item in the golden set:
      a. The platform adapter fetches the expected golden (fields + criticality flags).

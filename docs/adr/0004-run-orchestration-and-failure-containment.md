@@ -220,3 +220,30 @@ Raised by an independent S-01.4 coverage audit: SPEC-01 S-01.4's DoD said *"ever
 **Why not force the three to raise.** It would buy a uniform type and cost the honest one: each would need an `AbortReason` invented for a run that does not exist, and A2's taxonomy — whose 10 members are all statements about a *run's* data or transport — would acquire members describing the *caller's environment*. Nothing downstream consumes the exception type (the CLI consumes the `int`), so the uniformity would be decorative. A caller who wants a typed pre-run failure should read the log line and the non-zero code, which are the contract.
 
 **Consequence.** No code change for S-01.4. The obligation is a **test** one, and it already exists as an exit-code assertion per path (the N6 unit test unsets each key and asserts non-zero exit + no outbound call). If a future consumer ever needs to distinguish pre-run from in-run failure programmatically, the right move is a **distinct exit code**, not a widened `RunAborted` — and that is an API-contract version bump under §API contract, not a refactor.
+
+### A8. Run-identity parameters are CLI-only — `--action` and `--dataset` become required, no env fallback (user decision, 2026-09-22)
+
+**The rule.** Every parameter that *defines what a run measured* is supplied on the command line and is **required**; the environment supplies only what *describes the machine and the account*. There is no fallback across that line, in either direction.
+
+| Run identity — CLI, required, no env fallback | Environment description — `.env`, fail-closed |
+|---|---|
+| `--action` (IDP action id) | `IDP_CLIENT_ID` / `IDP_CLIENT_SECRET`, `IDP_REGION`, `IDP_ORG_ID` |
+| `--version` (action version) | `IDP_DOCUMENT_DIR`, `PLATFORM`, `LANGFUSE_HOST` + keys |
+| `--dataset` (golden-set name) | `IDP_*_TIMEOUT_SECONDS`, `IDP_TERMINAL_STATUSES`, `IDP_SUCCESS_STATUSES` |
+| `--run` (run name) | — |
+
+Missing or empty → the existing N6 shape: message naming the **flag**, non-zero exit, zero network calls. The user's words: *"the system must not depend on hardcoded IDP parameters to work — it will kill the dynamic proposal of the system."* A tool whose purpose is to compare one action/version/dataset triple against another cannot carry any member of that triple as ambient state.
+
+**What this supersedes, named so no reader is left with two live rules.**
+1. **A6 clause 3's env-fallback sentence** — *"flag wins, env is the fallback … Local convenience keeps the env fallback"* — is **superseded**. `--dataset` is required; `GOLDEN_DATASET_NAME` is read by no production code path. A6's clauses 1, 2 and 4 (the name, no-default/fail-closed, and the fourth `RunMetadata` field / four-field INV-04) stand unchanged.
+2. **The 2026-09-19 `--action` default** — this ADR's own §Design constraints line (*"The action is passed as `--action` (optional, defaults to `IDP_ACTION_ID`)"*) and §API contract's *"Run parameters vs environment"* paragraph (*"`--action` falls back to `IDP_ACTION_ID` when omitted (local convenience)"*), mirrored in ADR-0002 §Decision, SPEC-01 and DATA-MODEL-01 §5 — is **superseded**. `--action` is required; `IDP_ACTION_ID` is no longer a default. Per this amendment's preamble those earlier lines are left in place, not rewritten; **A8 wins.** The same applies to every `[--action <id>]` bracketed-optional invocation example above and in SEQ-UC-01 — read them as `--action <id>`, required.
+
+This is A6's own argument applied consistently. A6 ruled that a pointer which can silently fork between CI and a laptop yields a green run against the wrong target, then kept a fallback for convenience — which is exactly the forking mechanism it had just condemned, merely narrowed to one variable. The user closed the inconsistency in the direction A6's reasoning already pointed.
+
+**Consequence for CI.** The full invocation — `run_eval --action <id> --version <v> --dataset <name> --run <name>` — appears in the workflow file, therefore in the PR diff. A change to *what is being measured* becomes a reviewable line in a diff rather than an ambient runner setting that no reviewer sees. This is the same provenance property as A6's `RunMetadata` fourth field, one step earlier: the metadata proves after the fact what a run measured; the diff shows beforehand that someone changed it.
+
+**What the env vars are for now.** `IDP_ACTION_ID`, `GOLDEN_DATASET_NAME` and the `IDP_TEST_*` family (e.g. `IDP_TEST_DOCUMENT_PATH`) are **test-harness convenience only** — read by integration tests and by local `make`/shell wrappers to compose a command line, **read by no production code path**. `IDP_ACTION_ID` and `GOLDEN_DATASET_NAME` are therefore **demoted from config to test fixtures**; DATA-MODEL-01 §5 keeps them only with that label. Keeping the values somewhere to make testing easy is fine — the rule is that nothing in `src/` may read them. A cheap pin: a static test asserting the strings `IDP_ACTION_ID` and `GOLDEN_DATASET_NAME` appear nowhere under `src/idp_regression/`.
+
+**Residual risk.** Two, both small and both accepted. (a) **Ergonomics** — a local run is now four flags and no bare `run_eval`; the mitigation is a wrapper script or `make` target that reads the `IDP_TEST_*` values, which keeps the convenience where it belongs (outside `src/`). (b) **The CI workflow becomes the single place the triple is written**, so a wrong value there is wrong everywhere — but it is wrong *visibly, in a reviewed file*, which is strictly better than wrong invisibly in a runner's environment. Note the rule removes ambiguity, it does not remove the need to read: a required flag with a wrong value is still a run against the wrong target, and only INV-04's recorded metadata catches that after the fact.
+
+**Reversal cost: Low.** Re-adding a fallback is a few lines in the CLI layer plus the DoD/test rows. Nothing persisted, no contract consumer, no exit code changes. It is cheap to reverse and should not be — the cost of reversing is not technical but the return of the silent-fork failure mode A6 exists to prevent.
