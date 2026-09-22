@@ -337,7 +337,11 @@ def test_run_eval_returns_nonzero_when_a_platform_var_is_set_but_empty(
 # --- NFR N6: fail-closed on missing IDP credential ---------------------
 
 
+@pytest.mark.parametrize(
+    "missing_idp_var", ["IDP_CLIENT_ID", "IDP_CLIENT_SECRET", "IDP_REGION", "IDP_ORG_ID"]
+)
 def test_run_eval_returns_nonzero_and_names_the_missing_idp_var(
+    missing_idp_var: str,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     tmp_path: object,
@@ -349,10 +353,17 @@ def test_run_eval_returns_nonzero_and_names_the_missing_idp_var(
     logged), but the variable NAME is no longer named in the log line as
     a side effect of that message-level fix. This test now pins the
     safe contract directly instead of relying on `_require`'s message
-    happening to be value-free."""
+    happening to be value-free.
+
+    Coverage audit gap 5 (2026-09-21): only `IDP_CLIENT_ID` was ever
+    exercised for the IDP leg of N6 -- `IDP_CLIENT_SECRET`/`IDP_REGION`/
+    `IDP_ORG_ID` were never independently unset, unlike
+    `test_bootstrap.py`'s exhaustive parametrization over the platform's
+    three vars. Parametrized here the same way, over every `_require`d
+    IDP var `make_idp_adapter()` reads (`adapter/idp_client.py`)."""
     _disable_dotenv_file_loading(monkeypatch, tmp_path)
     _set_all_credential_env(monkeypatch)
-    monkeypatch.delenv("IDP_CLIENT_ID", raising=False)
+    monkeypatch.delenv(missing_idp_var, raising=False)
 
     with caplog.at_level(logging.ERROR):
         exit_code = run_eval(
@@ -362,6 +373,7 @@ def test_run_eval_returns_nonzero_and_names_the_missing_idp_var(
     assert exit_code != 0
     assert "RuntimeError" in caplog.text
     assert "distinctive-client-secret-NOT-A-REAL-SECRET-4d9c" not in caplog.text
+    assert "distinctive-client-id-7b1e" not in caplog.text
 
 
 def test_run_eval_returns_nonzero_when_idp_statuses_are_configured_inconsistently(
@@ -980,6 +992,50 @@ def test_run_eval_maps_each_typed_idp_error_to_its_abort_reason(
     assert expected_reason in caplog.text
 
 
+def test_run_eval_aborts_malformed_actual_from_classify(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+) -> None:
+    """Coverage audit gap 2 (2026-09-21): the `except MalformedActualError`
+    raise site at `facade.py`'s per-document loop (classify/gate step) had
+    no test -- unlike its `except MalformedGoldenError` neighbour right
+    above it (provably unreachable, see that except-clause's own comment
+    in `facade.py`: N28 already validates every golden item with the same
+    validator `classify()` calls, before the loop even starts), this one
+    IS reachable: `actual` comes from a live per-document `idp_adapter.
+    extract()` call, and nothing pre-validates it the way N28
+    pre-validates `golden` -- the `IDPAdapter` Protocol only promises the
+    method returns a `NormalizedOutput`, so a non-conforming adapter (or,
+    as here, a test double standing in for one) can still hand `classify()`
+    a structurally malformed `actual`, which its own `_validate_actual`
+    (N22-adjacent defense-in-depth) must catch. `normalize()` itself would
+    never produce this shape (it always emits a dict `fields`) -- this
+    fake `.extract()` bypasses `normalize()` entirely, exactly the way a
+    non-conforming adapter implementation could."""
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
+
+    fake_idp = _FakeIDPAdapter(
+        {
+            os.path.join("/documents", "doc-1"): {
+                "status": "SUCCEEDED",
+                "fields": ["not", "a", "mapping"],
+            }
+        }
+    )
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda: fake_idp)
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
+
+    assert exit_code != 0
+    assert "malformed_actual" in caplog.text
+
+
 def test_run_eval_writes_the_aborted_marker_on_a_per_document_abort(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: object,
@@ -1461,6 +1517,22 @@ def test_run_eval_never_logs_the_document_dir_path_in_telemetry(
             "items": [{"item_id": "i1", "document_id": 5, "golden": {}}],
             "expected_output_schema": None,
         },  # non-str document_id
+        # Coverage audit gap 6 (2026-09-21): the item_id shape guard is
+        # dead -- removing it left the suite green, though its
+        # document_id sibling (above) was covered. Same three cases,
+        # mirrored for item_id: missing key, non-str, empty string.
+        {
+            "items": [{"document_id": "doc-1", "golden": {}}],
+            "expected_output_schema": None,
+        },  # no item_id key on the item
+        {
+            "items": [{"item_id": 5, "document_id": "doc-1", "golden": {}}],
+            "expected_output_schema": None,
+        },  # non-str item_id
+        {
+            "items": [{"item_id": "", "document_id": "doc-1", "golden": {}}],
+            "expected_output_schema": None,
+        },  # empty-string item_id
     ],
 )
 def test_run_eval_never_escapes_on_a_malformed_dataset_shape(

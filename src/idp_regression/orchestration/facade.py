@@ -550,7 +550,26 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
             try:
                 verdicts = classify(golden, actual)
                 gate = overall_gate(verdicts)
-            except MalformedGoldenError as exc:
+            except MalformedGoldenError as exc:  # pragma: no cover
+                # Coverage audit gap 2 (2026-09-21): provably unreachable,
+                # not merely untested -- `validate_golden_set` (N28,
+                # `prerun.py`) runs `validate_golden_structure` (the
+                # `is`-identical alias of this SAME `_validate_golden`
+                # function `classify()` calls) over EVERY item's `golden`
+                # in the pre-run chain, BEFORE the per-document loop ever
+                # starts, and aborts `malformed_golden` on the first
+                # failure. So by the time this line runs, `golden` has
+                # already passed the exact validator `classify()` is
+                # about to run again -- it cannot raise here. Kept only
+                # as defense-in-depth against N28/N22 ever drifting apart
+                # (they can't, by construction: `validate_golden_structure
+                # = _validate_golden`), not because this branch is
+                # expected to fire. `except MalformedActualError` right
+                # below IS reachable and IS pinned by
+                # `test_facade.py::test_run_eval_aborts_malformed_actual_from_classify`
+                # -- `actual` comes from a live per-document IDP
+                # extraction, never pre-validated by any N28-equivalent
+                # pass.
                 raise _abort("malformed_golden", document_id, str(exc)) from None
             except MalformedActualError as exc:
                 raise _abort("malformed_actual", document_id, str(exc)) from None
