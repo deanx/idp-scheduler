@@ -206,11 +206,42 @@ def test_main_returns_3_when_run_eval_hits_the_not_implemented_boundary(
     exercised end to end, with the REAL `facade.run_eval` (not
     monkeypatched, unlike every other test in this file). Today
     `run_eval` ALWAYS raises `NotImplementedError` once its pre-run
-    checks pass (T-01.4.2 onward is not built), so this untested branch
+    checks pass (T-01.4.3a onward is not built), so this untested branch
     is the one every real invocation takes -- mutating `return 3` ->
     `return 0` previously survived all 665 tests because nothing
     exercised this path with a real facade. `tmp_path` isolates from any
-    real ambient `.env`."""
+    real ambient `.env`.
+
+    Updated for T-01.4.11/.2/.5/.6: `run_eval` now fetches the golden
+    dataset for real, which this test cannot do against
+    `https://example.invalid` -- the ONE seam stubbed here (`make_platform`,
+    the network boundary itself) is the deepest possible one, keeping the
+    cli->facade->pre-run-chain wiring genuinely exercised end to end."""
+    from idp_regression.orchestration import facade
+
+    class _FakePlatform:
+        def get_dataset(self, name: str) -> dict[str, object]:
+            from idp_regression.platform.schema import load_golden_schema
+
+            return {
+                "items": [
+                    {
+                        "item_id": "item-1",
+                        "document_id": "doc-1",
+                        "golden": {
+                            "fields": {
+                                "total": {
+                                    "value": "1250.00",
+                                    "type": "number",
+                                    "critical": True,
+                                }
+                            }
+                        },
+                    }
+                ],
+                "expected_output_schema": load_golden_schema(),
+            }
+
     monkeypatch.chdir(tmp_path)  # type: ignore[arg-type]
     monkeypatch.setenv("PLATFORM", "langfuse")
     monkeypatch.setenv("LANGFUSE_HOST", "https://example.invalid")
@@ -220,6 +251,8 @@ def test_main_returns_3_when_run_eval_hits_the_not_implemented_boundary(
     monkeypatch.setenv("IDP_CLIENT_SECRET", "secret")
     monkeypatch.setenv("IDP_REGION", "us-east")
     monkeypatch.setenv("IDP_ORG_ID", "org-123")
+    monkeypatch.setenv("GOLDEN_DATASET_NAME", "idp-regression-golden")
+    monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform())
 
     exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
 

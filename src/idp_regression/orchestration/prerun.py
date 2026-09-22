@@ -40,10 +40,10 @@ _UNKNOWN_DOCUMENT_ID = "<unknown>"
 
 def _canonical_hash(obj: dict[str, Any]) -> str:
     """sha256 hex digest of the canonical JSON encoding (sorted keys, no
-    whitespace) of a PARSED object -- never raw bytes. Langfuse stores
-    the schema as JSONB and may reorder keys on read, so a raw-bytes
-    hash would drift on key order alone, independent of content
-    (ADR-0005 Decision #8)."""
+    whitespace) of a PARSED object -- never raw bytes. The evaluation
+    platform stores the schema as JSONB and may reorder keys on read, so
+    a raw-bytes hash would drift on key order alone, independent of
+    content (ADR-0005 Decision #8; N24 -- this module names no vendor)."""
     canonical = json.dumps(obj, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 

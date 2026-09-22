@@ -1,13 +1,16 @@
-"""T-01.4.1: `run_eval(action_id, version, run_name) -> int` facade.
+"""T-01.4.1/.11/.2/.5/.6: `run_eval(action_id, version, run_name) -> int`
+facade -- the pre-run chain.
 
-This slice builds ONLY the pre-run entry checks (ADR-0004 kickoff,
-S-01.4-KICKOFF.md "Do NOT build the run loop"): `load_dotenv()` first
-(INV-05), fail-closed credential VALIDATION with no client construction
-(NFR N6, DEBT-30 -- see `bootstrap.py`), and
-run-id/experiment-name composition (T-01.4.13, DEBT-19). The per-document
-run loop is T-01.4.2 onward and does not exist yet -- `run_eval` raises
-`NotImplementedError` once the pre-run checks pass, which is this
-slice's honest, explicit boundary.
+This slice builds the ENTIRE pre-run chain (ADR-0004/ADR-0005 #8,
+S-01.4-KICKOFF.md pinned order): `load_dotenv()` first (INV-05),
+fail-closed credential VALIDATION (NFR N6, DEBT-30 -- see `bootstrap.py`),
+platform construction, `get_dataset` (dataset_fetch_failed), schema-drift
+(schema_drift), empty-set (empty_set), N28 structural validation
+(malformed_golden), and golden_version/run-id/experiment-name composition
+(T-01.4.6, T-01.4.13, DEBT-19). The per-document run loop is T-01.4.3a
+onward and does not exist yet -- `run_eval` raises `NotImplementedError`
+once every pre-run check passes, which is this slice's honest, explicit
+boundary.
 """
 
 from __future__ import annotations
@@ -32,6 +35,45 @@ def _set_all_credential_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("IDP_CLIENT_SECRET", "distinctive-client-secret-NOT-A-REAL-SECRET-4d9c")
     monkeypatch.setenv("IDP_REGION", "us-east")
     monkeypatch.setenv("IDP_ORG_ID", "org-123")
+    monkeypatch.setenv("GOLDEN_DATASET_NAME", "idp-regression-golden")
+
+
+class _FakePlatform:
+    """A minimal `PlatformAdapter` double -- only `get_dataset` is used by
+    the pre-run chain this batch builds. `record_run`/`mark_run_status`
+    are deliberately absent: any test that reaches them is out of this
+    batch's slice boundary and should fail loudly, not silently pass."""
+
+    def __init__(self, dataset: object) -> None:
+        self._dataset = dataset
+
+    def get_dataset(self, name: str) -> object:
+        return self._dataset
+
+
+def _well_formed_dataset() -> dict[str, object]:
+    from idp_regression.platform.schema import load_golden_schema
+
+    return {
+        "items": [
+            {
+                "item_id": "item-1",
+                "document_id": "doc-1",
+                "golden": {
+                    "fields": {
+                        "total": {"value": "1250.00", "type": "number", "critical": True}
+                    }
+                },
+            }
+        ],
+        "expected_output_schema": load_golden_schema(),
+    }
+
+
+def _stub_make_platform_with_a_well_formed_dataset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        facade, "make_platform", lambda: _FakePlatform(_well_formed_dataset())
+    )
 
 
 def _disable_dotenv_file_loading(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> None:
@@ -215,7 +257,133 @@ def test_run_eval_never_logs_the_idp_client_secret_value(
     assert "distinctive-client-secret-NOT-A-REAL-SECRET-4d9c" not in caplog.text
 
 
-# --- pre-run checks pass -> the loop boundary (T-01.4.2 onward) --------
+# --- T-01.4.11/.2/.5: get_dataset / schema-drift / empty-set / N28 ------
+
+
+def test_run_eval_returns_nonzero_and_names_the_missing_dataset_name_var(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+) -> None:
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.delenv("GOLDEN_DATASET_NAME", raising=False)
+
+    def _fail_if_called() -> None:
+        raise AssertionError("make_platform must not be called: zero network calls (N6)")
+
+    monkeypatch.setattr(facade, "make_platform", _fail_if_called)
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    assert "GOLDEN_DATASET_NAME" in caplog.text
+
+
+def test_run_eval_returns_nonzero_on_dataset_fetch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+) -> None:
+    from idp_regression.platform.errors import DatasetFetchFailedError
+
+    class _FailingPlatform:
+        def get_dataset(self, name: str) -> object:
+            raise DatasetFetchFailedError("get_dataset failed with HTTP 500")
+
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.setattr(facade, "make_platform", lambda: _FailingPlatform())
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    assert "dataset_fetch_failed" in caplog.text
+
+
+def test_run_eval_returns_nonzero_on_schema_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+) -> None:
+    dataset = _well_formed_dataset()
+    dataset["expected_output_schema"] = {"not": "the committed schema"}
+
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(dataset))
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    assert "schema_drift" in caplog.text
+
+
+def test_run_eval_returns_nonzero_on_empty_golden_set(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+) -> None:
+    dataset = _well_formed_dataset()
+    dataset["items"] = []
+
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(dataset))
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    assert "empty_set" in caplog.text
+
+
+def test_run_eval_returns_nonzero_on_malformed_golden(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+) -> None:
+    dataset = _well_formed_dataset()
+    dataset["items"] = [{"item_id": "i1", "document_id": "doc-42", "golden": {}}]
+
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(dataset))
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    assert "malformed_golden" in caplog.text
+    assert "doc-42" in caplog.text
+
+
+def test_run_eval_logs_the_golden_version_content_hash(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+) -> None:
+    """T-01.4.6 / INV-04: `golden_version` is a content hash of the SAME
+    `dataset["items"]` just validated -- no second fetch."""
+    from idp_regression.platform.hashing import hash_dataset
+
+    dataset = _well_formed_dataset()
+    expected_golden_version = hash_dataset(dataset["items"])  # type: ignore[arg-type]
+
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(dataset))
+
+    with caplog.at_level(logging.INFO), pytest.raises(NotImplementedError):
+        run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert expected_golden_version in caplog.text
+
+
+# --- pre-run checks pass -> the loop boundary (T-01.4.3a onward) --------
 
 
 def test_run_eval_raises_not_implemented_once_prerun_checks_pass(
@@ -224,6 +392,7 @@ def test_run_eval_raises_not_implemented_once_prerun_checks_pass(
 ) -> None:
     _disable_dotenv_file_loading(monkeypatch, tmp_path)
     _set_all_credential_env(monkeypatch)
+    _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
 
     with pytest.raises(NotImplementedError):
         run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
@@ -236,6 +405,7 @@ def test_run_eval_composes_the_experiment_name_before_hitting_the_loop_boundary(
 ) -> None:
     _disable_dotenv_file_loading(monkeypatch, tmp_path)
     _set_all_credential_env(monkeypatch)
+    _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
     monkeypatch.setattr(facade, "generate_run_id", lambda: "0123456789abcdef0123456789abcdef")
 
     with caplog.at_level(logging.INFO), pytest.raises(NotImplementedError):
@@ -250,16 +420,17 @@ def test_run_eval_sanitizes_logged_values_not_just_names_them(
     tmp_path: object,
 ) -> None:
     """Mutation-catching, PER FIELD (Atchim review R-4, 2026-09-21): the
-    pre-run-checks-passed log line interpolates FOUR values
-    (run/experiment/action/version), each through its own
+    pre-run-checks-passed log line interpolates FIVE values
+    (run/experiment/action/version/golden_version), each through its own
     `sanitize_for_log(...)` call. A single `'\\"' in caplog.text`
-    assertion is satisfied if ANY ONE of the four is sanitized -- it does
+    assertion is satisfied if ANY ONE of the five is sanitized -- it does
     not catch a regression that un-sanitizes exactly one field while
-    leaving the other three correct (verified: dropping ONLY the
+    leaving the other four correct (verified: dropping ONLY the
     `run_name` wrapper survived that assertion). Assert each field's
     escaped form individually instead."""
     _disable_dotenv_file_loading(monkeypatch, tmp_path)
     _set_all_credential_env(monkeypatch)
+    _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
     monkeypatch.setattr(facade, "generate_run_id", lambda: "0123456789abcdef0123456789abcdef")
 
     action_id = "12345678-1234-1234-1234-123456789012"
