@@ -276,6 +276,27 @@ def test_main_never_escapes_when_load_dotenv_itself_raises(
     assert "OSError" in caplog.text
 
 
+def test_main_gives_a_dotenv_load_failure_its_own_message_not_run_evals(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Atchim gate finding (2026-09-21): this used to log
+    "run_eval: unexpected error" for a `.env`-loading failure -- the same
+    text as a genuine `run_eval` failure below, misattributing the cause
+    in triage. It must carry its own, accurate message instead."""
+
+    def _boom() -> None:
+        raise OSError("boom")
+
+    monkeypatch.setattr(cli, "load_dotenv", _boom)
+
+    with caplog.at_level(logging.INFO):
+        cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
+
+    assert "cli: unexpected error loading .env" in caplog.text
+    assert "run_eval: unexpected error" not in caplog.text
+
+
 def test_main_converts_an_unexpected_exception_from_run_eval_into_a_nonzero_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

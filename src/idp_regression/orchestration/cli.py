@@ -120,8 +120,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         load_dotenv()
     except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 - see comment above
+        # ⚠️ Fixed 2026-09-21 (Atchim gate): this used to log
+        # "run_eval: unexpected error", misattributing a `.env`-loading
+        # failure to `run_eval` (which hasn't even been called yet) --
+        # confusing in triage, since the same message also covers a
+        # genuine `run_eval` failure below. Own message, own cause.
         logger.error(
-            "run_eval: unexpected error: %s at %s",
+            "cli: unexpected error loading .env: %s at %s",
             type(exc).__name__,
             frame_location(exc),
         )
