@@ -43,6 +43,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+import traceback
 from typing import Any, cast
 
 from idp_regression.adapter.errors import (
@@ -100,6 +101,21 @@ GOLDEN_DATASET_NAME_VAR = "GOLDEN_DATASET_NAME"
 #: {item.document_id}` to a local path"). Read and validated fail-closed
 #: (N6 shape) alongside `GOLDEN_DATASET_NAME_VAR`, before any network call.
 IDP_DOCUMENT_DIR_VAR = "IDP_DOCUMENT_DIR"
+
+
+def _frame_location(exc: BaseException) -> str:
+    """R-2 (Atchim gate, 2026-09-21): `type(exc).__name__` alone (e.g.
+    "AttributeError") tells a maintainer of a 350-line module nothing
+    about where an unanticipated exception actually happened. The last
+    traceback frame's `filename:lineno:name` carries no golden value, no
+    extracted value, no credential and no platform response body -- it
+    is pure code-location metadata, safe under INV-02 -- so it is safe
+    to log alongside the type name, unlike `str(exc)`, which is not."""
+    frames = traceback.extract_tb(exc.__traceback__)
+    if not frames:
+        return "<no traceback>"
+    frame = frames[-1]
+    return f"{frame.filename}:{frame.lineno}:{frame.name}"
 
 
 class _PathContainmentViolation(Exception):
@@ -303,25 +319,86 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
 
     load_dotenv()
 
+    # C-1 (Atchim gate, 2026-09-21) widened after a `/harden` re-run
+    # (Branca) found the first merge (`get_dataset` +
+    # shape/schema/empty-set/N28) closed only ONE of five raw-escape
+    # seams: `make_platform`, `make_idp_adapter` and
+    # `validate_platform_credentials` each still sat under their OWN
+    # narrow tuple with no catch-all, and the window between the two
+    # former try-blocks -- `hash_dataset`, `generate_run_id`,
+    # `compose_experiment_name` -- had no try at all. ONE try-block now
+    # spans every pre-run step, `validate_platform_credentials` through
+    # `compose_experiment_name`, so an untyped exception raised ANYWHERE
+    # in that chain (a transport timeout, a version-drift attribute
+    # error, ...) is caught by the SAME trailing catch-all instead of
+    # escaping through whichever seam's tuple didn't happen to name it.
+    # No `run_id` exists at any point in this block (it is the last
+    # thing generated inside it), so no branch here ever writes the
+    # best-effort marker -- unlike the in-loop/record-phase catch-all
+    # further down, which always has a `run_id` to mark.
     try:
         validate_platform_credentials()
+
+        idp_adapter: MuleSoftIDPAdapter = make_idp_adapter()
+
+        # A6: `dataset_name` is caller-supplied now (see the docstring
+        # above) -- still fail-closed on an empty/whitespace-only value,
+        # the same N6 shape the env-read version used, so a caller that
+        # passes "" through doesn't reach any network call either. Not
+        # an exception (nothing to catch below) -- a plain early return.
+        dataset_name = dataset_name.strip()
+        if not dataset_name:
+            logger.error("run_eval: dataset_name must not be empty")
+            _log_run_end("aborted", 1)
+            return 1
+
+        document_dir = (os.environ.get(IDP_DOCUMENT_DIR_VAR) or "").strip()
+        if not document_dir:
+            logger.error("run_eval: missing required env var %s", IDP_DOCUMENT_DIR_VAR)
+            _log_run_end("aborted", 1)
+            return 1
+
+        platform: PlatformAdapter = make_platform()
+
+        dataset = platform.get_dataset(dataset_name)
+        # GAP-1: validate shape BEFORE trusting it structurally anywhere
+        # else -- same except-clause, same reason, as a malformed
+        # `get_dataset` response.
+        _validate_dataset_shape(dataset)
+        # Pinned pre-run order (S-01.4-KICKOFF.md, TP-40): schema-drift,
+        # THEN empty-set, THEN N28 structural validation. An empty
+        # dataset whose schema ALSO drifted reports schema_drift,
+        # because check_schema_drift runs first and never looks at
+        # `items`.
+        check_schema_drift(dataset)
+        check_empty_set(dataset)
+        validate_golden_set(dataset)
+
+        # T-01.4.6 (INV-04): golden_version is a content hash over the
+        # SAME `dataset["items"]` object just validated above -- no
+        # second fetch (TOCTOU guard, ADR-0005 #7). `hash_dataset` takes
+        # `list[dict[str, Any]]` (it hashes whatever it is given
+        # verbatim, no opinion on item shape -- see its own docstring);
+        # `DatasetItem` is structurally a dict, so this is a
+        # shape-preserving cast, not an unsafe one.
+        golden_version = hash_dataset(cast(list[dict[str, Any]], dataset["items"]))
+        run_id = generate_run_id()
+        experiment_name = compose_experiment_name(run_name, run_id)
     except MissingCredentialError as exc:
         logger.error("run_eval: missing required env var %s", exc.variable_name)
         _log_run_end("aborted", 1)
         return 1
-
-    try:
-        idp_adapter: MuleSoftIDPAdapter = make_idp_adapter()
-    except (RuntimeError, IDPConfigurationError, ValueError) as exc:
+    except (RuntimeError, IDPConfigurationError, ValueError, PlatformConfigurationError) as exc:
         # `ValueError` closes a Required gate finding (2026-09-21,
         # live-reproduced): `MuleSoftIDPAdapter.__init__` raises a raw
         # `ValueError` when `success_statuses` is not a subset of
         # `terminal_statuses` (adapter/idp_client.py:109), which escaped
         # this except-block and broke the `-> int` / ADR-0004 exit-code
-        # contract. All three exception types already name only the
-        # offending variable/config, never a value (INV-02) -- see
-        # make_idp_adapter's `_require`/`_timing_env` and
-        # MuleSoftIDPAdapter's `_validate_timing`. `str(exc)` is still
+        # contract. These types already name only the offending
+        # variable/config, never a value (INV-02) -- see
+        # make_idp_adapter's `_require`/`_timing_env`,
+        # MuleSoftIDPAdapter's `_validate_timing`, and `make_platform`'s
+        # own base-URL/host split-brain guard. `str(exc)` is still
         # wrapped in `sanitize_for_log` defensively (reviewer
         # suggestion): today's messages are safe by construction, but
         # this is the one exception-message boundary in this function
@@ -330,76 +407,27 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
         logger.error("run_eval: %s", sanitize_for_log(str(exc)))
         _log_run_end("aborted", 1)
         return 1
-
-    # A6: `dataset_name` is caller-supplied now (see the docstring above)
-    # -- still fail-closed on an empty/whitespace-only value, the same
-    # N6 shape the env-read version used, so a caller that passes ""
-    # through doesn't reach any network call either.
-    dataset_name = dataset_name.strip()
-    if not dataset_name:
-        logger.error("run_eval: dataset_name must not be empty")
-        _log_run_end("aborted", 1)
-        return 1
-
-    document_dir = (os.environ.get(IDP_DOCUMENT_DIR_VAR) or "").strip()
-    if not document_dir:
-        logger.error("run_eval: missing required env var %s", IDP_DOCUMENT_DIR_VAR)
-        _log_run_end("aborted", 1)
-        return 1
-
-    try:
-        platform: PlatformAdapter = make_platform()
-    except (ValueError, PlatformConfigurationError) as exc:
-        # Mirrors the make_idp_adapter except-block above: names only the
-        # offending variable/config (INV-02), still routed through
-        # sanitize_for_log defensively.
-        logger.error("run_eval: %s", sanitize_for_log(str(exc)))
-        _log_run_end("aborted", 1)
-        return 1
-
-    try:
-        dataset = platform.get_dataset(dataset_name)
-        # GAP-1: validate shape BEFORE trusting it structurally anywhere
-        # else -- same except-clause, same reason, as a malformed
-        # `get_dataset` response.
-        _validate_dataset_shape(dataset)
     except DatasetFetchFailedError as exc:
         logger.error("run_eval: dataset_fetch_failed: %s", sanitize_for_log(str(exc)))
         _log_run_end("aborted", 1)
         return 1
-
-    # Pinned pre-run order (S-01.4-KICKOFF.md, TP-40): schema-drift, THEN
-    # empty-set, THEN N28 structural validation. An empty dataset whose
-    # schema ALSO drifted reports schema_drift, because check_schema_drift
-    # runs first and never looks at `items`.
-    try:
-        check_schema_drift(dataset)
-        check_empty_set(dataset)
-        validate_golden_set(dataset)
     except RunAborted as exc:
         logger.error("run_eval: %s: %s", exc.reason, sanitize_for_log(str(exc)))
         _log_run_end("aborted", 1)
         return 1
     except Exception as exc:  # noqa: BLE001 - HARDEN-01 GAP-1, see facade docstring
-        # No `run_id` exists yet at this point (it is generated below),
-        # so there is no run to mark `aborted` -- unlike the in-loop
-        # catch-all further down. `type(exc).__name__` only, never
-        # `str(exc)` (INV-02: an unanticipated exception's message is
-        # not vetted the way every typed one in this codebase is).
-        logger.error("run_eval: unexpected pre-run error: %s", type(exc).__name__)
+        # `type(exc).__name__` plus the last traceback frame's location
+        # (R-2) only, never `str(exc)` (INV-02: an unanticipated
+        # exception's message is not vetted the way every typed one in
+        # this codebase is).
+        logger.error(
+            "run_eval: unexpected pre-run error: %s at %s",
+            type(exc).__name__,
+            _frame_location(exc),
+        )
         _log_run_end("aborted", 1)
         return 1
 
-    # T-01.4.6 (INV-04): golden_version is a content hash over the SAME
-    # `dataset["items"]` object just validated above -- no second fetch
-    # (TOCTOU guard, ADR-0005 #7). `hash_dataset` takes `list[dict[str,
-    # Any]]` (it hashes whatever it is given verbatim, no opinion on item
-    # shape -- see its own docstring); `DatasetItem` is structurally a
-    # dict, so this is a shape-preserving cast, not an unsafe one.
-    golden_version = hash_dataset(cast(list[dict[str, Any]], dataset["items"]))
-
-    run_id = generate_run_id()
-    experiment_name = compose_experiment_name(run_name, run_id)
     logger.info(
         "run_eval: pre-run checks passed run=%s experiment=%s action=%s "
         "version=%s golden_version=%s golden_dataset_name=%s items=%d",
@@ -549,10 +577,11 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
         # (generated before this try-block) -- ADR-0004 #14 says every
         # run that exists gets a best-effort `aborted` marker, so this
         # writes one, exactly like every `_abort()` call site above,
-        # before ever logging or returning. `type(exc).__name__` only,
-        # never `str(exc)` (INV-02 -- an untyped exception's message is
-        # not vetted the way every typed one this codebase raises is;
-        # it could echo IDP or platform response content).
+        # before ever logging or returning. `type(exc).__name__` plus the
+        # last traceback frame's location (R-2) only, never `str(exc)`
+        # (INV-02 -- an untyped exception's message is not vetted the way
+        # every typed one this codebase raises is; it could echo IDP or
+        # platform response content).
         _mark_run_status_best_effort(
             platform,
             run_id,
@@ -562,7 +591,11 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
             golden_version=golden_version,
             golden_dataset_name=dataset_name,
         )
-        logger.error("run_eval: unexpected error: %s", type(exc).__name__)
+        logger.error(
+            "run_eval: unexpected error: %s at %s",
+            type(exc).__name__,
+            _frame_location(exc),
+        )
         _log_run_end("aborted", 1, pass_count=passed_count, fail_count=failed_count)
         return 1
 

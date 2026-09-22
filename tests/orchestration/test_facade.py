@@ -1456,6 +1456,95 @@ def test_run_eval_writes_the_aborted_marker_on_an_untyped_in_loop_exception(
     assert [c["status"] for c in platform.mark_run_status_calls] == ["aborted"]
 
 
+def test_run_eval_never_escapes_when_get_dataset_raises_an_untyped_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """C-1 (Atchim gate, 2026-09-21): `get_dataset`/`_validate_dataset_shape`
+    used to sit under a try-block with ONLY `except DatasetFetchFailedError`
+    -- an untyped exception raised by `get_dataset` itself (a transport
+    timeout, say) escaped `run_eval` entirely, breaking its `-> int`
+    contract, emitting no `run_end` line (N10), and -- via the CLI's own
+    fallback -- reaching a log line built from `sanitize_for_log(str(exc))`,
+    which quotes but does not redact (INV-02). Reproduced with a
+    `TimeoutError` whose message carries a fake bearer token; none of it
+    may reach the logs."""
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+
+    sentinel = "SEKRIT-token-should-never-be-logged"
+
+    class _RaisingGetDatasetPlatform:
+        def get_dataset(self, name: str) -> object:
+            raise TimeoutError(f"socket hung talking to lf-host token={sentinel}")
+
+        def record_run(self, **kwargs: object) -> None:
+            pass
+
+        def mark_run_status(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    monkeypatch.setattr(facade, "make_platform", lambda: _RaisingGetDatasetPlatform())
+
+    with caplog.at_level(logging.INFO):
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
+
+    assert exit_code != 0
+    assert "run_end" in caplog.text
+    assert sentinel not in caplog.text
+    assert "TimeoutError" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "seam",
+    ["validate_platform_credentials", "make_idp_adapter", "make_platform", "hash_dataset"],
+)
+def test_run_eval_never_escapes_on_an_untyped_exception_at_any_pre_run_seam(
+    seam: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """C-1 widened (Branca `/harden` re-run, 2026-09-21): the first merge
+    closed only the `get_dataset` seam -- `make_platform`,
+    `make_idp_adapter` and `validate_platform_credentials` each still sat
+    under their OWN narrow tuple with no catch-all, and the window
+    between the two former try-blocks (`hash_dataset`, `generate_run_id`,
+    `compose_experiment_name`) had no try at all. One repro per
+    surviving seam: each raises an untyped exception (a type NOT in that
+    seam's own narrow tuple, so it must hit the shared catch-all, not the
+    typed one) carrying a secret sentinel -- none of it may escape, be
+    marked, or reach the logs."""
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+
+    sentinel = "SEKRIT-token-should-never-be-logged"
+    platform = _RecordingPlatform(_well_formed_dataset())
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise TimeoutError(f"unexpected failure token={sentinel}")
+
+    if seam == "make_platform":
+        monkeypatch.setattr(facade, "make_platform", _boom)
+    else:
+        monkeypatch.setattr(facade, "make_platform", lambda: platform)
+        monkeypatch.setattr(facade, seam, _boom)
+
+    with caplog.at_level(logging.INFO):
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
+
+    assert exit_code != 0
+    assert "run_end" in caplog.text
+    assert sentinel not in caplog.text
+    assert "TimeoutError" in caplog.text
+    assert platform.mark_run_status_calls == []
+
+
 def test_run_eval_still_propagates_keyboard_interrupt(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: object,
