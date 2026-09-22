@@ -15,6 +15,7 @@ and `idp_regression.adapter.transport.sanitize_for_log`).
 
 from __future__ import annotations
 
+import json
 import os
 
 from idp_regression.adapter.errors import IDPExecutionFailedError
@@ -69,7 +70,41 @@ def test_frame_location_never_returns_an_absolute_path() -> None:
 
     filename = location.rsplit(":", 2)[0]
     assert not os.path.isabs(filename)
+    # `not os.path.isabs(...)` alone passes on a `..`-traversal leak
+    # (e.g. `../../../Users/alex/...`) -- pin the stronger property too.
+    assert os.pardir not in filename.split(os.sep)
+    assert os.path.expanduser("~") not in location
     assert location.endswith(":RuntimeError") is False  # sanity: has a real frame name
+
+
+def test_frame_location_for_an_external_frame_never_traverses_up_to_the_home_dir() -> None:
+    """Atchim gate (2026-09-21, live-reproduced): `os.path.relpath` does
+    NOT clamp -- when the innermost frame lives outside `idp_regression`
+    (the normal case for an unanticipated exception raised deep inside a
+    third-party/stdlib call, e.g. the Langfuse SDK, httpx, or here
+    `json`), it walks back up the tree with `..` segments and re-emits
+    the full absolute path underneath them (username, home directory,
+    interpreter layout) -- the exact INV-02 disclosure GAP-7 already
+    closed for the package-internal case. An external frame must render
+    as `<external>/{basename}` instead."""
+    try:
+        json.loads("{")
+    except json.JSONDecodeError as exc:
+        location = frame_location(exc)
+
+    assert ".." not in location.split(":")[0].split(os.sep)
+    assert os.path.expanduser("~") not in location
+    assert not os.path.isabs(location.split(":")[0])
+    assert location.startswith("<external>" + os.sep)
+
+
+def test_frame_location_returns_no_traceback_placeholder_when_traceback_is_none() -> None:
+    """An exception instance whose `__traceback__` is `None` (e.g. built
+    but never raised) must not crash `frame_location` or fall through to
+    an indexing error."""
+    exc = RuntimeError("never raised")
+    assert exc.__traceback__ is None
+    assert frame_location(exc) == "<no traceback>"
 
 
 def test_frame_location_is_package_relative_for_a_facade_frame() -> None:

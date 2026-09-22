@@ -47,10 +47,31 @@ def frame_location(exc: BaseException) -> str:
     line. Rendered package-relative (relative to the directory containing
     `idp_regression`) instead, so the value logged is e.g.
     `idp_regression/orchestration/facade.py:426:run_eval` -- never an
-    absolute machine path."""
+    absolute machine path.
+
+    ⚠️ Fixed again 2026-09-21 (same-day re-gate, live-reproduced):
+    `os.path.relpath` does not clamp to `_PACKAGE_PARENT` -- it happily
+    TRAVERSES above it. Whenever the innermost frame lives OUTSIDE
+    `idp_regression` (the normal case for the unanticipated-exception
+    catch-alls this feeds: the Langfuse SDK, httpx, the stdlib), the
+    result is a string like
+    `../../../../../../Users/alex/.../json/decoder.py:361:raw_decode` --
+    the exact absolute-path disclosure the first fix above was written to
+    close, just re-opened one level up. Any frame whose relative path
+    would start with `..`, or whose drive/root differs entirely from
+    `_PACKAGE_PARENT` (`relpath` raises `ValueError` on Windows for
+    that), is rendered as `<external>/{basename}` instead -- code-location
+    metadata for a third-party frame is not worth an absolute-path leak.
+    A package-internal frame keeps the existing package-relative form."""
     frames = traceback.extract_tb(exc.__traceback__)
     if not frames:
         return "<no traceback>"
     frame = frames[-1]
-    filename = os.path.relpath(frame.filename, _PACKAGE_PARENT)
+    try:
+        filename = os.path.relpath(frame.filename, _PACKAGE_PARENT)
+    except ValueError:
+        filename = f"<external>/{os.path.basename(frame.filename)}"
+    else:
+        if filename.split(os.sep, 1)[0] == os.pardir:
+            filename = f"<external>/{os.path.basename(frame.filename)}"
     return f"{filename}:{frame.lineno}:{frame.name}"
