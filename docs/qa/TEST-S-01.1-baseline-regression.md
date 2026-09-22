@@ -3,7 +3,7 @@
 **Status:** ✅ PASSED
 **Source:** /test gap-fill (Atchim TDD gate)
 **Date:** 2026-09-21 (re-stamp — FO-5)
-**Commit (reviewed code):** `6d525ef` (FO-5). **Stamp commit:** `ab0734d`+ (this file). ⚠️ `/qa` freshness: git corroboration returns the stamp commit because `docs/qa/` is in the `Files:` set — expected, not stale; a stamp cannot record its own SHA. Falsifiable check: `git diff --stat 6d525ef HEAD -- src/idp_regression/classifier/` must be empty. Original stamp commit, superseded: 1d50e978b4f94e76d123577b04789bdfb40ae1f4  <!-- HEAD of feat/S-01.1-baseline-regression after the /test gap-fill + /implement Scenario-B fix. Stamp file is a working-tree docs artifact (uncommitted, per the established docs/state pattern — the state log + this stamp are the source of truth). -->
+**Commit (reviewed code):** `1428520` — **re-gated 2026-09-22** by a fresh Atchim instance (DEBT-44) after S-01.4 added the additive alias `validate_golden_structure = _validate_golden` to `gate.py` (+11 lines), which had staled this stamp (DEBT-46). Falsifiable check, re-baselined: `git diff --stat 1428520 HEAD -- src/idp_regression/classifier/` must be empty. Re-gate evidence: classifier suite 104 passed standalone; N2 mean 1.38 ms vs the 100 ms budget; INV-02 purity intact (the dependency runs orchestration → classifier, never the reverse); the FO-5 fail-open stays closed — disarming both unknown-verdict guards in `overall_gate` kills two tests; alias-as-wrapper mutation killed; 3 further spot-mutants killed. Prior history: `6d525ef` (FO-5), stamp commit `ab0734d`; original `1d50e978`.
 **Author:** alex@divinocosta.com.br  <!-- solo mode — raw git config user.email -->
 **Atchim TDD gate:** PASSED (2026-09-21, Opus 5, fresh instance per DEBT-44 — it had seen none of these diffs). **0 findings against S-01.1.**
 
@@ -75,7 +75,7 @@ Branch `feat/S-01.1-baseline-regression`. ADR-0003 is risk:Low; the SPEC-01 DoD 
 
 | Scope | Passed | Failed |
 |---|---|---|
-| Story tests | 82 | 0 |
+| Story tests | 104 | 0 |
 | Bug-repro (`@bug-repro`) | — | 0 (none) |
 
 `uv run pytest -q` → **82 passed** in ~0.32s. Per-file: test_classify 10, test_gate 8, test_tables 8, test_validation 21 (15 original + 6 prompt-level gap-fill), test_edge_matrix 22, test_classify_contract 12, test_performance 1. Benchmark p95 ~1.37ms (N2 budget 100ms).
@@ -101,6 +101,7 @@ Branch `feat/S-01.1-baseline-regression`. ADR-0003 is risk:Low; the SPEC-01 DoD 
 | `missing` on unmatched golden row | test_tables.py:112, test_edge_matrix.py:263 | ✅ COVERED |
 | Non-critical difference → PASS | test_gate.py:86,98, test_edge_matrix.py:222 | ✅ COVERED |
 | Purity (no IDP/platform/I/O imports) | test_classify_contract.py:145 + static grep | ✅ COVERED |
+| N28 / ADR-0005 #8 — orchestration reuses the N22 validator (same function object, no second dialect) | tests/classifier/test_validation.py:248 (identity pin; wrapper mutation killed) | ✅ COVERED |
 
 ## Scenario A bugs (quarantined repros)
 (none — no `@bug-repro` tests; the one Scenario B found during /test was this story's own AC gap, fixed via /implement commit 1d50e978, not a pre-existing unrelated bug.)
