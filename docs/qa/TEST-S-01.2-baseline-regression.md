@@ -3,7 +3,7 @@
 **Status:** ✅ PASSED
 **Source:** /test gap-fill (Atchim TDD gate)
 **Date:** 2026-09-19
-**Commit:** 2ae8617d10a0406417260f017d18f7ad3cbf8073
+**Commit:** 367065b — **re-gated 2026-09-22** by a fresh Atchim instance (DEBT-44) after S-01.4 work edited this story's modules (+206 lines in `idp_client.py`/`transport.py`), which had staled this stamp (DEBT-46). Falsifiable check, re-baselined: `git diff --stat 367065b HEAD -- src/idp_regression/adapter/` must be empty. The re-gate initially found **three stated guarantees that no test pinned** (each proven by a surviving mutant); `367065b` closed them tests-only, and a second fresh instance re-applied all four mutants itself — all killed by assertion or wrong-exception-type in under 0.2 s, answering the earlier slow-signal complaint. Prior: 2ae8617d10a0406417260f017d18f7ad3cbf8073
 **Author:** alex@divinocosta.com.br
 **Atchim TDD gate:** PASSED. /test gate over b393564..d84bfa6 (6 Scenario-B defects fixed, 7 coverage gaps pinned). Then, after QA S-01.2 ⚠️, a /test gate over the fix round cadbb69..2ae8617: F-1 non-finite timing config, F-2 redirect credential leak, and an independent fix-round audit (float-overflow defect plus two gaps fixed in 2ae8617). All mutants killed.
 **Independence:** ✅ structural (different models): Dengoso (sonnet) reviewed by Atchim (opus). SPEC-01 is Risk: high.
@@ -22,7 +22,7 @@ Fix rounds: R1 8d84491, R2 7131712, R3 e1742d3, R4/R5/R8 75987a8, R7 320fd7c, R6
 
 | Scope | Passed | Failed |
 |---|---|---|
-| Unit + contract (default run) | 459 | 0 |
+| Unit + contract (default run) | 880 | 0 |
 | Full suite incl. live integration (`RUN_INTEGRATION_TESTS=1`; live IDP OAuth token + live Langfuse) | 472 | 0 (1 skip: live submit/poll needs a real IDP action id + version → S-01.6) |
 
 ## AC coverage
@@ -66,6 +66,11 @@ Fix rounds: R1 8d84491, R2 7131712, R3 e1742d3, R4/R5/R8 75987a8, R7 320fd7c, R6
 | QA F-1: huge int → typed error (no raw OverflowError); bool rejected | test_idp_client.py:706,726 | ✅ COVERED |
 | QA F-1: NaN poll timeout can't loop forever | test_idp_client.py:696 | ✅ COVERED |
 | QA F-2 / REG-07: 3xx → typed error; the token never reaches the redirect target (two real servers); response closed | test_transport.py:400-452 | ✅ COVERED |
+| ADR-0004 #3 — the absolute poll deadline still fires after retries consumed the budget (asserts 2 calls against a 3-attempt budget, so deadline-fired is distinguished from budget-exhausted) | test_idp_client.py::test_poll_deadline_still_fires_after_retries_have_consumed_the_budget | ✅ COVERED |
+| DEBT-21 class, one level deeper — the retried GET after 401/403 carries the **refreshed** token, not the old Bearer | ::test_poll_second_get_after_401_uses_the_refreshed_token_not_the_old_one | ✅ COVERED |
+| `Retry-After` guard — rejects negative / non-finite / over-cap, accepts the cap inclusively | ::test_parse_retry_after_seconds_rejects_negative_nonfinite_and_over_cap (+ boundary companion) | ✅ COVERED |
+| `Retry-After` honoured only on 429, never on a 5xx | ::test_poll_retry_sleep_seconds_ignores_retry_after_header_on_a_non_429_status | ✅ COVERED |
+| Bounded 5xx/429 poll retry; one-refresh-then-fail-closed; `_validate_timing` hardening; no-redirect opener; `_require` whitespace rejection | test_idp_client.py / test_transport.py (earlier delta, re-mutated and killed in the re-gate) | ✅ COVERED |
 
 **Deferred:**
 - DEBT-26: the platform transport redirect leak (sibling of F-2) → S-01.3 follow-up; REG-07 pending-test there.
