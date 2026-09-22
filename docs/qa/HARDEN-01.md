@@ -1,6 +1,20 @@
 # HARDEN-01 — Containment report — UC-01 baseline regression
 
-**Verdict: ❌ GAPS**
+**Verdict: ❌ GAPS** — re-run 2026-09-21 (see §7)
+
+```
+Verdict: GAPS
+Date: 2026-09-21 (re-run #1)
+Commit: 33aaca0
+GAP-1: STILL OPEN (Major, blocking) - 12 of 13 reproductions closed; the untyped-escape class survives on the unguarded seams (get_dataset, make_platform, make_idp_adapter, validate_platform_credentials, and the window between the two catch-alls)
+GAP-2: CLOSED (run_experiment / flush / missing item_results now typed)
+GAP-3: OPEN - Minor, accepted + carded (DEBT-53)
+GAP-4: NEW - Minor, non-blocking - residual SDK-drift seams in record_experiment
+GAP-5: NEW - Minor, non-blocking - a BaseException that is not KeyboardInterrupt/SystemExit escapes every catch-all
+Leak: PASS (0 sentinel hits on all new paths)
+Fail-open: PASS (no new guard can produce a GREEN build)
+Containment-REQUIRED: NOT DISCHARGED
+```
 
 **Use case:** UC-01 · **Story under gate:** S-01.4 (orchestrator + CLI) · **Date:** 2026-09-21
 **Red-team:** Branca · **Branch:** `feat/S-01.2-idp-adapter` · **Baseline:** 780 passed / 14 skipped, `mypy src` + `ruff check src tests` clean
@@ -201,3 +215,116 @@ This is not hypothetical: `CLAUDE.md ## External services` records that the SDK-
 4. **A-1 / A-2 / A-3** — non-blocking; `/debt add`.
 
 Re-run this report after the fixes. The other 24 probe families need no re-run unless `orchestration/` or `platform/` changes.
+
+---
+
+## 7. Re-run #1 — 2026-09-21 — GAP-1 and GAP-2 only
+
+**Red-team:** Branca · **Commit under gate:** `33aaca0` (`feat/S-01.2-idp-adapter`) · **Fixes examined:** `2f700c2` (GAP-1), `fd8cdc3` (GAP-2), with `98eacbc` (R-1) and `5af1989` (A6) alongside.
+
+> **Method.** Detached `git worktree` at `33aaca0` in the session scratchpad, `PYTHONPATH` pinned to **that** tree's `src` (module resolution asserted: `idp_regression.__file__` resolves inside the worktree, not the editable install). 42 throwaway probes in the scratchpad; `src/` and `tests/` untouched. Repo suite re-verified in the same worktree: **804 passed / 14 skipped**. No live IDP or platform call; no document submitted. GAP-3 and A-1/A-2/A-3 were **not** re-probed (carded as DEBT-53/54) and stand exactly as written in §4.
+
+### 7.1 GAP-1 — **STILL OPEN** (Major, blocking) — narrowed from 13 reproductions to a residual seam family
+
+`_validate_dataset_shape()` and both catch-alls do what the commit claims. **12 of the 13 reproductions are closed.** One is not, and probing past the fix found the same defect on three further seams and one uncovered window — all of the same class, all with the same consequence (no marker, no `run_end`, no distinguishable reason, raw exception out of a `-> int` function).
+
+**Re-run of the 13 reproductions** (`exit` / `reason logged` / `run_status` markers / `run_end` emitted):
+
+| # | Reproduction | Escaped? | exit | Reason logged | Markers | `run_end` |
+|---|---|---|---|---|---|---|
+| R1 | `get_dataset` → `TimeoutError` | ❌ **YES — `TimeoutError`** | — | none | none | **not emitted** |
+| R2 | `extract` → `TimeoutError` | ✅ no | 1 | `unexpected error: TimeoutError` | `['aborted']` | yes |
+| R3 | `record_run` → `TimeoutError` | ✅ no | 1 | `unexpected error: TimeoutError` | `['aborted']` | yes |
+| R4–R6 | `items` = `"not-a-list"` / `42` / `{...}` | ✅ no | 1 | `dataset_fetch_failed: "dataset 'items' is missing or not a list"` | none (pre-run) ✅ | yes |
+| R7–R9 | `items` = `[None]` / `[42]` / `["str"]` | ✅ no | 1 | `dataset_fetch_failed: "a dataset item is not a dict"` | none ✅ | yes |
+| R10 | no `items` key | ✅ no | 1 | `dataset_fetch_failed: "…missing or not a list"` | none ✅ | yes |
+| R11 | item with no `document_id` | ✅ no | 1 | `dataset_fetch_failed: "…missing/non-string document_id"` | none ✅ | yes |
+| R12 | non-`str` `document_id` | ✅ no | 1 | same | none ✅ | yes |
+| R13 | drifted gate literal (`ValueError` from `build_score_inputs`) | ✅ no | 1 | `unexpected error: ValueError` | `['aborted']` | yes |
+
+Marker discipline on the closed 12 is **exactly right**: the in-loop catch-all writes the best-effort `aborted` marker once and only when a `run_id` exists; the pre-run paths write none. All four INV-04 fields are carried on the catch-all's marker (`golden_dataset_name` included, A6-consistent). Every reason line logs `type(exc).__name__` only — verified by planting sentinels **inside the raised exception's own message** (§7.4).
+
+**R1 is not an edge case, it is the first of the three seams the fix commit's own message names** ("TimeoutError from get_dataset/extract/record_run"). The `try` around `platform.get_dataset(dataset_name)` still has **only** `except DatasetFetchFailedError`; the new `except Exception` was added to the *next* `try` (the schema-drift/empty-set/N28 chain), not this one.
+
+**Probing past the fix — three more seams of the same class, all reproduced:**
+
+| Probe | Seam | Result |
+|---|---|---|
+| P6 | `make_platform()` → `TimeoutError` (SDK constructor hangs/drifts) | ❌ escapes — `except (ValueError, PlatformConfigurationError)` only |
+| P7 | `make_idp_adapter()` → `OSError` | ❌ escapes — `except (RuntimeError, IDPConfigurationError, ValueError)` only |
+| P9 | `validate_platform_credentials()` → `OSError` | ❌ escapes — `except MissingCredentialError` only |
+| P8 | `hash_dataset` → `RecursionError` | ❌ escapes — **the window between the two catch-alls** (`hash_dataset` → `generate_run_id` → `compose_experiment_name` → the `pre-run checks passed` log line) is inside no `try` at all |
+
+At the CLI all four, and R1, still exit **1** (`cli.py:155`'s catch-all) — so **no GREEN build** — but with **no `run_end` line, no reason and no marker**, which is the exact defect GAP-1 named. `run_eval`'s `-> int` contract remains broken for any non-CLI caller on these five paths.
+
+**Probes that came back clean:**
+
+| Probe | Result |
+|---|---|
+| P1 — the `aborted` marker write itself raises **inside** the catch-all | ✅ contained — `_mark_run_status_best_effort` swallows it, logs `mark_run_status("aborted") failed (best-effort, not retried)`, run still exits 1 with `run_end` |
+| P3 — `items` is a **generator** (raises mid-iteration) | ✅ contained — `_validate_dataset_shape`'s `isinstance(items, list)` rejects it before iteration: `dataset_fetch_failed` |
+| P5 — an adapter exception whose **`__str__` itself raises** | ✅ contained — the `ValueError` from `str(exc)` inside the `except` handler falls through to the in-loop catch-all: exit 1, marker, `run_end` |
+| P10 — `KeyboardInterrupt` | ✅ propagates, as pinned |
+| F3 — an item that passes the shape validator but has **no `golden` key** | ✅ `malformed_golden`, pre-run, exit 1, no marker |
+
+### 7.2 GAP-2 — **CLOSED** (with a residual, logged below as GAP-4)
+
+Driven directly against `record_experiment` with a duck-typed `ExperimentRunner`:
+
+| Probe | Injection | Result |
+|---|---|---|
+| G1 | `run_experiment` → `RuntimeError` (message carrying the secret-key sentinel) | ✅ `ExperimentRecordFailedError: record_experiment: run_experiment raised RuntimeError` — **no sentinel in the message** |
+| G2 | `run_experiment` → `AttributeError` (the version-bump drift class) | ✅ `ExperimentRecordFailedError: … raised AttributeError` |
+| G3 | `flush()` → `RuntimeError` (sentinel-carrying) | ✅ `FlushFailedError: record_experiment: flush() raised RuntimeError` — distinct from the *logged*-flush-failure mapping, as intended |
+| G4 | result object with no `item_results` | ✅ `ExperimentRecordFailedError: … has no 'item_results' attribute (SDK return shape drift?)` |
+| G11 | happy path | ✅ unchanged — returns the `item_id → trace_id` map |
+
+No SDK exception text reaches the caller (`from None` on every mapping); the orchestrator then maps each to `hard_failure` / `flush_failed` exactly as §3.2 already verified. **GAP-2's three named call sites are closed.**
+
+### 7.3 New gaps
+
+#### GAP-4 — Minor, non-blocking — `record_experiment`'s post-call reads are still unguarded against the same drift class
+
+`list(result.item_results)` catches **only `AttributeError`**, and the structural loop reads `item_result.trace_id`, `.dataset_run_id` and `.item.id` with no guard at all. Reproduced, each escaping `record_experiment` **untyped**:
+
+| Probe | Injection | Escaping exception |
+|---|---|---|
+| G5 | `item_results` is a lazy iterator that raises mid-iteration | `RuntimeError` — **and it carried the planted secret sentinel in its message** |
+| G6 | `item_results = 42` (not iterable) | `TypeError: 'int' object is not iterable` |
+| G7 | `item_results` property raises `RuntimeError` | `RuntimeError` |
+| G8 | an item result with no `.trace_id` | `AttributeError` |
+| G9 | `item_result.item` with no `.id` | `AttributeError` |
+
+G8/G9 are the *same* renamed-field drift GAP-2 was raised for, one attribute deeper. **Why non-blocking:** end-to-end these now land in `run_eval`'s in-loop catch-all (verified by R3's shape) → exit 1, `aborted` marker, `run_end`, and **only the type name logged**, so the G5 message never reaches a log line. The defect is a broken `PlatformAdapter` typed-error contract, not a leak and not a fail-open. Fix shape: wrap the `item_results` materialisation in `except Exception` (not just `AttributeError`) and the per-item attribute reads in the same mapping.
+
+#### GAP-5 — Minor, non-blocking — a `BaseException` that is neither `KeyboardInterrupt` nor `SystemExit` escapes every catch-all
+
+`except Exception` in `run_eval` (both), in `cli.main` and in `tracing.py` all miss it. Reproduced with a bare `BaseException` subclass and, more realistically, with **`asyncio.CancelledError`** (a `BaseException` since 3.8) raised from the IDP seam (P4b) and from `run_experiment` (G10) — relevant because `run_experiment` runs items under `asyncio.gather` internally, so a cancelled task is a live source. In every case: no marker, no `run_end`, raw propagation out of `cli.main`. The process still exits non-zero (Python's own unhandled-exception exit), so **no GREEN build**. Recommend `/debt`, and recommend it be a *decision* (`BaseException` is deliberately not caught) rather than the current silence.
+
+**Advisory A-4 (new, `/debt`):** `_validate_dataset_shape` accepts a whitespace-only `item_id` (`"  "` is truthy) — probe F1 ran green end-to-end with it. Not a containment gap (`_require_record_shape` governs the write side), but inconsistent with the N6 whitespace-strip discipline applied everywhere else in `run_eval`.
+
+**Advisory A-5 (new, informational):** a **logging handler** that raises while emitting the `run_end` record escapes `run_eval` (probe P2 — the `aborted` marker had already been written, so only the `run_end` line and the return value are lost). Stdlib handlers swallow their own emit errors; a third-party shipper need not. Recorded, not carded as a gap.
+
+### 7.4 Leak re-check on the new paths — **PASS**
+
+Sentinels planted in the golden value, the extracted value, `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, `IDP_CLIENT_SECRET` and `IDP_DOCUMENT_DIR`, then **planted again inside the raised exception's own message** to attack the new code specifically:
+
+- **L1** — the new `_validate_dataset_shape` errors: 0 hits. Every message is a static string naming a field, never a value.
+- **L2** — the in-loop catch-all with `record_run` raising `RuntimeError("resp body <golden> <secret>")`: 0 hits across `caplog`, stdout and stderr. `type(exc).__name__` discipline holds.
+- **L3** — the pre-run catch-all with `check_schema_drift` raising a message carrying the secret, the golden value **and the document-dir path**: 0 hits.
+- **GAP-1/GAP-2 probe suites**: a sentinel assertion ran on every one of the 26 + 11 probes; 0 failures except the *escaping* G5 (GAP-4), which never reaches a log line.
+
+### 7.5 Fail-open re-check on the new code — **PASS**
+
+- No catch-all can return 0: both return a hard-coded `1`; probed on every reproduction (F2), including the case where every gate had PASSed before the failure.
+- `_validate_dataset_shape` rejects, it never coerces or defaults; a dataset it accepts is still gated normally (F1, F3 — the missing-`golden` item still aborts `malformed_golden`).
+- A clean run still exits 0 with a single `complete` marker (F4) — the new guards did not make the green path unreachable either.
+- No new path was found on which a real failure yields a GREEN build. R1/P6/P7/P8/P9 and GAP-5 all still exit non-zero; they lose *observability*, not *safety*.
+
+### 7.6 Verdict
+
+**GAP-1 STILL OPEN — blocking.** The fix is correct as far as it goes and closes 12 of 13 reproductions, but the class it was raised against is still live on five seams, one of which (`get_dataset`) is named in the fix's own commit message. `Containment: REQUIRED` **cannot be discharged**; NFR-01's marker stands undischarged and S-01.4 cannot reach Done.
+
+**Required (Dengoso):** move the `except Exception` so it covers **the whole pre-run chain** — `validate_platform_credentials`, `make_idp_adapter`, `make_platform`, `get_dataset` + `_validate_dataset_shape`, the pre-run guards, and the `hash_dataset`/`generate_run_id`/`compose_experiment_name` window — rather than one `try` inside it. A single pre-run `try:` spanning from `load_dotenv()` to just before `run_id` generation, with the existing typed `except` clauses kept in front of a final `except Exception`, closes all five at once and restores `_log_run_end`'s "EVERY exit point" contract. **GAP-4 / GAP-5 / A-4 / A-5 → `/debt`, not blocking.**
+
+**Re-run scope for the next pass:** R1, P6–P9 only, plus a re-confirm of F2/F4. The GAP-2 probes and the 24 probe families of §3 need no third run unless `platform/tracing.py` changes again.
