@@ -1,5 +1,11 @@
 """T-01.2.4/.2.5 — normalize() merge semantics + untrusted-input contract
-(NFR N21, ADR-0002)."""
+(NFR N21, ADR-0002).
+
+``fixtures/raw_idp_response.json`` is the LEGACY ``pages[]`` envelope
+(ADR-0002 A11) — never observed live, kept only as the optional secondary
+shape. The primary wire contract is the top-level ``fields``/``tables``
+shape pinned by the real capture in ``tests/fixtures/live/seed-001-clean.raw.json``
+(see ``test_normalize_live_capture.py`` and CT-01)."""
 
 from __future__ import annotations
 
@@ -360,18 +366,23 @@ def test_table_too_large_counts_rows_across_pages() -> None:
     assert excinfo.value.reason == "table_too_large"
 
 
-# ---- confidence coercion: NaN/out-of-range -> None, never clamped -----
+# ---- confidence coercion: out-of-range now RAISES, never silently None
+# (ADR-0002 A11 / REG-11 D2 — the old "-> None" behavior was itself a
+# fail-open defect: a broken IDP action's confidence became `None` with no
+# exception and no log line).
 
 
-def test_huge_int_confidence_does_not_raise_overflow_error_becomes_none() -> None:
+def test_huge_int_confidence_raises_typed_error_not_an_overflow_error() -> None:
     # int -> float conversion of a huge int raises OverflowError; this must
-    # never escape normalize() and is out-of-range -> None (Atchim R2).
+    # never escape normalize() as a raw exception, and (D2 fix) must not be
+    # silently swallowed into None either.
     raw = {
         "status": "SUCCEEDED",
         "pages": [{"fields": {"total": {"value": "100.00", "confidence": 10**400}}}],
     }
-    out = normalize(raw, success_statuses={"SUCCEEDED"})
-    assert out["fields"]["total"]["confidence"] is None
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "invalid_confidence"
 
 
 def test_lone_surrogate_value_raises_typed_error_not_a_raw_unicode_error() -> None:
@@ -390,13 +401,102 @@ def test_lone_surrogate_value_raises_typed_error_not_a_raw_unicode_error() -> No
 
 
 @pytest.mark.parametrize("bad_conf", [math.nan, 1.5, -0.1])
-def test_invalid_confidence_becomes_none_not_clamped(bad_conf: float) -> None:
+def test_invalid_confidence_raises_typed_error_not_clamped_or_silenced(bad_conf: float) -> None:
     raw = {
         "status": "SUCCEEDED",
         "pages": [{"fields": {"total": {"value": "100.00", "confidence": bad_conf}}}],
     }
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "invalid_confidence"
+
+
+def test_non_numeric_confidence_raises_typed_error() -> None:
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [{"fields": {"total": {"value": "100.00", "confidence": "high"}}}],
+    }
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "invalid_confidence"
+
+
+def test_bool_confidence_raises_typed_error() -> None:
+    # bool is a subclass of int in Python; must not silently pass as 0/1.
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [{"fields": {"total": {"value": "100.00", "confidence": True}}}],
+    }
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "invalid_confidence"
+
+
+def test_missing_confidence_key_entirely_is_still_none_not_an_error() -> None:
+    # Three-state contract preserved: ABSENT is "not provided", distinct
+    # from a present-but-invalid value, which now raises.
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [{"fields": {"total": {"value": "100.00"}}}],
+    }
     out = normalize(raw, success_statuses={"SUCCEEDED"})
     assert out["fields"]["total"]["confidence"] is None
+
+
+def test_explicit_null_confidence_is_none_not_an_error() -> None:
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [{"fields": {"total": {"value": "100.00", "confidence": None}}}],
+    }
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert out["fields"]["total"]["confidence"] is None
+
+
+# ---- confidenceScore: the real 0-100 scale (ADR-0002 A11) -------------
+
+
+def test_confidence_score_key_is_converted_from_0_100_to_0_1_scale() -> None:
+    raw = {
+        "status": "SUCCEEDED",
+        "fields": {"total": {"value": "87.48", "confidenceScore": 99.0, "geometry": None}},
+    }
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert out["fields"]["total"]["confidence"] == pytest.approx(0.99)
+
+
+@pytest.mark.parametrize("boundary,expected", [(0.0, 0.0), (100.0, 1.0)])
+def test_confidence_score_boundary_values_are_accepted(
+    boundary: float, expected: float
+) -> None:
+    raw = {
+        "status": "SUCCEEDED",
+        "fields": {"total": {"value": "87.48", "confidenceScore": boundary}},
+    }
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert out["fields"]["total"]["confidence"] == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("bad_score", [100.1, -0.1, math.nan, "high", True])
+def test_confidence_score_out_of_range_or_non_numeric_raises_typed_error(
+    bad_score: object,
+) -> None:
+    raw = {
+        "status": "SUCCEEDED",
+        "fields": {"total": {"value": "87.48", "confidenceScore": bad_score}},
+    }
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "invalid_confidence"
+
+
+def test_confidence_score_huge_int_raises_typed_error_not_overflow_error() -> None:
+    raw = {
+        "status": "SUCCEEDED",
+        "fields": {"total": {"value": "87.48", "confidenceScore": 10**400}},
+    }
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "invalid_confidence"
 
 
 def test_valid_confidence_is_preserved() -> None:
@@ -498,3 +598,73 @@ def test_value_only_cell_shape_raises_typed_error() -> None:
     raw = {"status": "SUCCEEDED", "pages": [{"fields": {"total": "1150.00"}}]}
     with pytest.raises(MalformedIDPOutputError):
         normalize(raw, success_statuses={"SUCCEEDED"})
+
+
+# ---- envelope selection: pages[] vs top-level fields/tables (REG-11 D1) --
+
+
+def test_top_level_fields_and_tables_are_parsed_without_a_pages_key() -> None:
+    # The real wire shape: no 'pages' key at all.
+    raw = {
+        "status": "SUCCEEDED",
+        "fields": {"total": {"value": "87.48", "confidenceScore": 99.0}},
+        "tables": {"line_items": [{"sku": {"value": "A-100", "confidenceScore": 99.0}}]},
+    }
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert out["fields"]["total"]["value"] == "87.48"
+    assert out["tables"]["line_items"][0]["sku"]["value"] == "A-100"
+
+
+def test_top_level_fields_only_with_no_tables_key_is_parsed() -> None:
+    raw = {"status": "SUCCEEDED", "fields": {"total": {"value": "87.48"}}}
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert out["fields"]["total"]["value"] == "87.48"
+    assert out["tables"] == {}
+
+
+def test_top_level_tables_only_with_no_fields_key_is_parsed() -> None:
+    raw = {"status": "SUCCEEDED", "tables": {"line_items": [{"sku": {"value": "A-100"}}]}}
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert out["fields"] == {}
+    assert out["tables"]["line_items"][0]["sku"]["value"] == "A-100"
+
+
+def test_a_response_with_a_pages_key_ignores_any_top_level_fields_or_tables() -> None:
+    # 'pages' present wins over any (unexpected) top-level container —
+    # documented precedence, not exercised by the live API today.
+    raw = {
+        "status": "SUCCEEDED",
+        "fields": {"decoy": {"value": "should not appear"}},
+        "pages": [{"fields": {"total": {"value": "87.48"}}}],
+    }
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert "decoy" not in out["fields"]
+    assert out["fields"]["total"]["value"] == "87.48"
+
+
+def test_response_with_neither_pages_nor_top_level_container_raises_typed_error() -> None:
+    # THE REGRESSION PIN (REG-11 D1). The pre-fix code did
+    # `raw.get("pages", [])`, defaulting a missing key to an empty list and
+    # walking zero pages WITHOUT RAISING — returning a confident, empty
+    # "success" for what should be a rejected, unrecognisable envelope.
+    # This is the single most serious defect found in this project: a
+    # silently-wrong GREEN build (CLAUDE.md ## Rigor).
+    raw = {"status": "SUCCEEDED", "documentName": "seed-001-clean.pdf", "id": "exec-1"}
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "missing_envelope"
+
+
+def test_response_with_neither_container_does_not_return_an_empty_success() -> None:
+    # Same pin, stated the other way round so it can never be "fixed" by
+    # loosening the raise back into a silent empty NormalizedOutput.
+    raw = {"status": "SUCCEEDED"}
+    try:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    except MalformedIDPOutputError:
+        pass
+    else:
+        pytest.fail(
+            "normalize() must never return an empty NormalizedOutput for an "
+            "unrecognisable envelope (REG-11) — it must raise"
+        )

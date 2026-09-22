@@ -1,5 +1,7 @@
 # Project progress log
 
+- 2026-09-22 Dengoso `/implement` fix REG-11 (normalize() fail-open on real IDP envelope + confidence scale) → produced: src/idp_regression/adapter/normalize.py, tests/adapter/test_normalize.py, tests/adapter/test_normalize_live_capture.py (new), tests/adapter/test_normalize_contract.py, docs/adr/0002-idp-adapter-and-normalize-contract.md (A11), docs/state/REGRESSIONS.md; status: pending Atchim review; why: real MuleSoft Anypoint IDP response has `fields`/`tables` at the top level (no `pages`) and `confidenceScore` on a 0-100 scale — `normalize()` silently returned an empty SUCCEEDED result for the former (D1, the fail-open regression) and silently mapped every out-of-range confidence to `None` for the latter (D2); both now raise typed errors instead of failing open. 912 passed/15 skipped (was 886/15), mypy 0 errors, ruff clean; both fixes mutation-verified (D1: 21 tests catch reverting the envelope raise; D2: 6 tests catch reverting the confidence raise).
+
 The squad's persistent context. Every command reads this at start and appends ONE concise line at end.
 Format: `- {YYYY-MM-DD} {command} {subject} → produced: {paths}; status: {next}; why: {reason — required for decisions & bounce-backs, pointing to the artifact (ADR-N / QA-N / TRIAGE-date)}`
 This is the source of truth for **where** we are, **how** we got here (the sequence), and **why** (the `why:` clauses). Independent of git and of any chat session. `/standup` reconstructs the full narrative from it.

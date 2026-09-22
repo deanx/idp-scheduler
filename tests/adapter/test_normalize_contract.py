@@ -1,12 +1,15 @@
 """Contract test CT-01 (T-01.2.6).
 
 Pins the ``NormalizedOutput``/``FieldValue``/``PromptValue`` shape that
-``normalize()`` emits from a raw IDP ``pages[]`` body, against a
-**synthetic, scrubbed** fixture (S-01.6 hasn't captured a real one yet —
-re-pin this test against the real fixture when S-01.6 runs). Also asserts
-structural compatibility with what the classifier's ``classify()`` accepts
-(the classifier keeps its own local TypedDict copies — ADR-0003 purity —
-so this is the seam that would catch a silent drift between the two).
+``normalize()`` emits, against the REAL captured IDP response
+(``tests/fixtures/live/seed-001-clean.raw.json``, commit ``0c82a02``) —
+re-pointed here 2026-09-22 (REG-11 fix, ADR-0002 A11) from the synthetic
+``pages[]`` fixture the code was originally hand-authored against, which is
+exactly why 886 tests passed against a contract the live API does not
+implement. Also asserts structural compatibility with what the
+classifier's ``classify()`` accepts (the classifier keeps its own local
+TypedDict copies — ADR-0003 purity — so this is the seam that would catch a
+silent drift between the two).
 """
 
 from __future__ import annotations
@@ -25,7 +28,9 @@ from idp_regression.classifier import classify
 from idp_regression.classifier import types as classifier_types
 
 FIXTURE = json.loads(
-    (pathlib.Path(__file__).parent / "fixtures" / "raw_idp_response.json").read_text()
+    (
+        pathlib.Path(__file__).parent.parent / "fixtures" / "live" / "seed-001-clean.raw.json"
+    ).read_text()
 )
 
 
@@ -129,17 +134,27 @@ def test_a_normalized_output_is_accepted_by_classify_without_a_shape_error() -> 
     golden: classifier_types.Golden = {
         "fields": {
             "invoice_number": {"value": "INV-1001", "type": "id", "critical": True},
-            "invoice_date": {"value": "2024-03-15", "type": "date", "critical": False},
-            "total": {"value": "1250.00", "type": "number", "critical": True},
+            "invoice_date": {"value": "2024-06-28", "type": "date", "critical": False},
+            "total": {"value": "87.48", "type": "number", "critical": True},
         },
         "tables": {
             "line_items": {
-                "match_key": "description",
+                "match_key": "sku",
                 "critical": False,
-                "rows": [{"description": "Widget A", "qty": "10", "unit_price": "50.00"}],
+                "rows": [
+                    {
+                        "sku": "A-100",
+                        "description": "Printer paper, A4, 500 sheets",
+                        "quantity": "10",
+                        "unit_price": "6.50",
+                    }
+                ],
             }
         },
-        "prompts": {"What is the vendor name?": {"answer": "Acme Corp", "critical": False}},
+        # This action returns no prompts (still-unverified unknown for one
+        # that does — ADR-0002 A11), so the golden's `prompts` block is
+        # empty rather than expecting an answer that will never arrive.
+        "prompts": {},
     }
     verdicts = classify(golden, actual)
     assert verdicts["invoice_number"]["verdict"] == "match"
