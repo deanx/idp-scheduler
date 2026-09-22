@@ -67,3 +67,32 @@ The documented IDP REST API is **two endpoints only**:
 
 ### Also settled by the same page — `?valueOnly=false` is correct
 *"add the `valueOnly=false` query parameter to your GET request."* Verbatim from the docs, on the execution-results GET. This **closes Atchim's unverifiable items 1 and 2** (correct parameter name, casing, and that it belongs on the result GET) — previously unfalsifiable by the suite, now confirmed by both the vendor docs and a live response that came back in the full cell shape.
+
+---
+
+## Correction — the connected app already has the only documented scope (2026-09-22)
+
+⚠️ **This supersedes the addendum's suggestion to grant "Manage Actions" to the connected app.** That suggestion was inference from behaviour; the documentation is explicit and says otherwise.
+
+[Processing Documents and Retrieving Results With the IDP API](https://docs.mulesoft.com/idp/automate-document-processing-with-the-idp-api) and [Integrating IDP with Anypoint Studio](https://docs.mulesoft.com/idp/integrating-idp-with-anypoint-studio) both state the connected-app requirement in full, and it is **one scope**:
+
+> **Type:** "App acts on its own behalf (client credentials)"
+> **Scope:** "Execute Published Actions"
+> **Prerequisites:** *"Ensure you have the following Anypoint permissions: Execute Published Actions"* — *"Enables a user to execute a published document action and retrieve the results of the execution."*
+
+**`IS-IDP-Test-Automation` already satisfies this completely.** `client_type: control` (client credentials) and a working `POST …/executions` + result `GET` prove the scope is held. **Per the documentation, nothing is missing and nothing needs granting.**
+
+**Manage Actions and Build Actions are not connected-app scopes for the IDP API.** They appear on [IDP Permissions](https://docs.mulesoft.com/idp/permissions) as the Document Actions permission family for *users* in Access Management. No MuleSoft page lists either as a requirement for API access, and no documented API endpoint requires them — the documented API is the two execution endpoints and nothing else.
+
+### What this settles for T-01.6.6
+The 403s are **not a misconfiguration and not a missing grant**. They are an undocumented, unsupported console API correctly refusing a credential that was never intended to reach it. There is **no documented scope that would open it**, because there is no documented endpoint behind it.
+
+**T-01.6.6 question 1 is therefore answered: no supported API lists an action's versions.** ADR-0006 Decision A's "listing exists" branch is **not available on a supported surface**. Soneca must choose between:
+1. the floating-`latest` probe fallback (spends quota to detect change),
+2. **not feasible — stay with CI-on-PR** (the honest default), or
+3. depending on the console's private API, accepting that an upstream change silently breaks version detection on a tool whose purpose is to be a trusted CI gate.
+
+Granting Manage Actions to a *user* and re-probing would reveal what that private endpoint returns, but it does not make option 3 supported, and it is not a fix to the connected app.
+
+### Also relevant — business-group scope of the credential
+[IDP Security Best Practices](https://docs.mulesoft.com/idp/security-best-practices): *"Native IDP access is controlled at the Anypoint Platform Business Group level, which means any connected app within that organizational unit can invoke any document action or version."* This explains why submit succeeds against `ef1232be…` (the business group owning the action) while 404ing against the parent `e10ae12a…`, and it is a **containment fact worth carrying into HARDEN/NFR work**: the credential is not scoped to one action — it can invoke **any** action or version in that business group.
