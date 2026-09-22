@@ -275,6 +275,36 @@ def test_main_converts_an_unexpected_exception_from_run_eval_into_a_nonzero_exit
     assert exit_code != 0
 
 
+def test_main_never_logs_the_raw_message_of_an_unexpected_exception_from_run_eval(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """C-1 follow-up (Atchim gate, 2026-09-21): `sanitize_for_log` only
+    quotes/escapes (`json.dumps`) -- it does NOT redact. Routing an
+    unexpected exception's `str(exc)` through it (as this fallback used
+    to) still lets the raw message -- including anything sensitive it
+    might carry, e.g. a platform response body -- reach the log verbatim
+    aside from quoting. Now `main()`'s fallback logs only the exception's
+    type name plus its last traceback frame's location (same shape as
+    `run_eval`'s own catch-alls, R-2) -- never `str(exc)`."""
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setenv("GOLDEN_DATASET_NAME", "idp-regression-golden")
+
+    sentinel = "Bearer sk-lf-SEKRIT-should-never-be-logged"
+
+    def _boom(action_id: str, version: str, run_name: str, dataset_name: str) -> int:
+        raise RuntimeError(sentinel)
+
+    monkeypatch.setattr(cli, "run_eval", _boom)
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
+
+    assert exit_code != 0
+    assert sentinel not in caplog.text
+    assert "RuntimeError" in caplog.text
+
+
 def test_version_at_the_64_char_cap_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
     """C2 (DEBT-44 gate, fourth instance): `_VERSION_PATTERN`'s `{1,64}`
     cap (TP-31) was stated in both `cli.py`'s and this module's own

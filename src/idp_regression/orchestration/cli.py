@@ -49,12 +49,27 @@ import logging
 import os
 import re
 import sys
+import traceback
 import uuid
 from collections.abc import Sequence
 
 from idp_regression.adapter.transport import sanitize_for_log
 from idp_regression.orchestration.dotenv_support import load_dotenv
 from idp_regression.orchestration.facade import GOLDEN_DATASET_NAME_VAR, run_eval
+
+
+def _frame_location(exc: BaseException) -> str:
+    """Same shape as `facade._frame_location` (R-2, Atchim gate,
+    2026-09-21) -- duplicated rather than imported so this module never
+    reaches into `facade`'s private surface. The last traceback frame's
+    `filename:lineno:name` is pure code-location metadata (no golden
+    value, extracted value, credential, or platform response body), safe
+    under INV-02."""
+    frames = traceback.extract_tb(exc.__traceback__)
+    if not frames:
+        return "<no traceback>"
+    frame = frames[-1]
+    return f"{frame.filename}:{frame.lineno}:{frame.name}"
 
 logger = logging.getLogger(__name__)
 
@@ -165,9 +180,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         # via Python's own default, but only by coincidence, and would
         # print a raw traceback that could echo exception-args content
         # this codebase is otherwise careful never to log (INV-02).
-        # `sanitize_for_log` closes that gap; the exit code is a plain
-        # non-zero, not a distinguishing value.
-        logger.error("run_eval: unexpected error: %s", sanitize_for_log(str(exc)))
+        # ⚠️ Corrected 2026-09-21 (C-1 follow-up, Atchim gate): this used
+        # to route `str(exc)` through `sanitize_for_log`, which only
+        # quotes/escapes (`json.dumps`) -- it does NOT redact, so a
+        # platform/IDP error body embedded in `str(exc)` would still
+        # reach the log verbatim aside from quoting. Now logs only
+        # `type(exc).__name__` plus its last traceback frame's location
+        # (R-2 shape, matching `run_eval`'s own catch-alls) -- the exit
+        # code is a plain non-zero, not a distinguishing value, so no
+        # detail is lost by this.
+        logger.error(
+            "run_eval: unexpected error: %s at %s",
+            type(exc).__name__,
+            _frame_location(exc),
+        )
         return 1
 
 
