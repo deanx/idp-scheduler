@@ -231,7 +231,17 @@ def _mark_run_status_best_effort(
 
     `golden_dataset_name` (A6 / DEBT-48): the fourth INV-04 field,
     carried alongside the other three so the marker also answers "which
-    named golden set was this run measured against"."""
+    named golden set was this run measured against".
+
+    ⚠️ Widened 2026-09-21 (Atchim gate, GAP-5's fifth site,
+    live-reproduced): this guarded only `except Exception`, unlike every
+    other catch-all in this module (all widened for GAP-5 to also catch
+    `asyncio.CancelledError`, a `BaseException` subclass). The tail
+    `status="complete"` call site (after a fully successful run) sits
+    OUTSIDE every try-block in `run_eval`, so a `CancelledError` raised
+    here on that call escaped `run_eval` raw. Now matches every other
+    catch-all's shape: `KeyboardInterrupt`/`SystemExit` still propagate,
+    everything else is swallowed best-effort."""
     try:
         platform.mark_run_status(
             run_id,
@@ -241,7 +251,7 @@ def _mark_run_status_best_effort(
             golden_version=golden_version,
             golden_dataset_name=golden_dataset_name,
         )
-    except Exception:  # noqa: BLE001 - best-effort by design, must never raise
+    except (Exception, asyncio.CancelledError):  # noqa: BLE001 - best-effort by design, must never raise
         logger.warning(
             "run_eval: mark_run_status(%s) failed (best-effort, not retried)",
             sanitize_for_log(status),

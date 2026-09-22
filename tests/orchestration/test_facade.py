@@ -1655,6 +1655,41 @@ def test_run_eval_still_propagates_keyboard_interrupt(
         run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden")
 
 
+def test_run_eval_never_escapes_on_a_cancelled_error_from_the_tail_complete_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Atchim gate finding (2026-09-21, live-reproduced): GAP-5's fifth
+    site. `_mark_run_status_best_effort` only guarded `except Exception`
+    -- unlike every OTHER catch-all in this module (all widened to
+    `(Exception, asyncio.CancelledError)` for GAP-5) -- and its tail
+    `status="complete"` call sits OUTSIDE every try-block in `run_eval`,
+    after a fully successful run. A `CancelledError` raised by the
+    platform on that final best-effort marker write therefore escaped
+    `run_eval` raw, unlike an identical error at any earlier site (all of
+    which are covered above)."""
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+
+    import asyncio
+
+    platform = _RecordingPlatform(
+        _well_formed_dataset(), mark_run_status_error=asyncio.CancelledError()
+    )
+    monkeypatch.setattr(facade, "make_platform", lambda: platform)
+    _stub_make_idp_adapter_success(monkeypatch)
+
+    with caplog.at_level(logging.INFO):
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
+
+    assert exit_code == 0  # the run itself passed; the tail marker is best-effort only
+    assert "run_end" in caplog.text
+    assert [c["status"] for c in platform.mark_run_status_calls] == ["complete"]
+
+
 # --- GAP-6 (Branca /harden, 2026-09-21): the widened
 # `except (RuntimeError, IDPConfigurationError, ValueError,
 # PlatformConfigurationError)` clause logs `sanitize_for_log(str(exc))` --
