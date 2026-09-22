@@ -142,3 +142,66 @@ Versioning strategy: the exit-code contract is immutable — `0`/non-zero semant
 **Medium-High.** The containment contract (abort, not continue) is the CI gate's honesty — reversing it to "continue" would silently break the gate's meaning. The exit-code contract is effectively immutable (consumers in CI depend on it). Individual guardrails (timeout value, retry budget) are config and reversible; the *policy* (abort on hard failure, fail-closed on auth, empty-set guard) is not.
 
 Atchim review: APPROVED (top-level gate, 2026-09-18 — opus; reviewer-independent, all five axes PASS). Non-blocking debt (item #14 semantics clarification): on the platform-write-failure path, the `run_status=aborted` marker write is **best-effort** — if writing the marker itself fails, the orchestrator still exits non-zero (the exit code is the CI gate's truth regardless of whether the platform marker landed); do not retry the marker write past one attempt. Other deferred items: SEQ-UC-01 diagram drift (stale `get_golden_version` — Soneca) and `write_scores` idempotency-key support deferred to SPIKE-01.
+---
+
+## Amendment 2026-09-21 (T-01.4.12) — S-01.4 as built
+
+Additive. Nothing above is rewritten; where this section and an earlier one disagree, **this section wins for anything dated on or after 2026-09-21**. Written by Soneca against the code that landed on `feat/S-01.2-idp-adapter` (780 tests green), not against intent.
+
+### A1. Pinned pre-run order (supersedes Flow §3–§4's looser wording)
+
+The pre-run chain is an **ordered** chain, not a set of independent guards. As built (`orchestration/prerun.py`, wired in `facade.py`):
+
+1. `platform.get_dataset(dataset_name)` → any network/404/auth failure aborts `dataset_fetch_failed`.
+2. **`schema_drift`** — the dataset's `expectedOutputSchema` hash vs. the committed schema hash (ADR-0005 Decision #8).
+3. **`empty_set`** — `items == []` (A4).
+4. **`malformed_golden`** (N28) — structural validation over the whole set, via the `is`-identical alias of the classifier's own `_validate_golden` (ADR-0005 #8: no second `jsonschema` dialect).
+5. `golden_version = hash_dataset(dataset["items"])` (same object, single fetch — the TOCTOU guard of Flow §4) and `run_id` / `experiment_name`.
+6. **Only then** the first IDP call.
+
+The order is load-bearing and is part of the contract, not an implementation detail: **when two guards would both fire, the earlier one is the reported reason.** Pinned at the `run_eval` seam by `test_run_eval_reports_schema_drift_not_empty_set_when_both_would_fire` — an isolated per-guard test does not pin an order. Rationale: drift is a statement about the *set's schema*, emptiness and malformation are statements about its *contents*; diagnosing a drifted schema as "empty set" sends the reader to the wrong place. Cost of a wrong order is a misleading abort reason, never a false green.
+
+### A2. Abort taxonomy as built — 10 reasons
+
+`AbortReason` (`orchestration/errors.py`) is the single authority; the list in §Containment's "Abort-reason taxonomy (NFR N10)" was 6 and is superseded by these 10:
+
+`dataset_fetch_failed` · `schema_drift` · `empty_set` · `malformed_golden` · `auth_failure` · `unknown_status_timeout` · `hard_failure` · `malformed_actual` · `flush_failed` · **`path_containment_violation`**.
+
+`path_containment_violation` (new 2026-09-21) fires when a `document_id` — **golden-set content, writable by a Curator or anyone with platform write access, therefore an untrusted string** — resolves outside `IDP_DOCUMENT_DIR`: an absolute path, a `..` traversal, or a symlink escape (realpath containment). Raised **before** the IDP call for that document, so the adapter never sees the escaped path. N28 validates JSON shape only; it never said anything about filesystem safety. Only the `document_id` is logged (via `sanitize_for_log`), never the candidate or resolved path.
+
+**The exit-code namespace does not fragment.** All 10 map to a plain non-zero (CT-04: `0` iff every gate PASS and no run error). New reasons are added to the taxonomy, never to the exit-code space — the versioning rule of §API contract is unchanged and remains immutable. The CLI's former reserved exit code `3` (`NotImplementedError`) is **retired**; a catch-all now maps any escaping exception to a sanitized non-zero `1`.
+
+### A3. #12/#13 retry ownership — corrected
+
+Per ADR-0005 Decision #9 and the QA-01-S-01.3 F-2 ruling:
+
+- **#12 (score-write retry) is adapter-private.** The retry, its idempotency key and its deadline live entirely inside the platform adapter. The orchestrator does not see attempts; it sees one raise or none.
+- **#13's bounded `flush()` retry is dropped**, as already stated in the 2026-09-19 blockquote. `FlushFailedError` → abort `flush_failed`, no retry.
+- **The orchestrator never retries `record_run`.** One call, one outcome: `FlushFailedError` → `flush_failed`; `ExperimentRecordFailedError` / `ScoreWriteFailedError` (or any other platform error) → `hard_failure`. Re-reading #11/#12/#13 as "the orchestrator retries" is the misreading this amendment exists to kill — a second `record_run` from the orchestrator would duplicate an experiment, and the honest signal is a failed run, not a re-sent one.
+
+### A4. The `run_status=aborted` marker rule
+
+Best-effort, **one attempt**, never retried, and **only once a run exists** — i.e. only after step 5 of A1 has generated `run_id`. **A pre-run abort writes no marker at all** (there is no run to mark, and inventing one would put a phantom aborted run on the platform). If the marker write itself fails, the run still exits non-zero — the exit code is the CI gate's truth regardless of whether the marker landed (this promotes the 2026-09-18 Atchim non-blocking note to the contract). Pinned by `test_run_eval_writes_no_marker_on_a_pre_run_abort` (mutation-verified). `mark_run_status("complete", ...)` on the success path obeys the same best-effort/one-attempt rule.
+
+### A5. NFR-01 N10/N26 wording aligned to the telemetry actually emitted
+
+N10's row is restated to match what fires (`facade.py`, T-01.4.8) rather than what was imagined in 2026-09-17:
+
+- **run-start** — one line after the pre-run chain passes: `run`, `experiment`, `action`, `version`, `golden_version`, **`items=<count>`**.
+- **run-end** — one line at **every** exit point, including every pre-run abort: `outcome` (`success` / `gate_failed` / `aborted`), `exit_code`, `pass_count`, `fail_count`, `elapsed_seconds` (monotonic).
+- **per-document** — `document_id`, `gate`, `elapsed_seconds` on **the same line**; a timing line untethered from the document it describes is not acceptable telemetry.
+- **abort** — `reason` (one of A2's 10), `document_id` (or `<none>` for run-level aborts), sanitized `detail`.
+
+"Per-document start/end" in the original N10 row is satisfied by the single per-document completion line carrying elapsed; two lines are not required, and the run-start item count plus run-end counts give the reader the set-level picture. N26 (concurrency / run-name idempotency) is restated: uniqueness is carried by the per-invocation `run_id` and the composed `experiment_name` — **not** by the caller's `--run` name, which may legitimately repeat. Score ids are `uuid5(NAMESPACE, run_id|document_id|score_name)`, so a repeated `--run` cannot overwrite a previous run's scores.
+
+### A6. `GOLDEN_DATASET_NAME` — the golden-set pointer (DEBT-48)
+
+Escalated by the Atchim gate: the implementation introduced the single pointer to the golden set with no ADR behind it. Fail-closed plus a docstring was enough to merge and is not enough to stand, because **a pointer that silently forks between CI and local produces a green run against the wrong dataset** — the worst failure this product can produce, and one no test in this repo can detect.
+
+**Decision.**
+1. **Env var name `GOLDEN_DATASET_NAME`** is kept (unprefixed and platform-neutral: the golden set is a domain concept, not a Langfuse one — N24).
+2. **No default, ever — not in code, not in `.env.example` as a live value.** Missing or empty → clear message naming the variable, non-zero exit, **zero network calls** (N6 shape). A default is precisely the mechanism by which CI and local fork silently.
+3. **The CLI accepts it explicitly: `--dataset <name>`**, with the same precedence shape as `--action`/`IDP_ACTION_ID` — flag wins, env is the fallback, neither set is a pre-network non-zero exit. CI pipelines **must** pass `--dataset` explicitly on the command line next to `--version`, so the pointer is visible in the PR diff that changes it rather than buried in a runner's environment. Local convenience keeps the env fallback.
+4. **Every run records which dataset it used.** `RunMetadata` gains a fourth field, `golden_dataset_name`, carried on `record_run` and on `mark_run_status` alongside `action_id` / `action_version` / `golden_version`; the run-start log line carries it too. **INV-04 is widened from three fields to four**: no zero-exit run exists without action id, action version, golden version *and* golden dataset name. `golden_version` is a content hash — it proves *what* was compared and cannot tell a reader *which* named set it came from. After the fact, a reader must be able to answer "which golden set was this green build measured against?" from the run itself.
+
+**Consequence for S-01.4's DoD.** This is a scope addition, honestly labelled: `--dataset` on the CLI, the `RunMetadata` fourth field through `record_run` / `mark_run_status` / the adapter, the run-start log line, `.env.example` and the CI invocation. INV-04's check and CT-03's metadata assertion both widen to four fields, so **the existing INV-04/CT-03 tests must be updated, not merely added to** — S-01.4 cannot be Done on a three-field `RunMetadata`. Carded from DEBT-48; if it does not fit this story, it is a blocking follow-up, not a silent deferral, and until it lands the gate's provenance claim is weaker than this ADR states.

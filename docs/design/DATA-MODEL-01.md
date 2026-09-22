@@ -135,7 +135,7 @@ The platform persists, per named run:
 
 - One **`field:<name>`** score per field per document (value = verdict string; comment carries **no values**: no expected, actual or confidence. It is `None` or value-free metadata only, per DEBT-18 option B, user decision 2026-09-19). These keys are the **stable contract** the remediation UI reads (BR11, INV-03).
 - One **`gate`** score per document (value = `PASS` | `FAIL`).
-- Run **metadata**: `action_id` (the IDP action exercised), `action_version` (the regression variable, BR1) and `golden_version` (app-tracked for Langfuse, ADR-0001 — resolves ASM-03, INV-04).
+- Run **metadata**: `action_id` (the IDP action exercised), `action_version` (the regression variable, BR1), `golden_version` (app-tracked for Langfuse, ADR-0001 — resolves ASM-03, INV-04) and, from 2026-09-21, **`golden_dataset_name`** (which named golden set the run was measured against — ADR-0004 Amendment A6, §5 note).
 
 > **ADR-0005 follow-up (2026-09-19, Atchim APPROVE WITH NOTES):** platform stays Langfuse (ADR-0005 supersedes ADR-0001). Score writes carry a deterministic client `id` = `uuid5(NAMESPACE, run_id|document_id|score_name)`, where `NAMESPACE` is a committed, pinned UUID constant (`run_id` unique per invocation → retry-safe, no cross-run overwrite, N26). Langfuse v4 `events_only`: traces/run linkage via OTLP/v4 SDK, scores via `/api/public/scores`, reads via `/v3/scores`. `golden_version` stays the app-tracked content hash. Prompt-derived score names use a charset-safe derived id `prompt:<16-hex sha256 of the prompt key>`, never the raw prompt (ADR-0002 amendment, INV-03). At run start the dataset's `expectedOutputSchema` hash must equal the committed schema's hash or the run aborts `schema_drift` (ADR-0005 Decision #8). To be folded in after S-01.3 confirms (ADR-0005 F3/F5).
 >
@@ -158,8 +158,12 @@ Mapping (from `requirements-spec.md`):
 | `IDP_EXECUTION_TIMEOUT_SECONDS` | Per-document poll timeout | env |
 | `PLATFORM` | `langfuse` (chosen, ADR-0001) | env |
 | `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_HOST` | Platform auth | secret |
+| `GOLDEN_DATASET_NAME` | **The single pointer to the golden set** — the dataset `get_dataset` fetches and `record_run` writes the experiment under. Fallback only: the CLI's `--dataset` wins (ADR-0004 Amendment A6, DEBT-48). **No default, ever**; missing/empty → clear message naming the variable, non-zero exit, zero network calls (N6). | env, no default |
+| `IDP_DOCUMENT_DIR` | Local dir holding the documents under test; `document_id` is resolved under it with realpath containment (abort `path_containment_violation` on escape — ADR-0004 Amendment A2) | env, no default |
 
 No credential is ever logged (BR6, INV-02). `load_dotenv()` is the first line of any script before any SDK client is constructed.
+
+> **Golden-set pointer note (2026-09-21, ADR-0004 Amendment A6 / DEBT-48).** `GOLDEN_DATASET_NAME` is config, not a secret, but it is the **highest-consequence config value in the system**: a pointer that silently forks between CI and local produces a *green run against the wrong dataset*, the worst failure this product can produce and one no test here can detect. Hence three rules: (1) no default anywhere, fail-closed before any network call; (2) CI must pass it explicitly as `--dataset` so a change to it is visible in the PR diff, never only in a runner's environment; (3) **every run records which dataset it used** — `RunMetadata` carries a fourth field `golden_dataset_name` alongside `action_id`/`action_version`/`golden_version` (§4), on both `record_run` and `mark_run_status`, and the run-start log line repeats it. `golden_version` is a content hash: it proves *what* was compared, never *which named set* it came from. **INV-04 widens from three fields to four.**
 
 ## Notes
 
