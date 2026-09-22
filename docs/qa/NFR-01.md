@@ -1,7 +1,7 @@
 # NFR-01 — Non-functional requirements checklist — UC-01 baseline regression
 
 **Use case:** UC-01 (Run a baseline regression over a golden set)
-**Rigor profile:** standard (mechanical floor always applies; assumptions gate ON)
+**Rigor profile:** **prototype** (mechanical floor always applies; assumptions gate ON) — ~~standard~~ *corrected 2026-09-22 (Dunga, DEBT-54 register lag). `CLAUDE.md ## Rigor` was changed `standard` → `prototype` by user decision on **2026-09-21**; this line lagged it by a day. **Read the correction narrowly:** the mechanical floor still binds, `Risk: high` on the SPEC header still requires a `/test` stamp (the rigor gate reads the SPEC, not this line), and NFR-01's own `Containment: REQUIRED` / `Observability: REQUIRED` markers are per-UC and are **not** waived by the profile. `CLAUDE.md` also records that the profile is to be re-raised to `standard` before this tool gates another team's prompt changes — see DEBT-55 (prose) for the matrix that is still missing and for the 2026-09-22 evidence.*
 **Date:** 2026-09-17
 **Architect:** Soneca
 
