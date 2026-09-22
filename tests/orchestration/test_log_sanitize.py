@@ -68,13 +68,14 @@ def test_frame_location_never_returns_an_absolute_path() -> None:
     except RuntimeError as exc:
         location = frame_location(exc)
 
-    filename = location.rsplit(":", 2)[0]
+    inner = json.loads(location)
+    filename = inner.rsplit(":", 2)[0]
     assert not os.path.isabs(filename)
     # `not os.path.isabs(...)` alone passes on a `..`-traversal leak
     # (e.g. `../../../Users/alex/...`) -- pin the stronger property too.
     assert os.pardir not in filename.split(os.sep)
     assert os.path.expanduser("~") not in location
-    assert location.endswith(":RuntimeError") is False  # sanity: has a real frame name
+    assert inner.endswith(":RuntimeError") is False  # sanity: has a real frame name
 
 
 def test_frame_location_for_an_external_frame_never_traverses_up_to_the_home_dir() -> None:
@@ -92,10 +93,11 @@ def test_frame_location_for_an_external_frame_never_traverses_up_to_the_home_dir
     except json.JSONDecodeError as exc:
         location = frame_location(exc)
 
-    assert ".." not in location.split(":")[0].split(os.sep)
+    inner = json.loads(location)
+    assert ".." not in inner.split(":")[0].split(os.sep)
     assert os.path.expanduser("~") not in location
-    assert not os.path.isabs(location.split(":")[0])
-    assert location.startswith("<external>" + os.sep)
+    assert not os.path.isabs(inner.split(":")[0])
+    assert inner.startswith("<external>" + os.sep)
 
 
 def test_frame_location_returns_no_traceback_placeholder_when_traceback_is_none() -> None:
@@ -127,9 +129,10 @@ def test_frame_location_for_a_non_absolute_filename_never_joins_the_cwd() -> Non
     except RuntimeError as exc:
         location = frame_location(exc)
 
-    assert location.startswith("<external>/<string>:")
+    inner = json.loads(location)
+    assert inner.startswith("<external>/<string>:")
     assert os.getcwd() not in location
-    assert not os.path.isabs(location.split(":")[0])
+    assert not os.path.isabs(inner.split(":")[0])
 
 
 def test_frame_location_never_raises_when_the_cwd_no_longer_exists(
@@ -151,7 +154,7 @@ def test_frame_location_never_raises_when_the_cwd_no_longer_exists(
     except RuntimeError as exc:
         location = frame_location(exc)  # must not raise
 
-    assert location.startswith("<external>/<string>:")
+    assert json.loads(location).startswith("<external>/<string>:")
 
 
 def test_frame_location_is_total_against_an_arbitrary_relpath_failure(
@@ -185,5 +188,32 @@ def test_frame_location_is_package_relative_for_a_facade_frame() -> None:
     except Exception as exc:  # noqa: BLE001 - deliberately triggering _PathContainmentViolation
         location = frame_location(exc)
 
-    assert location.startswith("idp_regression" + os.sep)
+    inner = json.loads(location)
+    assert inner.startswith("idp_regression" + os.sep)
     assert "/Users/" not in location
+
+
+# --- HARDEN-01 §10.6 (A-6, DEBT-58): `frame_location`'s return was the
+# one orchestration log value not routed through `sanitize_for_log` --
+# Branca reproduced a forged second physical log line
+# (`run_eval: run_end outcome=success exit_code=0`) from a newline
+# embedded in a frame filename.
+
+
+def test_frame_location_escapes_a_newline_so_it_cannot_forge_a_second_log_line() -> None:
+    forged_line = "run_eval: run_end outcome=success exit_code=0"
+    filename = f'/tmp/a\n{forged_line}"'
+    code = compile("raise RuntimeError('boom')", filename, "exec")
+
+    try:
+        exec(code, {})  # noqa: S102 - deliberate synthetic frame with a hostile filename
+    except RuntimeError as exc:
+        location = frame_location(exc)
+
+    # The forged physical line must never appear as its own line: no raw
+    # newline may survive in the rendered value.
+    assert "\n" not in location
+    # It must be genuinely escaped (the same `json.dumps`-style quoting
+    # used everywhere else in this module), not silently dropped.
+    assert "\\n" in location
+    assert forged_line not in location.splitlines()

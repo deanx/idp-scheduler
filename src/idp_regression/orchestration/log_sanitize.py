@@ -82,7 +82,20 @@ def frame_location(exc: BaseException) -> str:
     function is TOTAL -- no traceback, no filename shape and no
     unanticipated `relpath` failure may ever raise out of it; the
     fallback is `<unavailable>`, never a crash inside a catch-all whose
-    entire job is to make an unanticipated failure safe to log."""
+    entire job is to make an unanticipated failure safe to log.
+
+    ⚠️ Fixed a fourth time 2026-09-21 (Branca `/harden` §10.6, A-6,
+    DEBT-58): this was the one orchestration log value interpolated raw
+    (`%s`), never through `sanitize_for_log` like every other
+    untrusted-shaped value at a log boundary in this codebase. A
+    newline embedded in a frame filename split a log line and forged a
+    fake `run_end outcome=success` line on a run that actually exited
+    1. The computed `filename:lineno:name` string is now returned
+    through `sanitize_for_log` (the same `json.dumps`-style
+    quoting/escaping), so an embedded newline (or quote) can never
+    produce a second physical line. The static fallback literals
+    (`<no traceback>`, `<unavailable>`) carry no untrusted data and are
+    returned as-is."""
     frames = traceback.extract_tb(exc.__traceback__)
     if not frames:
         return "<no traceback>"
@@ -98,6 +111,6 @@ def frame_location(exc: BaseException) -> str:
             else:
                 if filename.split(os.sep, 1)[0] == os.pardir:
                     filename = f"<external>/{os.path.basename(frame.filename)}"
-        return f"{filename}:{frame.lineno}:{frame.name}"
+        return sanitize_for_log(f"{filename}:{frame.lineno}:{frame.name}")
     except Exception:  # noqa: BLE001 - this IS the catch-all's own safety net; must never raise
         return "<unavailable>"
