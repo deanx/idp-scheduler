@@ -572,6 +572,54 @@ def test_poll_401_and_403_both_raise_auth_error(
         adapter.extract(str(doc), "action-1", "v1")
 
 
+@pytest.mark.parametrize("http_status", [401, 403])
+def test_poll_401_or_403_refresh_then_retry_succeeds_and_invalidates_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, http_status: int
+) -> None:
+    """Coverage audit gap 1 (2026-09-21, DEBT-21 / ADR-0004 #7): only the
+    401/403 -> error path was ever pinned for `_poll_get_with_auth_retry`
+    -- the auditor deleted the entire refresh-and-retry block and 467
+    tests still passed. This pins the SUCCESS branch: a mid-poll 401/403
+    triggers exactly one `TokenCache.invalidate()`, one token refresh,
+    the SAME GET retried, and the run continues to completion on the
+    retried response. Confirmed RED against the block-deleted code."""
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    token_fetch_calls: list[int] = []
+
+    def counting_post_json(
+        *args: object, **kwargs: object
+    ) -> tuple[int, dict[str, Any]]:
+        token_fetch_calls.append(1)
+        return 200, {"access_token": f"tok-{len(token_fetch_calls)}", "expires_in": 300}
+
+    adapter = _adapter(
+        monkeypatch,
+        poll_results=[
+            (http_status, {"error": "expired"}),
+            (200, {"status": "SUCCEEDED", "pages": []}),
+        ],
+        clock=_clock_from([0.0, 0.0, 0.5, 1.0, 1.5, 2.0]),
+    )
+    monkeypatch.setattr(transport, "post_json", counting_post_json)
+
+    invalidate_calls: list[int] = []
+    original_invalidate = adapter._token_cache.invalidate
+
+    def counting_invalidate() -> None:
+        invalidate_calls.append(1)
+        original_invalidate()
+
+    monkeypatch.setattr(adapter._token_cache, "invalidate", counting_invalidate)
+
+    out = adapter.extract(str(doc), "action-1", "v1")
+
+    assert out["status"] == "SUCCEEDED"
+    assert len(invalidate_calls) == 1
+    # One fetch for the initial token, one refresh triggered by the 401/403.
+    assert len(token_fetch_calls) == 2
+
+
 @pytest.mark.parametrize("http_status", [404, 400])
 def test_poll_non_429_4xx_raises_hard_failure_immediately_not_polled(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, http_status: int
