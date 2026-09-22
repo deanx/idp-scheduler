@@ -117,15 +117,37 @@ def record_experiment(
     otlp_logger.addHandler(otlp_watcher)
     langfuse_logger.addHandler(langfuse_watcher)
     try:
-        result = tracing_client.run_experiment(
-            name=run_name,
-            run_name=run_name,
-            data=items,
-            task=task,
-            max_concurrency=1,
-            metadata=metadata,
-        )
-        tracing_client.flush()
+        try:
+            result = tracing_client.run_experiment(
+                name=run_name,
+                run_name=run_name,
+                data=items,
+                task=task,
+                max_concurrency=1,
+                metadata=metadata,
+            )
+        except Exception as exc:
+            # HARDEN-01 GAP-2 (2026-09-21): `run_experiment` was called
+            # with no `except Exception` at all -- any exception the SDK
+            # raises (transport, auth) propagated untyped straight out of
+            # `record_run` and `run_eval`, the reachable production
+            # trigger for GAP-1 (an untyped escape `run_eval`'s own
+            # contract says is impossible). `str(exc)` is not
+            # interpolated (INV-02: SDK exception text may carry
+            # transport/auth response content this codebase never logs).
+            raise ExperimentRecordFailedError(
+                f"record_experiment: run_experiment raised {type(exc).__name__}"
+            ) from None
+        try:
+            tracing_client.flush()
+        except Exception as exc:
+            # Same GAP-2 finding, the flush() call -- mapped to
+            # FlushFailedError specifically (not ExperimentRecordFailedError)
+            # so a raised flush failure is indistinguishable, at the
+            # caller, from a LOGGED one (`otlp_watcher.failed` below).
+            raise FlushFailedError(
+                f"record_experiment: flush() raised {type(exc).__name__}"
+            ) from None
     finally:
         otlp_logger.removeHandler(otlp_watcher)
         langfuse_logger.removeHandler(langfuse_watcher)
@@ -141,7 +163,16 @@ def record_experiment(
             "(see the langfuse logger's own ERROR log for detail)"
         )
 
-    item_results = list(result.item_results)
+    try:
+        item_results = list(result.item_results)
+    except AttributeError as exc:
+        # GAP-2: a version bump that renames/removes `item_results` (the
+        # exact class of drift CLAUDE.md's SDK-internals warning names)
+        # must not leak a raw AttributeError either.
+        raise ExperimentRecordFailedError(
+            f"record_experiment: the tracing client's result has no {exc.name!r} attribute "
+            "(SDK return shape drift?)"
+        ) from None
     if len(item_results) != len(items):
         raise ExperimentRecordFailedError(
             f"record_experiment structural check failed: expected {len(items)} "
