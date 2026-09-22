@@ -21,6 +21,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -1036,6 +1037,27 @@ def test_resolve_document_path_rejects_a_symlink_escaping_the_root(
 
     with pytest.raises(facade._PathContainmentViolation):
         facade._resolve_document_path(str(root), "escape.json")
+
+
+def test_resolve_document_path_rejects_a_nul_byte(tmp_path: Path) -> None:
+    """R-1: `os.path.realpath` raises a raw `ValueError` on an embedded
+    NUL -- must surface as `_PathContainmentViolation`, not escape."""
+    root = tmp_path / "documents"
+    root.mkdir()
+    with pytest.raises(facade._PathContainmentViolation):
+        facade._resolve_document_path(str(root), "a\x00.pdf")
+
+
+def test_resolve_document_path_rejects_empty_string() -> None:
+    with pytest.raises(facade._PathContainmentViolation):
+        facade._resolve_document_path("/documents", "")
+
+
+def test_resolve_document_path_rejects_non_str() -> None:
+    """R-1: a non-`str` `document_id` (e.g. `5`) raises a raw `TypeError`
+    from `os.path.isabs` -- must surface as `_PathContainmentViolation`."""
+    with pytest.raises(facade._PathContainmentViolation):
+        facade._resolve_document_path("/documents", cast(str, 5))
 
 
 def test_resolve_document_path_happy_path_still_resolves(tmp_path: Path) -> None:

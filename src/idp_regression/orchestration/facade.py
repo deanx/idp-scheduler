@@ -125,10 +125,17 @@ def _resolve_document_path(document_dir: str, document_id: str) -> str:
 
     **Containment (security fix, 2026-09-21)**: `document_id` is platform
     (golden-set) content -- data a Curator or anyone with platform write
-    access controls -- already pre-run-validated as a non-empty string by
-    `validate_golden_set` (N28), but that check is about JSON shape, not
-    filesystem safety. Both the configured root and the candidate are
-    resolved to real absolute paths (`os.path.realpath` -- this also
+    access controls. ⚠️ Corrected 2026-09-21 (R-1 gate finding): this
+    docstring used to claim `document_id` was "already pre-run-validated
+    as a non-empty string by `validate_golden_set` (N28)" -- that was
+    false. `validate_golden_set` (`prerun.py`) validates `item["golden"]`
+    only; it never inspects `document_id`, so a non-`str`, empty, or
+    NUL-containing `document_id` reached here unvalidated and escaped as
+    a raw `TypeError`/`ValueError` (2026-09-21 live repro). This
+    function's FIRST statement below now rejects exactly those three
+    shapes itself, as `_PathContainmentViolation`, before any `os.path`
+    call. Both the configured root and the candidate are then resolved
+    to real absolute paths (`os.path.realpath` -- this also
     resolves a symlink to its real target, so a symlink planted *inside*
     `document_dir` that points *outside* it is caught, not just a literal
     `..` in `document_id`), and the candidate must land strictly inside
@@ -146,6 +153,17 @@ def _resolve_document_path(document_dir: str, document_id: str) -> str:
     exit-code contract stays intact) and logs the `document_id` only via
     `sanitize_for_log`, never the resolved/candidate path.
     """
+    if not isinstance(document_id, str) or not document_id or "\x00" in document_id:
+        # R-1: reject non-`str`, empty, and NUL-containing `document_id`
+        # up front -- none of these are safe to hand to `os.path.isabs`/
+        # `os.path.realpath` below, which raise raw `TypeError`/
+        # `ValueError` on exactly these shapes instead of the typed
+        # `_PathContainmentViolation` this function otherwise always
+        # raises. `document_id` may not be a `str` at all here (the type
+        # hint is aspirational, not enforced at this boundary), so no
+        # f-string/`sanitize_for_log` call touches it before this check.
+        raise _PathContainmentViolation(document_id if isinstance(document_id, str) else "")
+
     if os.path.isabs(document_id):
         raise _PathContainmentViolation(document_id)
 
