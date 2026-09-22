@@ -75,6 +75,8 @@ def _adapter(
     sleep: Callable[[float], None] | None = None,
     terminal_statuses: set[str] | None = None,
     success_statuses: set[str] | None = None,
+    poll_retry_max_attempts: int = 3,
+    random_func: Callable[[], float] | None = None,
 ) -> MuleSoftIDPAdapter:
     monkeypatch.setattr(
         transport, "post_json", lambda *a, **kw: fetch_token_result  # noqa: ARG005
@@ -83,17 +85,29 @@ def _adapter(
         transport, "post_multipart_file", lambda *a, **kw: submit_result  # noqa: ARG005
     )
 
-    results = poll_results or [(200, {"status": "SUCCEEDED", "pages": []})]
+    def _padded(
+        result: tuple[int, dict[str, Any]] | tuple[int, dict[str, Any], dict[str, str]],
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
+        # Most tests supply a plain (status, body) 2-tuple; pad it with
+        # empty response headers so this helper stays the only place that
+        # knows about get_json_with_headers's 3-tuple shape (T-01.4.3a/b).
+        if len(result) == 2:
+            return result[0], result[1], {}
+        return result
+
+    results = [_padded(r) for r in (poll_results or [(200, {"status": "SUCCEEDED", "pages": []})])]
     poll_iter = iter(results)
     last_poll_result = results[-1]
 
-    def fake_get_json(*args: object, **kwargs: object) -> tuple[int, dict[str, Any]]:
+    def fake_get_json(
+        *args: object, **kwargs: object
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
         nonlocal last_poll_result
         with contextlib.suppress(StopIteration):
             last_poll_result = next(poll_iter)
         return last_poll_result
 
-    monkeypatch.setattr(transport, "get_json", fake_get_json)
+    monkeypatch.setattr(transport, "get_json_with_headers", fake_get_json)
 
     sleeps: list[float] = []
     return MuleSoftIDPAdapter(
@@ -108,8 +122,10 @@ def _adapter(
         submit_timeout_seconds=30.0,
         poll_timeout_seconds=poll_timeout_seconds,
         poll_interval_seconds=poll_interval_seconds,
+        poll_retry_max_attempts=poll_retry_max_attempts,
         clock=clock or _advancing_clock(),
         sleep=sleep or sleeps.append,
+        random_func=random_func or (lambda: 0.5),
     )
 
 
@@ -178,18 +194,20 @@ def test_poll_transport_error_keeps_polling_within_budget_then_succeeds(
     doc.write_bytes(b"%PDF")
     call_count = {"n": 0}
 
-    def flaky_get_json(*args: object, **kwargs: object) -> tuple[int, dict[str, Any]]:
+    def flaky_get_json(
+        *args: object, **kwargs: object
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
         call_count["n"] += 1
         if call_count["n"] == 1:
             raise IDPTransportError("transient connection reset")
-        return 200, {"status": "SUCCEEDED", "pages": []}
+        return 200, {"status": "SUCCEEDED", "pages": []}, {}
 
     adapter = _adapter(
         monkeypatch,
         clock=_clock_from([0.0, 0.0, 1.0, 1.0, 2.0, 3.0]),
         sleep=lambda _seconds: None,
     )
-    monkeypatch.setattr(transport, "get_json", flaky_get_json)
+    monkeypatch.setattr(transport, "get_json_with_headers", flaky_get_json)
     out = adapter.extract(str(doc), "action-1", "v1")
     assert out["status"] == "SUCCEEDED"
     assert call_count["n"] == 2  # one transient failure, one success
@@ -201,7 +219,9 @@ def test_poll_transport_error_eventually_times_out_if_never_recovers(
     doc = tmp_path / "invoice.pdf"
     doc.write_bytes(b"%PDF")
 
-    def always_failing_get_json(*args: object, **kwargs: object) -> tuple[int, dict[str, Any]]:
+    def always_failing_get_json(
+        *args: object, **kwargs: object
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
         raise IDPTransportError("connection reset")
 
     adapter = _adapter(
@@ -210,7 +230,7 @@ def test_poll_transport_error_eventually_times_out_if_never_recovers(
         clock=_clock_from([0.0, 0.0, 1.0, 2.0, 3.0, 4.0]),
         sleep=lambda _seconds: None,
     )
-    monkeypatch.setattr(transport, "get_json", always_failing_get_json)
+    monkeypatch.setattr(transport, "get_json_with_headers", always_failing_get_json)
     with pytest.raises(IDPPollTimeoutError):
         adapter.extract(str(doc), "action-1", "v1")
 
@@ -552,27 +572,191 @@ def test_poll_401_and_403_both_raise_auth_error(
         adapter.extract(str(doc), "action-1", "v1")
 
 
-@pytest.mark.parametrize("http_status", [404, 400, 500, 503])
-def test_poll_other_non_2xx_raises_hard_failure_immediately_not_polled(
+@pytest.mark.parametrize("http_status", [404, 400])
+def test_poll_non_429_4xx_raises_hard_failure_immediately_not_polled(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, http_status: int
 ) -> None:
-    # ADR-0004 #5: a 404/400/500/etc on the poll request is a hard failure,
-    # aborted immediately — never kept-polling, and the body's "status" (if
-    # any) is never read as the execution status (Atchim R5).
+    # ADR-0004 #5/#6: a 404/400/etc on the poll request is STILL a hard
+    # failure, aborted immediately — never retried, and the body's "status"
+    # (if any) is never read as the execution status (Atchim R5). Only
+    # 429/5xx (below) are bounded-retried per DEBT-24/ADR-0004 #6 — this is
+    # the revised, narrower form of what
+    # test_poll_other_non_2xx_raises_hard_failure_immediately_not_polled
+    # used to pin over [404, 400, 500, 503] before the retry work landed.
     doc = tmp_path / "invoice.pdf"
     doc.write_bytes(b"%PDF")
     calls: list[int] = []
 
-    def counting_get_json(*args: object, **kwargs: object) -> tuple[int, dict[str, Any]]:
+    def counting_get_json(
+        *args: object, **kwargs: object
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
         calls.append(1)
-        return http_status, {"status": "SUCCEEDED", "error": "not found"}
+        return http_status, {"status": "SUCCEEDED", "error": "not found"}, {}
 
     adapter = _adapter(monkeypatch, clock=_clock_from([0.0, 0.0, 0.5]))
-    monkeypatch.setattr(transport, "get_json", counting_get_json)
+    monkeypatch.setattr(transport, "get_json_with_headers", counting_get_json)
     with pytest.raises(IDPPollHardFailureError) as excinfo:
         adapter.extract(str(doc), "action-1", "v1")
     assert excinfo.value.http_status == http_status
-    assert len(calls) == 1  # aborted immediately, not polled again
+    assert len(calls) == 1  # aborted immediately, not polled again, not retried
+
+
+@pytest.mark.parametrize("http_status", [500, 503])
+def test_poll_5xx_is_retried_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, http_status: int
+) -> None:
+    # DEBT-24 / ADR-0004 #6: a transient 5xx on the poll request is retried
+    # within the poll budget, bounded backoff — not an immediate abort.
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    calls: list[int] = []
+
+    def flaky_get_json(
+        *args: object, **kwargs: object
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
+        calls.append(1)
+        if len(calls) == 1:
+            return http_status, {"error": "transient"}, {}
+        return 200, {"status": "SUCCEEDED", "pages": []}, {}
+
+    adapter = _adapter(
+        monkeypatch,
+        clock=_clock_from([0.0, 0.0, 1.0, 1.0, 2.0, 3.0]),
+        sleep=lambda _seconds: None,
+    )
+    monkeypatch.setattr(transport, "get_json_with_headers", flaky_get_json)
+    out = adapter.extract(str(doc), "action-1", "v1")
+    assert out["status"] == "SUCCEEDED"
+    assert len(calls) == 2  # one transient 5xx, one success
+
+
+@pytest.mark.parametrize("http_status", [500, 429])
+def test_poll_5xx_or_429_retry_budget_exhaustion_raises_hard_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, http_status: int
+) -> None:
+    # DEBT-24 / ADR-0004 #3/#6: "a retry budget that exhausts before
+    # terminal status is a hard failure -> abort". Default max-attempts is
+    # 3, so a 4th consecutive transient failure exhausts the budget.
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    calls: list[int] = []
+
+    def always_transient_get_json(
+        *args: object, **kwargs: object
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
+        calls.append(1)
+        return http_status, {"error": "transient"}, {}
+
+    adapter = _adapter(
+        monkeypatch,
+        poll_timeout_seconds=3600.0,  # large enough that the retry budget,
+        # not the deadline, is what exhausts first
+        clock=_clock_from([0.0, 0.0] + [float(i) for i in range(1, 20)]),
+        sleep=lambda _seconds: None,
+    )
+    monkeypatch.setattr(transport, "get_json_with_headers", always_transient_get_json)
+    with pytest.raises(IDPPollHardFailureError) as excinfo:
+        adapter.extract(str(doc), "action-1", "v1")
+    assert excinfo.value.http_status == http_status
+    assert len(calls) == 4  # default poll_retry_max_attempts=3 -> 4 total attempts
+
+
+def test_poll_429_honours_sane_retry_after_capped_to_remaining_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # ADR-0004 #3: "429 honors Retry-After capped at the remaining poll
+    # budget (do not extend the budget)". Retry-After=1000s is far bigger
+    # than the remaining budget, so the honoured sleep must be clamped down
+    # to what's left, never extending the absolute poll deadline.
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    calls: list[int] = []
+    captured_sleeps: list[float] = []
+
+    def flaky_get_json(
+        *args: object, **kwargs: object
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
+        calls.append(1)
+        if len(calls) == 1:
+            return 429, {"error": "rate limited"}, {"retry-after": "1000"}
+        return 200, {"status": "SUCCEEDED", "pages": []}, {}
+
+    adapter = _adapter(
+        monkeypatch,
+        poll_timeout_seconds=10.0,
+        clock=_clock_from([0.0, 0.0, 1.0, 1.0, 2.0, 3.0]),
+        sleep=captured_sleeps.append,
+    )
+    monkeypatch.setattr(transport, "get_json_with_headers", flaky_get_json)
+    out = adapter.extract(str(doc), "action-1", "v1")
+    assert out["status"] == "SUCCEEDED"
+    assert captured_sleeps, "sleep was never called"
+    # deadline(10.0) - now(1.0, after the 429) = 9.0 remaining budget cap.
+    assert all(s <= 9.0 for s in captured_sleeps), captured_sleeps
+    assert captured_sleeps[0] < 1000.0  # NOT the raw, un-capped Retry-After
+
+
+def test_poll_429_with_insane_retry_after_falls_back_to_exponential_backoff(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # An IDP-controlled Retry-After that isn't a sane non-negative number
+    # (HTTP-date form, negative, huge) must never be honoured verbatim —
+    # fall back to the exponential-backoff computation instead (QA F-1
+    # posture extended to an untrusted response header).
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    calls: list[int] = []
+    captured_sleeps: list[float] = []
+
+    def flaky_get_json(
+        *args: object, **kwargs: object
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
+        calls.append(1)
+        if len(calls) == 1:
+            return 429, {"error": "rate limited"}, {"retry-after": "not-a-number"}
+        return 200, {"status": "SUCCEEDED", "pages": []}, {}
+
+    adapter = _adapter(
+        monkeypatch,
+        poll_timeout_seconds=60.0,
+        clock=_clock_from([0.0, 0.0, 1.0, 1.0, 2.0, 3.0]),
+        sleep=captured_sleeps.append,
+        random_func=lambda: 1.0,  # deterministic: full jitter ceiling
+    )
+    monkeypatch.setattr(transport, "get_json_with_headers", flaky_get_json)
+    out = adapter.extract(str(doc), "action-1", "v1")
+    assert out["status"] == "SUCCEEDED"
+    # attempt 1: base(1.0) * 2**0 = 1.0, random_func()=1.0 -> sleep == 1.0,
+    # nowhere near the bogus "not-a-number" header nor the 8s cap.
+    assert captured_sleeps == pytest.approx([1.0])
+
+
+def test_poll_retry_backoff_is_bounded_by_max_attempts_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The max-attempts budget is config (ADR-0004 #3), not hard-coded —
+    # construction-time override changes when the hard failure fires.
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    calls: list[int] = []
+
+    def always_503(
+        *args: object, **kwargs: object
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
+        calls.append(1)
+        return 503, {"error": "unavailable"}, {}
+
+    adapter = _adapter(
+        monkeypatch,
+        poll_timeout_seconds=3600.0,
+        clock=_clock_from([0.0, 0.0] + [float(i) for i in range(1, 10)]),
+        sleep=lambda _seconds: None,
+        poll_retry_max_attempts=1,
+    )
+    monkeypatch.setattr(transport, "get_json_with_headers", always_503)
+    with pytest.raises(IDPPollHardFailureError):
+        adapter.extract(str(doc), "action-1", "v1")
+    assert len(calls) == 2  # max_attempts=1 -> 2 total attempts
 
 
 def test_success_statuses_must_be_a_subset_of_terminal_statuses() -> None:
@@ -770,9 +954,11 @@ def test_poll_budget_is_measured_from_before_submit_not_after(
 
     get_json_calls: list[int] = []
 
-    def fake_get_json(*args: object, **kwargs: object) -> tuple[int, dict[str, Any]]:
+    def fake_get_json(
+        *args: object, **kwargs: object
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
         get_json_calls.append(1)
-        return 200, {"status": "RUNNING", "pages": []}
+        return 200, {"status": "RUNNING", "pages": []}, {}
 
     adapter = _adapter(
         monkeypatch,
@@ -782,7 +968,7 @@ def test_poll_budget_is_measured_from_before_submit_not_after(
         sleep=lambda _seconds: None,
     )
     monkeypatch.setattr(transport, "post_multipart_file", slow_submit)
-    monkeypatch.setattr(transport, "get_json", fake_get_json)
+    monkeypatch.setattr(transport, "get_json_with_headers", fake_get_json)
     with pytest.raises(IDPPollTimeoutError):
         adapter.extract(str(doc), "action-1", "v1")
     assert len(get_json_calls) <= 2, get_json_calls
@@ -801,9 +987,11 @@ def test_poll_clamps_per_get_timeout_and_sleep_to_remaining_budget(
     captured_timeouts: list[float] = []
     captured_sleeps: list[float] = []
 
-    def fake_get_json(*args: object, **kwargs: object) -> tuple[int, dict[str, Any]]:
+    def fake_get_json(
+        *args: object, **kwargs: object
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
         captured_timeouts.append(kwargs["timeout_seconds"])  # type: ignore[arg-type]
-        return 200, {"status": "RUNNING", "pages": []}
+        return 200, {"status": "RUNNING", "pages": []}, {}
 
     def fake_sleep(seconds: float) -> None:
         captured_sleeps.append(seconds)
@@ -818,7 +1006,7 @@ def test_poll_clamps_per_get_timeout_and_sleep_to_remaining_budget(
         clock=_clock_from([0.0, 0.0, 0.0, 8.0, 8.0, 11.0]),
         sleep=fake_sleep,
     )
-    monkeypatch.setattr(transport, "get_json", fake_get_json)
+    monkeypatch.setattr(transport, "get_json_with_headers", fake_get_json)
     with pytest.raises(IDPPollTimeoutError):
         adapter.extract(str(doc), "action-1", "v1")
 
@@ -864,7 +1052,9 @@ def test_default_clock_and_sleep_are_time_monotonic_and_time_sleep_not_time_time
         transport, "post_multipart_file", lambda *a, **kw: (202, {"id": "exec-1"})
     )
     monkeypatch.setattr(
-        transport, "get_json", lambda *a, **kw: (200, {"status": "SUCCEEDED", "pages": []})
+        transport,
+        "get_json_with_headers",
+        lambda *a, **kw: (200, {"status": "SUCCEEDED", "pages": []}, {}),
     )
     adapter = MuleSoftIDPAdapter(
         client_id="cid",
