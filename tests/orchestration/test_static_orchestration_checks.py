@@ -189,11 +189,22 @@ def _non_docstring_string_literals(source: str) -> set[str]:
 
 
 def test_no_production_code_reads_the_retired_env_var_names() -> None:
-    """A8: `IDP_ACTION_ID` and `GOLDEN_DATASET_NAME` are read by NO
-    production code path under `src/idp_regression/` -- `--action` and
+    """A8: `IDP_ACTION_ID` and `GOLDEN_DATASET_NAME` -- `--action` and
     `--dataset` are required CLI flags with no environment fallback
     (2026-09-22 user decision). Scans all of `src/idp_regression/`, not
-    just `orchestration/`, since A8's claim is codebase-wide."""
+    just `orchestration/`, since A8's claim is codebase-wide.
+
+    This is an AST plain-string-literal pin, not a data-flow analysis: it
+    catches accidental reintroduction (a literal `"IDP_ACTION_ID"` or
+    `"GOLDEN_DATASET_NAME"` string anywhere outside a docstring, including
+    two adjacent literals like `"IDP_ACTION" "_ID"`, which Python's parser
+    folds into one `Constant` before the AST walk ever sees it), which is
+    the realistic way this regresses. A name assembled at RUNTIME (e.g.
+    `"IDP_" + "ACTION_ID"`, a `BinOp` the AST does not constant-fold; or an
+    f-string, which becomes a `JoinedStr` rather than a `Constant`) is out
+    of scope and will NOT be caught -- this check is deliberately not
+    adversary-resistant; that is not its job (S-2, 2026-09-22 independent
+    review)."""
     offenders: dict[str, set[str]] = {}
     for path in SRC_DIR.rglob("*.py"):
         literals = _non_docstring_string_literals(path.read_text(encoding="utf-8"))

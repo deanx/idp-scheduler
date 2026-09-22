@@ -226,6 +226,81 @@ def test_poll_get_url_carries_value_only_false_query_param(
     assert parsed_query == {"valueOnly": ["false"]}, parsed_query
 
 
+def test_poll_get_url_carries_value_only_false_on_every_url_across_an_auth_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Independent-review follow-up (2026-09-22, S-1): the prior pin only
+    ever observed the FIRST GET's URL (a fixture that succeeds immediately,
+    `(url,) = requested_urls`). `_poll()` builds ``url`` once and every
+    retry path re-uses that same local, so today's code is correct -- but a
+    future refactor moving URL construction INTO
+    `_poll_get_with_auth_retry` could drop `?valueOnly=false` on only the
+    RETRIED GET (the slow-extraction path most likely to actually retry)
+    and this suite would stay green. Forces a 401-then-200 sequence (the
+    auth-refresh retry path in `_poll_get_with_auth_retry` itself) and
+    asserts the query param on BOTH captured URLs, plus that a retry
+    actually fired -- otherwise this would pass vacuously."""
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    requested_urls: list[str] = []
+
+    def capturing_get_json(
+        url: str, *args: object, **kwargs: object
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
+        requested_urls.append(url)
+        if len(requested_urls) == 1:
+            return 401, {"error": "expired"}, {}
+        return 200, {"status": "SUCCEEDED", "pages": []}, {}
+
+    adapter = _adapter(
+        monkeypatch,
+        clock=_clock_from([0.0, 0.0, 0.5, 1.0, 1.5, 2.0]),
+    )
+    monkeypatch.setattr(transport, "get_json_with_headers", capturing_get_json)
+    out = adapter.extract(str(doc), "action-1", "v1")
+
+    assert out["status"] == "SUCCEEDED"
+    assert len(requested_urls) > 1, "the auth retry never fired -- test would be vacuous"
+    for url in requested_urls:
+        parsed_query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+        assert parsed_query == {"valueOnly": ["false"]}, (url, requested_urls)
+
+
+def test_poll_get_url_carries_value_only_false_on_every_url_across_a_transient_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Same S-1 gap as the auth-retry sibling above, for the OTHER retry
+    path: the outer `while True` loop in `_poll()` re-reading the same
+    ``url`` local across a 429-then-200 sequence. Forces a transient retry
+    and asserts the query param on every captured URL, plus that a retry
+    actually fired."""
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    requested_urls: list[str] = []
+
+    def flaky_get_json(
+        url: str, *args: object, **kwargs: object
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
+        requested_urls.append(url)
+        if len(requested_urls) == 1:
+            return 429, {"error": "rate limited"}, {}
+        return 200, {"status": "SUCCEEDED", "pages": []}, {}
+
+    adapter = _adapter(
+        monkeypatch,
+        clock=_clock_from([0.0, 0.0, 1.0, 1.0, 2.0, 3.0]),
+        sleep=lambda _seconds: None,
+    )
+    monkeypatch.setattr(transport, "get_json_with_headers", flaky_get_json)
+    out = adapter.extract(str(doc), "action-1", "v1")
+
+    assert out["status"] == "SUCCEEDED"
+    assert len(requested_urls) > 1, "the transient retry never fired -- test would be vacuous"
+    for url in requested_urls:
+        parsed_query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+        assert parsed_query == {"valueOnly": ["false"]}, (url, requested_urls)
+
+
 def test_poll_transport_error_keeps_polling_within_budget_then_succeeds(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
