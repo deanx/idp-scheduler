@@ -40,10 +40,10 @@ token or path ever reaches any of these lines.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
-import traceback
 from typing import Any, cast
 
 from idp_regression.adapter.errors import (
@@ -64,7 +64,10 @@ from idp_regression.orchestration.bootstrap import (
 )
 from idp_regression.orchestration.dotenv_support import load_dotenv
 from idp_regression.orchestration.errors import AbortReason, RunAborted
-from idp_regression.orchestration.log_sanitize import format_execution_failed_status_for_log
+from idp_regression.orchestration.log_sanitize import (
+    format_execution_failed_status_for_log,
+    frame_location,
+)
 from idp_regression.orchestration.prerun import (
     check_empty_set,
     check_schema_drift,
@@ -101,21 +104,6 @@ GOLDEN_DATASET_NAME_VAR = "GOLDEN_DATASET_NAME"
 #: {item.document_id}` to a local path"). Read and validated fail-closed
 #: (N6 shape) alongside `GOLDEN_DATASET_NAME_VAR`, before any network call.
 IDP_DOCUMENT_DIR_VAR = "IDP_DOCUMENT_DIR"
-
-
-def _frame_location(exc: BaseException) -> str:
-    """R-2 (Atchim gate, 2026-09-21): `type(exc).__name__` alone (e.g.
-    "AttributeError") tells a maintainer of a 350-line module nothing
-    about where an unanticipated exception actually happened. The last
-    traceback frame's `filename:lineno:name` carries no golden value, no
-    extracted value, no credential and no platform response body -- it
-    is pure code-location metadata, safe under INV-02 -- so it is safe
-    to log alongside the type name, unlike `str(exc)`, which is not."""
-    frames = traceback.extract_tb(exc.__traceback__)
-    if not frames:
-        return "<no traceback>"
-    frame = frames[-1]
-    return f"{frame.filename}:{frame.lineno}:{frame.name}"
 
 
 class _PathContainmentViolation(Exception):
@@ -317,8 +305,6 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
             time.monotonic() - started_at,
         )
 
-    load_dotenv()
-
     # C-1 (Atchim gate, 2026-09-21) widened after a `/harden` re-run
     # (Branca) found the first merge (`get_dataset` +
     # shape/schema/empty-set/N28) closed only ONE of five raw-escape
@@ -336,7 +322,22 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
     # thing generated inside it), so no branch here ever writes the
     # best-effort marker -- unlike the in-loop/record-phase catch-all
     # further down, which always has a `run_id` to mark.
+    #
+    # ⚠️ Widened again 2026-09-21 (Atchim gate, live-reproduced): this try
+    # used to START one line too late -- `load_dotenv()` itself sat
+    # OUTSIDE it, so an unreadable/undecodable `.env` (e.g. a
+    # permission-denied `OSError`) escaped `run_eval` raw. It also used
+    # to END too early, right after `compose_experiment_name()` -- the
+    # "pre-run checks passed" log line below (specifically its own
+    # `len(dataset["items"])` call) sat in the WINDOW between this
+    # try-block and the per-document loop's, with only `_abort`'s
+    # definition next to it. The try now starts at `load_dotenv()` and
+    # ends only after that log line is fully emitted, so nothing sits
+    # between the two catch-alls except the `_abort` closure's own
+    # definition (never executed at definition time).
     try:
+        load_dotenv()
+
         validate_platform_credentials()
 
         idp_adapter: MuleSoftIDPAdapter = make_idp_adapter()
@@ -384,6 +385,18 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
         golden_version = hash_dataset(cast(list[dict[str, Any]], dataset["items"]))
         run_id = generate_run_id()
         experiment_name = compose_experiment_name(run_name, run_id)
+
+        logger.info(
+            "run_eval: pre-run checks passed run=%s experiment=%s action=%s "
+            "version=%s golden_version=%s golden_dataset_name=%s items=%d",
+            sanitize_for_log(run_name),
+            sanitize_for_log(experiment_name),
+            sanitize_for_log(action_id),
+            sanitize_for_log(version),
+            sanitize_for_log(golden_version),
+            sanitize_for_log(dataset_name),
+            len(dataset["items"]),
+        )
     except MissingCredentialError as exc:
         logger.error("run_eval: missing required env var %s", exc.variable_name)
         _log_run_end("aborted", 1)
@@ -394,17 +407,32 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
         # `ValueError` when `success_statuses` is not a subset of
         # `terminal_statuses` (adapter/idp_client.py:109), which escaped
         # this except-block and broke the `-> int` / ADR-0004 exit-code
-        # contract. These types already name only the offending
-        # variable/config, never a value (INV-02) -- see
-        # make_idp_adapter's `_require`/`_timing_env`,
-        # MuleSoftIDPAdapter's `_validate_timing`, and `make_platform`'s
-        # own base-URL/host split-brain guard. `str(exc)` is still
-        # wrapped in `sanitize_for_log` defensively (reviewer
-        # suggestion): today's messages are safe by construction, but
-        # this is the one exception-message boundary in this function
-        # not otherwise routed through it, and that safety is not
-        # guaranteed to hold for every future raiser of these types.
-        logger.error("run_eval: %s", sanitize_for_log(str(exc)))
+        # contract.
+        #
+        # ⚠️ Corrected 2026-09-21 (Branca `/harden` GAP-6, live-reproduced,
+        # 8 cases): this clause used to log `sanitize_for_log(str(exc))`
+        # on the assumption that only two vetted constructors
+        # (`make_idp_adapter`'s and `make_platform`'s own guards) ever
+        # raised these types here -- true when this except-clause was
+        # first written, but 7d7aed3 later widened the SAME try-block to
+        # span the whole pre-run chain, including `check_schema_drift`
+        # and `validate_golden_set`, both of which handle golden content
+        # and can raise a bare `RuntimeError`/`ValueError` built from it.
+        # `sanitize_for_log` only escapes/quotes (`json.dumps`) -- it does
+        # NOT redact -- so a golden value or a credential sentinel
+        # embedded in one of those messages reached the log verbatim
+        # aside from quoting. `RecursionError` (a `RuntimeError`
+        # subclass) made this worse: a stack overflow deep in golden
+        # validation landed in THIS clause, not the safe type-name-only
+        # catch-all below. Now logs only `type(exc).__name__` plus the
+        # last traceback frame's location (R-2 shape, same as every
+        # catch-all in this function) -- never `str(exc)`, for ANY
+        # raiser of these four types, vetted or not.
+        logger.error(
+            "run_eval: %s at %s",
+            type(exc).__name__,
+            frame_location(exc),
+        )
         _log_run_end("aborted", 1)
         return 1
     except DatasetFetchFailedError as exc:
@@ -415,30 +443,26 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
         logger.error("run_eval: %s: %s", exc.reason, sanitize_for_log(str(exc)))
         _log_run_end("aborted", 1)
         return 1
-    except Exception as exc:  # noqa: BLE001 - HARDEN-01 GAP-1, see facade docstring
+    except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 - HARDEN-01 GAP-1/GAP-5
         # `type(exc).__name__` plus the last traceback frame's location
         # (R-2) only, never `str(exc)` (INV-02: an unanticipated
         # exception's message is not vetted the way every typed one in
         # this codebase is).
+        #
+        # ⚠️ Widened 2026-09-21 (Branca `/harden` GAP-5): `asyncio.
+        # CancelledError` is a `BaseException` subclass (Python 3.8+), NOT
+        # an `Exception` subclass -- it used to slip straight through
+        # `except Exception`, escaping this catch-all raw. Added
+        # explicitly (never a bare `except BaseException`, which would
+        # also swallow `KeyboardInterrupt`/`SystemExit` -- those must
+        # keep propagating).
         logger.error(
             "run_eval: unexpected pre-run error: %s at %s",
             type(exc).__name__,
-            _frame_location(exc),
+            frame_location(exc),
         )
         _log_run_end("aborted", 1)
         return 1
-
-    logger.info(
-        "run_eval: pre-run checks passed run=%s experiment=%s action=%s "
-        "version=%s golden_version=%s golden_dataset_name=%s items=%d",
-        sanitize_for_log(run_name),
-        sanitize_for_log(experiment_name),
-        sanitize_for_log(action_id),
-        sanitize_for_log(version),
-        sanitize_for_log(golden_version),
-        sanitize_for_log(dataset_name),
-        len(dataset["items"]),
-    )
 
     def _abort(reason: AbortReason, document_id: str | None, detail: str) -> RunAborted:
         """Write the best-effort `run_status=aborted` marker (a run now
@@ -572,7 +596,7 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
         logger.error("run_eval: %s: %s", exc.reason, sanitize_for_log(str(exc)))
         _log_run_end("aborted", 1, pass_count=passed_count, fail_count=failed_count)
         return 1
-    except Exception as exc:  # noqa: BLE001 - HARDEN-01 GAP-1, see facade docstring
+    except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 - HARDEN-01 GAP-1/GAP-5
         # Unlike the pre-run catch-all above, `run_id` DOES exist here
         # (generated before this try-block) -- ADR-0004 #14 says every
         # run that exists gets a best-effort `aborted` marker, so this
@@ -581,7 +605,9 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
         # last traceback frame's location (R-2) only, never `str(exc)`
         # (INV-02 -- an untyped exception's message is not vetted the way
         # every typed one this codebase raises is; it could echo IDP or
-        # platform response content).
+        # platform response content). Widened 2026-09-21 (Branca `/harden`
+        # GAP-5) to also catch `asyncio.CancelledError` -- see the
+        # pre-run catch-all's comment above for why.
         _mark_run_status_best_effort(
             platform,
             run_id,
@@ -594,7 +620,7 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
         logger.error(
             "run_eval: unexpected error: %s at %s",
             type(exc).__name__,
-            _frame_location(exc),
+            frame_location(exc),
         )
         _log_run_end("aborted", 1, pass_count=passed_count, fail_count=failed_count)
         return 1

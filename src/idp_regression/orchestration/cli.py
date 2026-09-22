@@ -45,31 +45,18 @@ never unescaped.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import os
 import re
 import sys
-import traceback
 import uuid
 from collections.abc import Sequence
 
 from idp_regression.adapter.transport import sanitize_for_log
 from idp_regression.orchestration.dotenv_support import load_dotenv
 from idp_regression.orchestration.facade import GOLDEN_DATASET_NAME_VAR, run_eval
-
-
-def _frame_location(exc: BaseException) -> str:
-    """Same shape as `facade._frame_location` (R-2, Atchim gate,
-    2026-09-21) -- duplicated rather than imported so this module never
-    reaches into `facade`'s private surface. The last traceback frame's
-    `filename:lineno:name` is pure code-location metadata (no golden
-    value, extracted value, credential, or platform response body), safe
-    under INV-02."""
-    frames = traceback.extract_tb(exc.__traceback__)
-    if not frames:
-        return "<no traceback>"
-    frame = frames[-1]
-    return f"{frame.filename}:{frame.lineno}:{frame.name}"
+from idp_regression.orchestration.log_sanitize import frame_location
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +106,26 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    load_dotenv()
+    # ⚠️ Fixed 2026-09-21 (Atchim gate, live-reproduced): `load_dotenv()`
+    # used to sit BEFORE this function's own try/except (which only wraps
+    # the `run_eval(...)` call below) -- an `OSError` from an unreadable
+    # or undecodable `.env` (a real trigger: a permission-denied or
+    # non-UTF-8 path) escaped `main()` entirely. `main()` is the outermost
+    # caller in this codebase, so an uncaught exception here means Python
+    # prints a RAW TRACEBACK -- carrying the `.env` path in `str(exc)` --
+    # straight to stderr: a live INV-02 path-disclosure, not merely a
+    # broken `-> int` contract. Same shape as every other catch-all in
+    # this module: only the type name and frame location are logged,
+    # never `str(exc)`.
+    try:
+        load_dotenv()
+    except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 - see comment above
+        logger.error(
+            "run_eval: unexpected error: %s at %s",
+            type(exc).__name__,
+            frame_location(exc),
+        )
+        return 1
 
     parser = _build_parser()
     try:
@@ -167,7 +173,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         return run_eval(action_id, args.version, args.run_name, dataset_name)
-    except Exception as exc:  # noqa: BLE001 - defense in depth, see docstring
+    except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 - defense in depth
         # `run_eval`'s own contract (facade.py, `orchestration/errors.py`)
         # is that no exception may ever escape it -- this batch (T-01.4.6)
         # finished building the function, closing the slice boundary that
@@ -192,7 +198,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         logger.error(
             "run_eval: unexpected error: %s at %s",
             type(exc).__name__,
-            _frame_location(exc),
+            frame_location(exc),
         )
         return 1
 

@@ -201,6 +201,85 @@ def test_run_eval_calls_load_dotenv_before_validating_platform_credentials(
     assert call_order == ["load_dotenv", "validate_platform_credentials"]
 
 
+def test_run_eval_never_escapes_when_load_dotenv_itself_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+) -> None:
+    """`load_dotenv()` used to sit OUTSIDE the pre-run try-block (it starts
+    one line later, at `validate_platform_credentials()`) -- an unreadable
+    or undecodable `.env` (e.g. `OSError` on a permission-denied path)
+    escaped `run_eval` raw: no catch, no `run_end`, no abort marker (no
+    `run_id` exists yet, correctly), and the exception's own message --
+    which can carry the `.env` path -- was never sanitized. Live-reproduced
+    with a sentinel in the message; none of it may escape or reach the
+    logs, and the `run_end` line must still be emitted (N10) with a
+    non-zero exit."""
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    sentinel = "SEKRIT-dotenv-path-should-never-be-logged/etc/secret/.env"
+
+    def _boom() -> None:
+        raise OSError(f"[Errno 13] Permission denied: '{sentinel}'")
+
+    monkeypatch.setattr(facade, "load_dotenv", _boom)
+
+    with caplog.at_level(logging.INFO):
+        exit_code = run_eval("action", "version", "run", "idp-regression-golden")
+
+    assert exit_code != 0
+    assert "run_end" in caplog.text
+    assert sentinel not in caplog.text
+    assert "OSError" in caplog.text
+
+
+def test_run_eval_has_nothing_outside_the_pre_run_try_between_load_dotenv_and_the_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+) -> None:
+    """The merged pre-run try used to end right after
+    `compose_experiment_name()`, leaving the `pre-run checks passed`
+    log line's own `len(dataset["items"])` call sitting OUTSIDE any
+    catch-all (with `_abort`'s definition next to it). A dataset whose
+    `"items"` raises on `len()` (a pathological but real object, e.g. one
+    whose `__len__` itself blows up) must not escape `run_eval` -- the
+    fix extends the try to cover that log line too."""
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+
+    class _ExplodingLenList(list):  # type: ignore[type-arg]
+        """`check_empty_set`'s `not dataset["items"]` already calls
+        `__len__` once (that pinned behavior must keep working) -- this
+        only explodes from the SECOND call onward, isolating the
+        `logger.info("pre-run checks passed", ..., len(dataset["items"]))`
+        call itself as the thing under test."""
+
+        def __init__(self, *args: object) -> None:
+            super().__init__(*args)
+            self._calls = 0
+
+        def __len__(self) -> int:
+            self._calls += 1
+            if self._calls > 1:
+                raise RuntimeError("len() blew up")
+            return list.__len__(self)
+
+    dataset = _well_formed_dataset()
+    dataset["items"] = _ExplodingLenList(dataset["items"])  # type: ignore[arg-type]
+    monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(dataset))
+
+    with caplog.at_level(logging.INFO):
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
+
+    assert exit_code != 0
+    assert "run_end" in caplog.text
+    # No run_id exists yet at this point in the pre-run chain, so no
+    # aborted marker is expected -- same class as the other pre-run
+    # untyped-exception tests above.
+
+
 # --- NFR N6 / DEBT-30: fail-closed on missing platform credential -----
 
 
@@ -263,6 +342,14 @@ def test_run_eval_returns_nonzero_and_names_the_missing_idp_var(
     caplog: pytest.LogCaptureFixture,
     tmp_path: object,
 ) -> None:
+    """⚠️ Updated 2026-09-21 (GAP-6 fix): this clause no longer logs
+    `str(exc)` at all (see the module's GAP-6 comment on the narrow
+    pre-run except-clause) -- a missing `IDP_CLIENT_ID` still exits
+    non-zero and is still safe (the type name, never the message, is
+    logged), but the variable NAME is no longer named in the log line as
+    a side effect of that message-level fix. This test now pins the
+    safe contract directly instead of relying on `_require`'s message
+    happening to be value-free."""
     _disable_dotenv_file_loading(monkeypatch, tmp_path)
     _set_all_credential_env(monkeypatch)
     monkeypatch.delenv("IDP_CLIENT_ID", raising=False)
@@ -273,7 +360,7 @@ def test_run_eval_returns_nonzero_and_names_the_missing_idp_var(
         )
 
     assert exit_code != 0
-    assert "IDP_CLIENT_ID" in caplog.text
+    assert "RuntimeError" in caplog.text
     assert "distinctive-client-secret-NOT-A-REAL-SECRET-4d9c" not in caplog.text
 
 
@@ -312,12 +399,14 @@ def test_run_eval_sanitizes_the_caught_idp_configuration_exception_message(
     tmp_path: object,
 ) -> None:
     """Reviewer suggestion (2026-09-21): `facade.py`'s
-    `make_idp_adapter()` except-block logs `str(exc)` unsanitized --
-    the one untrusted-ish boundary in the batch not routed through
-    `sanitize_for_log`. Today's messages only name a variable, but the
-    boundary should not rely on that staying true. Pin it with a message
-    containing a quote and an embedded fake log line; the raw text must
-    never appear unescaped in the log."""
+    `make_idp_adapter()` except-block used to log `str(exc)` unsanitized
+    -- the one untrusted-ish boundary in the batch not routed through
+    `sanitize_for_log`. ⚠️ Superseded 2026-09-21 by the GAP-6 fix
+    (Branca `/harden`): rather than sanitizing (escaping only, not
+    redacting) the message, this clause now logs NO part of `str(exc)`
+    at all -- only the type name -- since `sanitize_for_log` cannot tell
+    a safe variable name from a leaked golden value or secret. Pin the
+    stronger contract directly."""
     _disable_dotenv_file_loading(monkeypatch, tmp_path)
     _set_all_credential_env(monkeypatch)
 
@@ -335,7 +424,8 @@ def test_run_eval_sanitizes_the_caught_idp_configuration_exception_message(
 
     assert exit_code != 0
     assert hostile_message not in caplog.text
-    assert json.dumps(hostile_message) in caplog.text
+    assert json.dumps(hostile_message) not in caplog.text
+    assert "RuntimeError" in caplog.text
 
 
 def test_run_eval_never_logs_the_idp_client_secret_value(
@@ -1552,6 +1642,201 @@ def test_run_eval_still_propagates_keyboard_interrupt(
     """GAP-1's catch-all must be `except Exception`, never a bare
     `except:`/`except BaseException:` -- a `KeyboardInterrupt` must still
     propagate out of `run_eval`, not be swallowed into a non-zero exit."""
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
+
+    def _boom(dataset: object) -> None:
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(facade, "check_schema_drift", _boom)
+
+    with pytest.raises(KeyboardInterrupt):
+        run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden")
+
+
+# --- GAP-6 (Branca /harden, 2026-09-21): the widened
+# `except (RuntimeError, IDPConfigurationError, ValueError,
+# PlatformConfigurationError)` clause logs `sanitize_for_log(str(exc))` --
+# that clause used to sit under only two VETTED constructors
+# (make_idp_adapter/make_platform's own guards), but 7d7aed3 widened the
+# surrounding try to span the WHOLE pre-run chain, including
+# `check_schema_drift` and `validate_golden_set`, both of which handle
+# golden content and can raise a bare `RuntimeError`/`ValueError` built
+# from it. `sanitize_for_log` only escapes/quotes -- it does not redact --
+# so a golden value or a credential sentinel embedded in one of those
+# messages reaches the log verbatim (aside from quoting). Also:
+# `RecursionError` is a `RuntimeError` subclass, so a stack-overflow deep
+# in golden validation lands in THIS clause, not the safe
+# type-name-only catch-all.
+
+
+@pytest.mark.parametrize(
+    "seam,exc_type",
+    [
+        ("check_schema_drift", RuntimeError),
+        ("validate_golden_set", ValueError),
+        ("hash_dataset", RuntimeError),
+    ],
+)
+def test_run_eval_never_logs_a_planted_secret_from_the_narrow_pre_run_except_clause(
+    seam: str,
+    exc_type: type[Exception],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """GAP-6: a golden value / credential sentinel planted in the raised
+    message must never reach any log line -- only the exception's type
+    name (never `str(exc)`) may appear."""
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
+
+    sentinel = "SEKRIT-golden-value-and-credential-should-never-be-logged"
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise exc_type(f"invalid golden field total={sentinel}")
+
+    monkeypatch.setattr(facade, seam, _boom)
+
+    with caplog.at_level(logging.INFO):
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
+
+    assert exit_code != 0
+    assert sentinel not in caplog.text
+    assert exc_type.__name__ in caplog.text
+
+
+def test_run_eval_never_logs_a_planted_secret_from_make_platforms_configuration_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """GAP-6, the originally-vetted seam: even `make_platform`'s own
+    `PlatformConfigurationError` must not have its message logged
+    verbatim -- a future raiser of this type is not guaranteed to keep
+    its message value-free, so the fix must be structural (type name
+    only), not seam-by-seam."""
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+
+    from idp_regression.platform.errors import PlatformConfigurationError
+
+    sentinel = "SEKRIT-host-and-secret-should-never-be-logged"
+
+    def _boom() -> object:
+        raise PlatformConfigurationError(f"LANGFUSE_HOST/LANGFUSE_BASE_URL disagree: {sentinel}")
+
+    monkeypatch.setattr(facade, "make_platform", _boom)
+
+    with caplog.at_level(logging.INFO):
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
+
+    assert exit_code != 0
+    assert sentinel not in caplog.text
+    assert "PlatformConfigurationError" in caplog.text
+
+
+def test_run_eval_never_logs_a_planted_secret_from_make_idp_adapters_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """GAP-6, the other originally-vetted seam (`make_idp_adapter`'s
+    `success_statuses`-not-a-subset `ValueError`)."""
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+
+    sentinel = "SEKRIT-status-value-should-never-be-logged"
+
+    def _boom() -> object:
+        raise ValueError(f"success_statuses not a subset of terminal_statuses: {sentinel}")
+
+    monkeypatch.setattr(facade, "make_idp_adapter", _boom)
+
+    with caplog.at_level(logging.INFO):
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
+
+    assert exit_code != 0
+    assert sentinel not in caplog.text
+    assert "ValueError" in caplog.text
+
+
+# --- GAP-5 (Branca /harden, 2026-09-21): `asyncio.CancelledError` is a
+# `BaseException` subclass (Python 3.8+), NOT an `Exception` subclass --
+# it slips straight through `except Exception`, escaping both of
+# `run_eval`'s catch-alls raw. `KeyboardInterrupt`/`SystemExit` must still
+# propagate (test above), so this must be an explicit addition, not a
+# switch to a bare `except BaseException`.
+
+
+def test_run_eval_never_escapes_on_a_cancelled_error_pre_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
+
+    import asyncio
+
+    def _boom(dataset: object) -> None:
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(facade, "check_schema_drift", _boom)
+
+    with caplog.at_level(logging.INFO):
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
+
+    assert exit_code != 0
+    assert "run_end" in caplog.text
+
+
+def test_run_eval_never_escapes_on_a_cancelled_error_in_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    platform = _RecordingPlatform(_well_formed_dataset())
+    monkeypatch.setattr(facade, "make_platform", lambda: platform)
+    _stub_make_idp_adapter_success(monkeypatch)
+
+    import asyncio
+
+    def _boom(golden: object, actual: object) -> None:
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(facade, "classify", _boom)
+
+    with caplog.at_level(logging.INFO):
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
+
+    assert exit_code != 0
+    assert "run_end" in caplog.text
+    assert [c["status"] for c in platform.mark_run_status_calls] == ["aborted"]
+
+
+def test_run_eval_still_propagates_asyncio_cancelled_error_is_not_the_goal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+) -> None:
+    """Sanity pin for the KeyboardInterrupt/SystemExit test above: adding
+    `asyncio.CancelledError` to the catch-all tuple must NOT change that
+    `KeyboardInterrupt` still propagates."""
     _disable_dotenv_file_loading(monkeypatch, tmp_path)
     _set_all_credential_env(monkeypatch)
     _stub_make_platform_with_a_well_formed_dataset(monkeypatch)

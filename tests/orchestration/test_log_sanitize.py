@@ -15,9 +15,14 @@ and `idp_regression.adapter.transport.sanitize_for_log`).
 
 from __future__ import annotations
 
+import os
+
 from idp_regression.adapter.errors import IDPExecutionFailedError
 from idp_regression.adapter.transport import sanitize_for_log
-from idp_regression.orchestration.log_sanitize import format_execution_failed_status_for_log
+from idp_regression.orchestration.log_sanitize import (
+    format_execution_failed_status_for_log,
+    frame_location,
+)
 
 
 def test_format_execution_failed_status_matches_sanitize_for_log() -> None:
@@ -48,3 +53,35 @@ def test_format_execution_failed_status_is_wrapped_in_quotes() -> None:
     rendered = format_execution_failed_status_for_log(exc)
     assert rendered.startswith('"') and rendered.endswith('"')
     assert rendered != exc.status
+
+
+# --- Atchim gate suggestion (2026-09-21): frame_location must not
+# disclose this deployment's absolute directory layout. Shared by
+# facade.py and cli.py (previously duplicated as two private
+# `_frame_location` functions, one per module).
+
+
+def test_frame_location_never_returns_an_absolute_path() -> None:
+    try:
+        raise RuntimeError("boom")
+    except RuntimeError as exc:
+        location = frame_location(exc)
+
+    filename = location.rsplit(":", 2)[0]
+    assert not os.path.isabs(filename)
+    assert location.endswith(":RuntimeError") is False  # sanity: has a real frame name
+
+
+def test_frame_location_is_package_relative_for_a_facade_frame() -> None:
+    """A frame inside `idp_regression` itself renders as
+    `idp_regression/<...>.py:<line>:<func>` -- never a machine-specific
+    absolute prefix like `/Users/alex/...`."""
+    from idp_regression.orchestration import facade
+
+    try:
+        facade._resolve_document_path("/documents", "\x00")
+    except Exception as exc:  # noqa: BLE001 - deliberately triggering _PathContainmentViolation
+        location = frame_location(exc)
+
+    assert location.startswith("idp_regression" + os.sep)
+    assert "/Users/" not in location

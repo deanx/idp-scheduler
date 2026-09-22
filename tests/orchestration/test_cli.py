@@ -247,6 +247,35 @@ def test_main_reaches_the_real_facade_and_returns_its_exit_code(
     assert exit_code == 1
 
 
+def test_main_never_escapes_when_load_dotenv_itself_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`load_dotenv()` sits BEFORE `main()`'s own try/except (which only
+    wraps the `run_eval(...)` call) -- an `OSError` from an unreadable or
+    undecodable `.env` (a real trigger: a permission-denied or
+    non-UTF-8 path) used to escape `main()` entirely. Worse than the
+    facade-level gap: this is the outermost caller, so an uncaught
+    exception here means Python prints a RAW TRACEBACK containing the
+    `.env` path straight to stderr -- a live INV-02 path-disclosure, not
+    merely a broken `-> int` contract. Reproduced with a sentinel `.env`
+    path in the message; it must never escape and never appear in the
+    logs."""
+    sentinel = "/etc/secret/.env-SEKRIT-path-should-never-be-logged"
+
+    def _boom() -> None:
+        raise OSError(f"[Errno 13] Permission denied: '{sentinel}'")
+
+    monkeypatch.setattr(cli, "load_dotenv", _boom)
+
+    with caplog.at_level(logging.INFO):
+        exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
+
+    assert exit_code != 0
+    assert sentinel not in caplog.text
+    assert "OSError" in caplog.text
+
+
 def test_main_converts_an_unexpected_exception_from_run_eval_into_a_nonzero_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -303,6 +332,29 @@ def test_main_never_logs_the_raw_message_of_an_unexpected_exception_from_run_eva
     assert exit_code != 0
     assert sentinel not in caplog.text
     assert "RuntimeError" in caplog.text
+
+
+def test_main_never_escapes_on_a_cancelled_error_from_run_eval(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """GAP-5 (Branca /harden, 2026-09-21): `asyncio.CancelledError` is a
+    `BaseException` subclass, not an `Exception` subclass -- it slips
+    through `except Exception` and escaped `main()`'s own catch-all raw."""
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setenv("GOLDEN_DATASET_NAME", "idp-regression-golden")
+
+    import asyncio
+
+    def _boom(action_id: str, version: str, run_name: str, dataset_name: str) -> int:
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(cli, "run_eval", _boom)
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
+
+    assert exit_code != 0
 
 
 def test_version_at_the_64_char_cap_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
