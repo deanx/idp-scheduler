@@ -7,13 +7,26 @@ logged for observability and never fragments the exit-code namespace
 (`orchestration/errors.py`'s own docstring).
 
 This suite is parametrized over the WHOLE `AbortReason` taxonomy read
-from `orchestration/errors.py` itself (not hardcoded), so a newly added
-reason without an exit-code mapping fails this test by construction.
+from `orchestration/errors.py` itself (not hardcoded). ⚠️ Corrected
+2026-09-21 (S-1 gate finding): the parametrized tests below fabricate
+`RunAborted(reason, ...)` through a monkeypatch of `check_schema_drift`,
+so on their own they only re-prove the ONE generic
+`except RunAborted` catch every abort funnels through -- adding a new
+`AbortReason` member to the `Literal` with no real raise site anywhere
+in `src/` still passes every test in this file, because `get_args`
+would simply hand the new member to the same fabricated-raise
+machinery. `test_every_abort_reason_has_a_real_raise_site` below is the
+one that actually fails by construction on that gap: it greps
+`src/idp_regression/**/*.py` (excluding `errors.py`'s own `Literal`
+declaration) for each reason literal appearing at a real raise/log
+site, independent of this file's own fakes.
 """
 
 from __future__ import annotations
 
 import logging
+import re
+from pathlib import Path
 from typing import get_args
 
 import pytest
@@ -176,6 +189,38 @@ def test_taxonomy_is_read_from_errors_module_not_hardcoded() -> None:
         "flush_failed",
     }
     assert expected_floor.issubset(set(ALL_ABORT_REASONS))
+
+
+def test_every_abort_reason_has_a_real_raise_site() -> None:
+    """S-1: the ONLY test in this file that would fail if a new
+    `AbortReason` member were added to the `Literal` with no real raise
+    site under `src/idp_regression/` -- every other test here fabricates
+    `RunAborted(reason, ...)` via a monkeypatch, so it re-proves nothing
+    about whether `reason` is ever actually raised by production code.
+
+    Scans every `.py` file under `src/idp_regression/` EXCEPT
+    `orchestration/errors.py` itself (whose `Literal` definition and
+    module docstring name every reason in prose -- that's the
+    declaration, not evidence of a raise site, and including it would
+    make this test pass vacuously for a brand-new, never-raised member).
+    A reason must appear as a substring somewhere in the remaining
+    corpus -- in practice that is always `raise _abort(...)`,
+    `raise RunAborted(...)`, or (for `dataset_fetch_failed`, which
+    `facade.py` handles with a direct `except .../return 1`, never
+    through `RunAborted`) the `logger.error` call in that except block."""
+    src_root = Path(__file__).resolve().parents[2] / "src" / "idp_regression"
+    corpus = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in src_root.rglob("*.py")
+        if path.name != "errors.py"
+    )
+    for reason in ALL_ABORT_REASONS:
+        pattern = re.compile(re.escape(reason))
+        assert pattern.search(corpus), (
+            f"AbortReason {reason!r} has no real raise/log site outside "
+            "orchestration/errors.py -- the Literal and production code "
+            "have drifted apart"
+        )
 
 
 # --- Ordering case: empty set AND drifted schema -> schema_drift -------
