@@ -406,3 +406,25 @@ Also lagging: **DEBT-48's FO-7 row** says "Third leg now confirmed open … CARD
 **Fix:** once `pyproject.toml` is free (after T-01.4.10 lands, or coordinated directly), add `python-dotenv` to `[project] dependencies`, regenerate `uv.lock` per `CLAUDE.md ## Tooling`, and replace `dotenv_support.py`'s body with `from dotenv import load_dotenv as load_dotenv` (or delete the module and repoint the two call sites at `dotenv` directly). Re-run `tests/orchestration/test_dotenv_support.py` against the real library (or delete it if the shim is removed) and `pip-audit`.
 
 **Interest:** flat while `.env` files in this project stay single-line `KEY=VALUE` with no `export`/interpolation (true today, per `.env.example`); grows the day anyone reaches for a `.env` feature the shim doesn't support (e.g. `${IDP_REGION}`-style interpolation) — that would silently under-load rather than error, since a malformed line is skipped, not rejected.
+
+## DEBT-68 — `mypy src tests` has 27 errors; every agent has been running `mypy src` instead
+
+**Status:** open · **Origin:** top-level verification of `6755fa1`, 2026-09-22 · **Impact: Medium**
+
+`CLAUDE.md ## Commands` documents the type gate as `.venv/bin/mypy src tests` (strict). `mypy src` alone is clean — `mypy src tests` reports **27 errors in 5 files**, all under `tests/`:
+
+| File | Errors |
+|---|---|
+| `tests/platform/test_langfuse_adapter.py` | 15 |
+| `tests/platform/test_record_run_preconditions.py` | 6 |
+| `tests/platform/test_scoring.py` | 6 |
+| `tests/orchestration/test_facade.py` | 2 (incl. an `unused-ignore` and a `CancelledError` passed where `Exception \| None` is expected) |
+| `tests/orchestration/test_log_sanitize.py` | 1 |
+
+**Pre-existing, not introduced by `6755fa1`** — that commit touched only `adapter/` and `tests/adapter/`, and no error is in either. It went unnoticed because every `/implement` and `/test` round in this project has verified with `mypy src`, which is the narrower command.
+
+**Why it matters beyond tidiness.** The errors are concentrated in the platform suite — the tests that pin the Langfuse SDK's *private* surfaces (`_base_url`, `api._client_wrapper.get_headers()`), which `CLAUDE.md ## External services` already names as "the first thing a version bump breaks silently". A type checker that is never run over those files is one fewer signal on exactly the surface flagged as most likely to break quietly. It also compounds `/signoff` blocker **B-4** (CI runs no tests and no type-check at all), so nothing catches this downstream either.
+
+**Fix:** run `mypy src tests` and resolve the 27, then make it the command every agent runs. The durable fix is B-4 — put the real gate in CI so the narrower command cannot be substituted by habit.
+
+**Interest:** grows with each new platform test written under a checker that never looks at it, and at the next Langfuse version bump.
