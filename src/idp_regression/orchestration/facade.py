@@ -84,13 +84,15 @@ from idp_regression.platform.types import DocumentRecord, PlatformAdapter, RunMe
 
 logger = logging.getLogger(__name__)
 
-#: The golden dataset name (config, not secret -- like `IDP_DOCUMENT_DIR`,
-#: ADR-0004's ".env holds only environment facts" list). ⚠️ **Design call
-#: for review**: no prior task pinned this name anywhere in the codebase
-#: or its docs, so this is a new, minimal, fail-closed convention (N6
-#: shape: missing/empty -> non-zero exit, clear message, zero network
-#: calls) rather than a silent default -- a wrong silent default here
-#: would run the regression against the wrong golden set with no error.
+#: The golden dataset name's env var (config, not secret -- like
+#: `IDP_DOCUMENT_DIR`, ADR-0004's ".env holds only environment facts"
+#: list). ⚠️ Updated 2026-09-21 (ADR-0004 amendment T-01.4.12 A6 /
+#: DEBT-48): `run_eval` itself no longer reads this var -- `dataset_name`
+#: is now a required parameter (see `run_eval`'s docstring), resolved by
+#: `cli.py::main` with the same flag > env > fail-closed precedence as
+#: `--action`/`IDP_ACTION_ID`. This constant is kept here, exported, so
+#: `cli.py` (and any other caller) names the var once, not by a
+#: hand-copied string literal.
 GOLDEN_DATASET_NAME_VAR = "GOLDEN_DATASET_NAME"
 
 #: The local directory holding the document files under test
@@ -213,6 +215,7 @@ def _mark_run_status_best_effort(
     action_id: str,
     action_version: str,
     golden_version: str,
+    golden_dataset_name: str,
 ) -> None:
     """ADR-0004 #14 (Atchim non-blocking debt, carried forward by
     ADR-0005 #9 steps 3/4/5): the `run_status` marker write is
@@ -220,7 +223,11 @@ def _mark_run_status_best_effort(
     gate's truth regardless of whether this marker lands on the
     platform; a failure here must never itself abort or crash
     `run_eval`. Never logs the caught exception's message (INV-02 -- a
-    platform error body could echo request content)."""
+    platform error body could echo request content).
+
+    `golden_dataset_name` (A6 / DEBT-48): the fourth INV-04 field,
+    carried alongside the other three so the marker also answers "which
+    named golden set was this run measured against"."""
     try:
         platform.mark_run_status(
             run_id,
@@ -228,6 +235,7 @@ def _mark_run_status_best_effort(
             action_id=action_id,
             action_version=action_version,
             golden_version=golden_version,
+            golden_dataset_name=golden_dataset_name,
         )
     except Exception:  # noqa: BLE001 - best-effort by design, must never raise
         logger.warning(
@@ -236,10 +244,19 @@ def _mark_run_status_best_effort(
         )
 
 
-def run_eval(action_id: str, version: str, run_name: str) -> int:
+def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> int:
     """Run the baseline regression for `action_id` at `version` over the
-    configured golden set, writing per-field + gate scores to a run
-    derived from `run_name` on the platform (ADR-0004, ADR-0005 #9).
+    named golden set (`dataset_name`), writing per-field + gate scores to
+    a run derived from `run_name` on the platform (ADR-0004, ADR-0005 #9).
+
+    `dataset_name` (ADR-0004 amendment T-01.4.12 A6 / DEBT-48): a
+    required, plain parameter -- like `action_id`/`version` above, this
+    function does NOT read `GOLDEN_DATASET_NAME` from the environment
+    itself. Precedence resolution (`--dataset` flag > `GOLDEN_DATASET_NAME`
+    env > fail-closed) is the CLI's job (`cli.py::main`), exactly mirroring
+    how `--action`/`IDP_ACTION_ID` is already resolved there before
+    `run_eval` is ever entered. A caller of this public function directly
+    (bypassing the CLI) must supply `dataset_name` explicitly.
 
     Returns a process exit code: `0` iff every document's gate was
     `PASS` and no error occurred anywhere in the run; non-zero on any
@@ -314,9 +331,13 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
         _log_run_end("aborted", 1)
         return 1
 
-    dataset_name = (os.environ.get(GOLDEN_DATASET_NAME_VAR) or "").strip()
+    # A6: `dataset_name` is caller-supplied now (see the docstring above)
+    # -- still fail-closed on an empty/whitespace-only value, the same
+    # N6 shape the env-read version used, so a caller that passes ""
+    # through doesn't reach any network call either.
+    dataset_name = dataset_name.strip()
     if not dataset_name:
-        logger.error("run_eval: missing required env var %s", GOLDEN_DATASET_NAME_VAR)
+        logger.error("run_eval: dataset_name must not be empty")
         _log_run_end("aborted", 1)
         return 1
 
@@ -381,12 +402,13 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
     experiment_name = compose_experiment_name(run_name, run_id)
     logger.info(
         "run_eval: pre-run checks passed run=%s experiment=%s action=%s "
-        "version=%s golden_version=%s items=%d",
+        "version=%s golden_version=%s golden_dataset_name=%s items=%d",
         sanitize_for_log(run_name),
         sanitize_for_log(experiment_name),
         sanitize_for_log(action_id),
         sanitize_for_log(version),
         sanitize_for_log(golden_version),
+        sanitize_for_log(dataset_name),
         len(dataset["items"]),
     )
 
@@ -407,6 +429,7 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
             action_id=action_id,
             action_version=version,
             golden_version=golden_version,
+            golden_dataset_name=dataset_name,
         )
         logger.error(
             "run_eval: %s document_id=%s detail=%s",
@@ -502,6 +525,7 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
             "action_id": action_id,
             "action_version": version,
             "golden_version": golden_version,
+            "golden_dataset_name": dataset_name,
         }
         try:
             platform.record_run(
@@ -536,6 +560,7 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
             action_id=action_id,
             action_version=version,
             golden_version=golden_version,
+            golden_dataset_name=dataset_name,
         )
         logger.error("run_eval: unexpected error: %s", type(exc).__name__)
         _log_run_end("aborted", 1, pass_count=passed_count, fail_count=failed_count)
@@ -551,6 +576,7 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
         action_id=action_id,
         action_version=version,
         golden_version=golden_version,
+        golden_dataset_name=dataset_name,
     )
 
     exit_code = 1 if any_gate_failed else 0

@@ -126,7 +126,9 @@ def _base_env(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> None:
 
 def _run(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> int:
     _base_env(monkeypatch, tmp_path)
-    return run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+    return run_eval(
+        "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+    )
 
 
 # --- Exhaustive reason -> non-zero mapping ------------------------------
@@ -166,7 +168,9 @@ def test_every_abort_reason_exits_non_zero(
     monkeypatch.setattr(facade, "check_schema_drift", _raise)
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     assert reason in caplog.text
@@ -239,7 +243,9 @@ def test_empty_set_and_drifted_schema_reports_schema_drift(
     monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(dataset))
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     assert "schema_drift" in caplog.text
@@ -264,7 +270,9 @@ def test_all_gates_pass_exits_zero(
         facade, "make_platform", lambda: _FakePlatform(_well_formed_dataset())
     )
 
-    exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+    exit_code = run_eval(
+        "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+    )
 
     assert exit_code == 0
 
@@ -291,7 +299,9 @@ def test_any_gate_fail_exits_non_zero_with_no_error_logged(
     )
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     assert caplog.text == ""

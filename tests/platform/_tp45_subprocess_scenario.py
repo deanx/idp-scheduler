@@ -104,7 +104,12 @@ def main() -> None:
     exporter = InMemorySpanExporter()
     http_client = _RecordingHttpClient()
     adapter = _build_isolated_adapter(exporter, http_client)
-    metadata: RunMetadata = {"action_id": "a", "action_version": "v", "golden_version": "g"}
+    metadata: RunMetadata = {
+        "action_id": "a",
+        "action_version": "v",
+        "golden_version": "g",
+        "golden_dataset_name": "d",
+    }
 
     if scenario == "happy":
         scores = build_score_inputs(

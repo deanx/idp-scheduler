@@ -67,11 +67,19 @@ class DocumentRecord(TypedDict):
 
 
 class RunMetadata(TypedDict):
-    """Run-level metadata recorded with every completed run (INV-04)."""
+    """Run-level metadata recorded with every completed run (INV-04,
+    widened to four fields by ADR-0004 amendment T-01.4.12 A6 / DEBT-48).
+
+    ``golden_dataset_name`` is the named golden set this run was measured
+    against -- ``golden_version`` is a content hash (proves *what* was
+    compared) but cannot on its own tell a reader *which* named dataset
+    it came from. INV-04 now requires all four fields on every zero-exit
+    run."""
 
     action_id: str
     action_version: str
     golden_version: str
+    golden_dataset_name: str
 
 
 class PlatformAdapter(Protocol):
@@ -120,6 +128,8 @@ class PlatformAdapter(Protocol):
         action_id: str,
         action_version: str,
         golden_version: str,
+        golden_dataset_name: str,
     ) -> None:
-        """Write the run_status metadata marker (ADR-0004 #14)."""
+        """Write the run_status metadata marker (ADR-0004 #14, widened to
+        four fields by amendment A6 / DEBT-48)."""
         ...

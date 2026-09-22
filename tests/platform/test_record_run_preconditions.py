@@ -24,7 +24,12 @@ from tests.platform._type_pins import _required_fields, _str_fields, _StrFieldPr
 
 _SENTINEL_SCORE_FIELD_MARKER = "SENTINEL-SCORE-FIELD-do-not-leak-6f1a4c"
 
-_METADATA: RunMetadata = {"action_id": "a", "action_version": "v", "golden_version": "g"}
+_METADATA: RunMetadata = {
+    "action_id": "a",
+    "action_version": "v",
+    "golden_version": "g",
+    "golden_dataset_name": "d",
+}
 
 
 class _FakeItemResult:
@@ -1238,6 +1243,7 @@ def test_metadata_missing_any_field_raises_typed_error_parametrized(missing_key:
         "action_id": "a",
         "action_version": "v",
         "golden_version": "g",
+        "golden_dataset_name": "d",
     }
     del full_metadata[missing_key]
 
@@ -1335,6 +1341,7 @@ def test_require_run_metadata_shape_checks_presence_of_a_non_str_required_field(
         "action_id": "a",
         "action_version": "v",
         "golden_version": "g",
+        "golden_dataset_name": "d",
         # "attempt" deliberately absent -- simulates a required non-str
         # field that only the PRESENCE derivation (not the str-value
         # derivation) is aware of.
@@ -1362,6 +1369,7 @@ def test_metadata_field_wrong_type_raises_typed_error_before_any_sdk_call(
         "action_id": "a",
         "action_version": "v",
         "golden_version": "g",
+        "golden_dataset_name": "d",
     }
     bad_metadata[field_name] = [_SENTINEL_METADATA_VALUE_MARKER]  # wrong TYPE, not missing
 

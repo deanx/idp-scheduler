@@ -51,38 +51,40 @@ def test_missing_action_and_no_env_fallback_exits_nonzero_without_calling_run_ev
 def test_action_defaults_to_idp_action_id_env_var_when_omitted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[str, str, str]] = []
+    calls: list[tuple[str, str, str, str]] = []
 
-    def _record(action_id: str, version: str, run_name: str) -> int:
-        calls.append((action_id, version, run_name))
+    def _record(action_id: str, version: str, run_name: str, dataset_name: str) -> int:
+        calls.append((action_id, version, run_name, dataset_name))
         return 0
 
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
     monkeypatch.setattr(cli, "run_eval", _record)
     monkeypatch.setenv("IDP_ACTION_ID", _VALID_UUID)
+    monkeypatch.setenv("GOLDEN_DATASET_NAME", "idp-regression-golden")
 
     exit_code = cli.main(["--version", "1.0", "--run", "nightly"])
 
     assert exit_code == 0
-    assert calls == [(_VALID_UUID, "1.0", "nightly")]
+    assert calls == [(_VALID_UUID, "1.0", "nightly", "idp-regression-golden")]
 
 
 def test_explicit_action_flag_overrides_the_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
     other_uuid = "87654321-4321-4321-4321-210987654321"
-    calls: list[tuple[str, str, str]] = []
+    calls: list[tuple[str, str, str, str]] = []
 
-    def _record(action_id: str, version: str, run_name: str) -> int:
-        calls.append((action_id, version, run_name))
+    def _record(action_id: str, version: str, run_name: str, dataset_name: str) -> int:
+        calls.append((action_id, version, run_name, dataset_name))
         return 0
 
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
     monkeypatch.setattr(cli, "run_eval", _record)
     monkeypatch.setenv("IDP_ACTION_ID", _VALID_UUID)
+    monkeypatch.setenv("GOLDEN_DATASET_NAME", "idp-regression-golden")
 
     exit_code = cli.main(["--action", other_uuid, "--version", "1.0", "--run", "nightly"])
 
     assert exit_code == 0
-    assert calls == [(other_uuid, "1.0", "nightly")]
+    assert calls == [(other_uuid, "1.0", "nightly", "idp-regression-golden")]
 
 
 @pytest.mark.parametrize(
@@ -115,19 +117,30 @@ def test_malformed_version_exits_nonzero_without_calling_run_eval(
 def test_valid_args_call_run_eval_with_the_resolved_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[str, str, str]] = []
+    calls: list[tuple[str, str, str, str]] = []
 
-    def _record(action_id: str, version: str, run_name: str) -> int:
-        calls.append((action_id, version, run_name))
+    def _record(action_id: str, version: str, run_name: str, dataset_name: str) -> int:
+        calls.append((action_id, version, run_name, dataset_name))
         return 7
 
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
     monkeypatch.setattr(cli, "run_eval", _record)
 
-    exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0.0", "--run", "nightly"])
+    exit_code = cli.main(
+        [
+            "--action",
+            _VALID_UUID,
+            "--version",
+            "1.0.0",
+            "--run",
+            "nightly",
+            "--dataset",
+            "idp-regression-golden",
+        ]
+    )
 
     assert exit_code == 7
-    assert calls == [(_VALID_UUID, "1.0.0", "nightly")]
+    assert calls == [(_VALID_UUID, "1.0.0", "nightly", "idp-regression-golden")]
 
 
 def test_malformed_action_id_error_message_never_echoes_the_value(
@@ -160,16 +173,19 @@ def test_load_dotenv_runs_before_the_action_default_is_resolved(
 
     monkeypatch.delenv("IDP_ACTION_ID", raising=False)
     monkeypatch.setattr(cli, "load_dotenv", _fake_load_dotenv)
+    monkeypatch.setenv("GOLDEN_DATASET_NAME", "idp-regression-golden")
 
-    calls: list[tuple[str, str, str]] = []
+    calls: list[tuple[str, str, str, str]] = []
     monkeypatch.setattr(
-        cli, "run_eval", lambda a, v, r: calls.append((a, v, r)) or 0  # type: ignore[func-returns-value]
+        cli,
+        "run_eval",
+        lambda a, v, r, d: calls.append((a, v, r, d)) or 0,  # type: ignore[func-returns-value]
     )
 
     exit_code = cli.main(["--version", "1.0", "--run", "nightly"])
 
     assert exit_code == 0
-    assert calls == [(_VALID_UUID, "1.0", "nightly")]
+    assert calls == [(_VALID_UUID, "1.0", "nightly", "idp-regression-golden")]
 
 
 def test_load_dotenv_is_called_before_parse_args(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -188,10 +204,15 @@ def test_load_dotenv_is_called_before_parse_args(monkeypatch: pytest.MonkeyPatch
     class _RecordingParser:
         def parse_args(self, argv: object) -> argparse.Namespace:
             call_order.append("parse_args")
-            return argparse.Namespace(version="1.0", run_name="nightly", action=_VALID_UUID)
+            return argparse.Namespace(
+                version="1.0",
+                run_name="nightly",
+                action=_VALID_UUID,
+                dataset="idp-regression-golden",
+            )
 
     monkeypatch.setattr(cli, "_build_parser", lambda: _RecordingParser())
-    monkeypatch.setattr(cli, "run_eval", lambda a, v, r: 0)
+    monkeypatch.setattr(cli, "run_eval", lambda a, v, r, d: 0)
 
     exit_code = cli.main([])
 
@@ -219,6 +240,7 @@ def test_main_reaches_the_real_facade_and_returns_its_exit_code(
     still fail this test."""
     monkeypatch.chdir(tmp_path)  # type: ignore[arg-type]
     monkeypatch.delenv("IDP_DOCUMENT_DIR", raising=False)
+    monkeypatch.setenv("GOLDEN_DATASET_NAME", "idp-regression-golden")
 
     exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
 
@@ -241,8 +263,9 @@ def test_main_converts_an_unexpected_exception_from_run_eval_into_a_nonzero_exit
     message through `sanitize_for_log`, and returns a plain non-zero exit
     -- never re-raises, never prints the raw traceback."""
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setenv("GOLDEN_DATASET_NAME", "idp-regression-golden")
 
-    def _boom(action_id: str, version: str, run_name: str) -> int:
+    def _boom(action_id: str, version: str, run_name: str, dataset_name: str) -> int:
         raise RuntimeError("unexpected\nfailure with embedded newline")
 
     monkeypatch.setattr(cli, "run_eval", _boom)
@@ -257,17 +280,108 @@ def test_version_at_the_64_char_cap_is_accepted(monkeypatch: pytest.MonkeyPatch)
     cap (TP-31) was stated in both `cli.py`'s and this module's own
     docstrings but had no test -- a mutant widening the cap to
     unbounded (`{1,}`) survived all 665 tests. Boundary-pin both edges."""
-    calls: list[tuple[str, str, str]] = []
+    calls: list[tuple[str, str, str, str]] = []
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
     monkeypatch.setattr(
-        cli, "run_eval", lambda a, v, r: calls.append((a, v, r)) or 0  # type: ignore[func-returns-value]
+        cli,
+        "run_eval",
+        lambda a, v, r, d: calls.append((a, v, r, d)) or 0,  # type: ignore[func-returns-value]
     )
     version = "a" * 64
 
-    exit_code = cli.main(["--action", _VALID_UUID, "--version", version, "--run", "nightly"])
+    exit_code = cli.main(
+        [
+            "--action",
+            _VALID_UUID,
+            "--version",
+            version,
+            "--run",
+            "nightly",
+            "--dataset",
+            "idp-regression-golden",
+        ]
+    )
 
     assert exit_code == 0
-    assert calls == [(_VALID_UUID, version, "nightly")]
+    assert calls == [(_VALID_UUID, version, "nightly", "idp-regression-golden")]
+
+
+def test_dataset_flag_overrides_the_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A6 (DEBT-48): `--dataset` > `GOLDEN_DATASET_NAME`, same precedence
+    shape as `--action`/`IDP_ACTION_ID`."""
+    calls: list[tuple[str, str, str, str]] = []
+
+    def _record(action_id: str, version: str, run_name: str, dataset_name: str) -> int:
+        calls.append((action_id, version, run_name, dataset_name))
+        return 0
+
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(cli, "run_eval", _record)
+    monkeypatch.setenv("GOLDEN_DATASET_NAME", "env-dataset")
+
+    exit_code = cli.main(
+        [
+            "--action",
+            _VALID_UUID,
+            "--version",
+            "1.0",
+            "--run",
+            "nightly",
+            "--dataset",
+            "flag-dataset",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [(_VALID_UUID, "1.0", "nightly", "flag-dataset")]
+
+
+def test_dataset_defaults_to_golden_dataset_name_env_var_when_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str, str, str]] = []
+
+    def _record(action_id: str, version: str, run_name: str, dataset_name: str) -> int:
+        calls.append((action_id, version, run_name, dataset_name))
+        return 0
+
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(cli, "run_eval", _record)
+    monkeypatch.setenv("GOLDEN_DATASET_NAME", "env-dataset")
+
+    exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
+
+    assert exit_code == 0
+    assert calls == [(_VALID_UUID, "1.0", "nightly", "env-dataset")]
+
+
+def test_missing_dataset_and_no_env_fallback_exits_nonzero_without_calling_run_eval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(cli, "run_eval", _fail_if_called)
+    monkeypatch.delenv("GOLDEN_DATASET_NAME", raising=False)
+
+    exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
+
+    assert exit_code != 0
+
+
+@pytest.mark.parametrize("blank_dataset_env", ["", "   "])
+def test_missing_dataset_env_var_is_treated_as_unset_including_whitespace_only(
+    blank_dataset_env: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N6 shape: a whitespace-only `GOLDEN_DATASET_NAME` must be rejected
+    exactly like an unset/empty one, mirroring bootstrap.py's credential
+    guard."""
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(cli, "run_eval", _fail_if_called)
+    monkeypatch.setenv("GOLDEN_DATASET_NAME", blank_dataset_env)
+
+    exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
+
+    assert exit_code != 0
 
 
 def test_version_one_char_past_the_64_char_cap_is_rejected(

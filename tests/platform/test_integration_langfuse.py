@@ -332,7 +332,12 @@ def test_n26_distinct_run_names_no_score_collision_two_separate_experiments(
             run_name=run_name,
             run_id=run_id,
             records=[record],
-            metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+            metadata={
+                "action_id": "a",
+                "action_version": "v",
+                "golden_version": "g",
+                "golden_dataset_name": "d",
+            },
         )
         gate_ids.append(
             score_id(run_id=run_id, document_id=item["document_id"], score_name="gate")
@@ -391,7 +396,12 @@ def test_tp37_same_run_name_different_run_ids_finding(
             run_name=same_run_name,
             run_id=run_id,
             records=[record],
-            metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+            metadata={
+                "action_id": "a",
+                "action_version": "v",
+                "golden_version": "g",
+                "golden_dataset_name": "d",
+            },
         )
         gate_ids.append(
             score_id(run_id=run_id, document_id=item["document_id"], score_name="gate")
@@ -494,7 +504,12 @@ def test_record_run_writes_readable_scores_and_is_visible_in_experiments(
         run_name=run_name,
         run_id=run_id,
         records=records,
-        metadata={"action_id": "action-1", "action_version": "v1", "golden_version": "deadbeef"},
+        metadata={
+            "action_id": "action-1",
+            "action_version": "v1",
+            "golden_version": "deadbeef",
+            "golden_dataset_name": "dataset-1",
+        },
     )
 
     gate_score_id = score_id(
@@ -569,7 +584,12 @@ def test_record_run_no_retry_and_no_op_flush_when_tracing_not_configured(
                     "scores": [],
                 }
             ],
-            metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+            metadata={
+                "action_id": "a",
+                "action_version": "v",
+                "golden_version": "g",
+                "golden_dataset_name": "d",
+            },
         )
 
 
@@ -624,7 +644,12 @@ def test_record_run_never_logs_the_auth_header_on_the_otlp_path(
         run_name=f"test-s013-run-{uuid.uuid4().hex[:8]}",
         run_id="run-otlp-redaction",
         records=[record],
-        metadata={"action_id": "a", "action_version": "v", "golden_version": "g"},
+        metadata={
+            "action_id": "a",
+            "action_version": "v",
+            "golden_version": "g",
+            "golden_dataset_name": "d",
+        },
     )
 
     assert secret_key not in caplog.text

@@ -40,6 +40,7 @@ DOCUMENT_DIR = "/documents"
 ACTION_ID = "12345678-1234-1234-1234-123456789012"
 VERSION = "1.0"
 RUN_NAME = "nightly"
+DATASET_NAME = "idp-regression-golden"
 
 
 def _set_all_credential_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -165,6 +166,7 @@ class _E2EPlatform:
         action_id: str,
         action_version: str,
         golden_version: str,
+        golden_dataset_name: str,
     ) -> None:
         self._events.append(f"mark_run_status:{status}")
         self.mark_run_status_calls.append(
@@ -174,6 +176,7 @@ class _E2EPlatform:
                 "action_id": action_id,
                 "action_version": action_version,
                 "golden_version": golden_version,
+                "golden_dataset_name": golden_dataset_name,
             }
         )
 
@@ -204,7 +207,7 @@ def test_happy_path_extracts_classifies_gates_and_records_once(
     _idp_adapter_conforms: IDPAdapter = idp_adapter  # S-2: Protocol binding check
     platform = _install(monkeypatch, document_ids=document_ids, idp_adapter=idp_adapter)
 
-    exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME)
+    exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME, DATASET_NAME)
 
     assert exit_code == 0
     assert idp_adapter.calls == document_ids
@@ -219,12 +222,14 @@ def test_happy_path_extracts_classifies_gates_and_records_once(
     assert [r["document_id"] for r in records] == document_ids
     assert all(set(r.keys()) == {"item_id", "document_id", "scores"} for r in records)
 
-    # INV-04: action_id/action_version/golden_version in run metadata.
+    # INV-04 (widened to four fields, A6/DEBT-48): action_id/
+    # action_version/golden_version/golden_dataset_name in run metadata.
     metadata = call["metadata"]
     assert isinstance(metadata, dict)
     assert metadata["action_id"] == ACTION_ID
     assert metadata["action_version"] == VERSION
     assert isinstance(metadata["golden_version"], str) and metadata["golden_version"]
+    assert metadata["golden_dataset_name"] == DATASET_NAME
 
     # The run completes -- best-effort "complete" marker, not "aborted".
     assert [c["status"] for c in platform.mark_run_status_calls] == ["complete"]
@@ -243,7 +248,7 @@ def test_no_platform_write_happens_before_every_gate_is_computed(
     _idp_adapter_conforms: IDPAdapter = idp_adapter  # S-2: Protocol binding check
     _install(monkeypatch, document_ids=document_ids, idp_adapter=idp_adapter)
 
-    exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME)
+    exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME, DATASET_NAME)
 
     assert exit_code == 0
     # Every extract:<doc> event precedes the single record_run event --
@@ -275,7 +280,7 @@ def test_abort_at_document_2_of_3_stops_the_run_and_marks_aborted_once(
     platform = _install(monkeypatch, document_ids=document_ids, idp_adapter=idp_adapter)
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME)
+        exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME, DATASET_NAME)
 
     assert exit_code != 0
     # doc-1 and doc-2 were reached; doc-3 (after the failure) was not.
@@ -316,7 +321,7 @@ def test_abort_path_returns_promptly(
     _install(monkeypatch, document_ids=document_ids, idp_adapter=idp_adapter)
 
     start = time.perf_counter()
-    exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME)
+    exit_code = run_eval(ACTION_ID, VERSION, RUN_NAME, DATASET_NAME)
     elapsed = time.perf_counter() - start
 
     assert exit_code != 0

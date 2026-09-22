@@ -196,7 +196,7 @@ def test_run_eval_calls_load_dotenv_before_validating_platform_credentials(
         facade, "validate_platform_credentials", fake_validate_platform_credentials
     )
 
-    run_eval("action", "version", "run")
+    run_eval("action", "version", "run", "idp-regression-golden")
 
     assert call_order == ["load_dotenv", "validate_platform_credentials"]
 
@@ -220,7 +220,7 @@ def test_run_eval_returns_nonzero_and_names_the_missing_platform_var(
 
     with caplog.at_level(logging.ERROR):
         exit_code = run_eval(
-            "12345678-1234-1234-1234-123456789012", "1.0", "nightly"
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
         )
 
     assert exit_code != 0
@@ -247,7 +247,9 @@ def test_run_eval_returns_nonzero_when_a_platform_var_is_set_but_empty(
     monkeypatch.setattr(facade, "make_idp_adapter", _fail_if_called)
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     assert "LANGFUSE_PUBLIC_KEY" in caplog.text
@@ -267,7 +269,7 @@ def test_run_eval_returns_nonzero_and_names_the_missing_idp_var(
 
     with caplog.at_level(logging.ERROR):
         exit_code = run_eval(
-            "12345678-1234-1234-1234-123456789012", "1.0", "nightly"
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
         )
 
     assert exit_code != 0
@@ -297,7 +299,9 @@ def test_run_eval_returns_nonzero_when_idp_statuses_are_configured_inconsistentl
     monkeypatch.setenv("IDP_TERMINAL_STATUSES", "SUCCEEDED")
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
 
@@ -325,7 +329,9 @@ def test_run_eval_sanitizes_the_caught_idp_configuration_exception_message(
     monkeypatch.setattr(facade, "make_idp_adapter", _raise_hostile)
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     assert hostile_message not in caplog.text
@@ -345,7 +351,7 @@ def test_run_eval_never_logs_the_idp_client_secret_value(
     monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
 
     with caplog.at_level(logging.ERROR):
-        run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden")
 
     assert "distinctive-pub-9f3a" not in caplog.text
     assert "distinctive-client-id-7b1e" not in caplog.text
@@ -355,14 +361,19 @@ def test_run_eval_never_logs_the_idp_client_secret_value(
 # --- T-01.4.11/.2/.5: get_dataset / schema-drift / empty-set / N28 ------
 
 
-def test_run_eval_returns_nonzero_and_names_the_missing_dataset_name_var(
+def test_run_eval_returns_nonzero_on_an_empty_dataset_name(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     tmp_path: object,
 ) -> None:
+    """A6 (ADR-0004 amendment T-01.4.12 / DEBT-48): `dataset_name` is now
+    a required parameter (precedence resolution moved to `cli.py::main`,
+    mirroring `--action`/`IDP_ACTION_ID`) -- `run_eval` itself no longer
+    reads `GOLDEN_DATASET_NAME` from the environment, but still
+    fail-closes (N6 shape, zero network calls) on an empty/whitespace-only
+    value passed directly by any caller."""
     _disable_dotenv_file_loading(monkeypatch, tmp_path)
     _set_all_credential_env(monkeypatch)
-    monkeypatch.delenv("GOLDEN_DATASET_NAME", raising=False)
 
     def _fail_if_called() -> None:
         raise AssertionError("make_platform must not be called: zero network calls (N6)")
@@ -370,10 +381,12 @@ def test_run_eval_returns_nonzero_and_names_the_missing_dataset_name_var(
     monkeypatch.setattr(facade, "make_platform", _fail_if_called)
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "   "
+        )
 
     assert exit_code != 0
-    assert "GOLDEN_DATASET_NAME" in caplog.text
+    assert "dataset_name" in caplog.text
 
 
 def test_run_eval_returns_nonzero_on_dataset_fetch_failure(
@@ -392,7 +405,9 @@ def test_run_eval_returns_nonzero_on_dataset_fetch_failure(
     monkeypatch.setattr(facade, "make_platform", lambda: _FailingPlatform())
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     assert "dataset_fetch_failed" in caplog.text
@@ -411,7 +426,9 @@ def test_run_eval_returns_nonzero_on_schema_drift(
     monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(dataset))
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     assert "schema_drift" in caplog.text
@@ -442,7 +459,9 @@ def test_run_eval_reports_schema_drift_not_empty_set_when_both_would_fire(
     monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(dataset))
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     assert "schema_drift" in caplog.text
@@ -462,7 +481,9 @@ def test_run_eval_returns_nonzero_on_empty_golden_set(
     monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(dataset))
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     assert "empty_set" in caplog.text
@@ -487,7 +508,9 @@ def test_run_eval_writes_no_marker_on_a_pre_run_abort(
     recording_platform = _RecordingPlatform(dataset)
     monkeypatch.setattr(facade, "make_platform", lambda: recording_platform)
 
-    exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+    exit_code = run_eval(
+        "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+    )
 
     assert exit_code != 0
     assert recording_platform.mark_run_status_calls == []
@@ -506,7 +529,9 @@ def test_run_eval_returns_nonzero_on_malformed_golden(
     monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(dataset))
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     assert "malformed_golden" in caplog.text
@@ -531,7 +556,7 @@ def test_run_eval_logs_the_golden_version_content_hash(
     _stub_make_idp_adapter_success(monkeypatch)
 
     with caplog.at_level(logging.INFO):
-        run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden")
 
     assert expected_golden_version in caplog.text
 
@@ -548,7 +573,9 @@ def test_run_eval_returns_zero_once_the_whole_run_succeeds(
     _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
     _stub_make_idp_adapter_success(monkeypatch)
 
-    exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+    exit_code = run_eval(
+        "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+    )
 
     assert exit_code == 0
 
@@ -565,7 +592,7 @@ def test_run_eval_composes_the_experiment_name_before_hitting_the_loop_boundary(
     monkeypatch.setattr(facade, "generate_run_id", lambda: "0123456789abcdef0123456789abcdef")
 
     with caplog.at_level(logging.INFO):
-        run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden")
 
     assert "nightly-01234567" in caplog.text
 
@@ -596,7 +623,7 @@ def test_run_eval_sanitizes_logged_values_not_just_names_them(
     experiment_name = run_name + "-01234567"
 
     with caplog.at_level(logging.INFO):
-        run_eval(action_id, version, run_name)
+        run_eval(action_id, version, run_name, "idp-regression-golden")
 
     assert f"run={json.dumps(run_name)}" in caplog.text
     assert f"experiment={json.dumps(experiment_name)}" in caplog.text
@@ -635,7 +662,9 @@ def test_run_eval_returns_nonzero_when_idp_document_dir_is_missing(
     monkeypatch.setattr(facade, "make_platform", _fail_if_called)
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     assert "IDP_DOCUMENT_DIR" in caplog.text
@@ -651,7 +680,9 @@ def test_run_eval_resolves_document_id_to_a_path_under_idp_document_dir(
     _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
     fake_idp = _stub_make_idp_adapter_success(monkeypatch, document_dir="/custom-dir")
 
-    exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+    exit_code = run_eval(
+        "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+    )
 
     assert exit_code == 0
     assert fake_idp.calls == [
@@ -671,7 +702,9 @@ def test_run_eval_calls_record_run_exactly_once_with_every_document_record(
     monkeypatch.setattr(facade, "generate_run_id", lambda: "0123456789abcdef0123456789abcdef")
     _stub_make_idp_adapter_success(monkeypatch)
 
-    exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+    exit_code = run_eval(
+        "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+    )
 
     assert exit_code == 0
     assert len(recording_platform.record_run_calls) == 1
@@ -701,7 +734,9 @@ def test_run_eval_passes_run_metadata_to_record_run_on_every_zero_exit_run(
     monkeypatch.setattr(facade, "make_platform", lambda: recording_platform)
     _stub_make_idp_adapter_success(monkeypatch)
 
-    exit_code = run_eval("12345678-1234-1234-1234-123456789012", "9.9", "nightly")
+    exit_code = run_eval(
+        "12345678-1234-1234-1234-123456789012", "9.9", "nightly", "idp-regression-golden"
+    )
 
     assert exit_code == 0
     metadata = recording_platform.record_run_calls[0]["metadata"]
@@ -709,6 +744,7 @@ def test_run_eval_passes_run_metadata_to_record_run_on_every_zero_exit_run(
         "action_id": "12345678-1234-1234-1234-123456789012",
         "action_version": "9.9",
         "golden_version": hash_dataset(dataset["items"]),  # type: ignore[arg-type]
+        "golden_dataset_name": "idp-regression-golden",
     }
 
 
@@ -724,7 +760,9 @@ def test_run_eval_marks_run_status_complete_after_a_successful_record_run(
     monkeypatch.setattr(facade, "generate_run_id", lambda: "0123456789abcdef0123456789abcdef")
     _stub_make_idp_adapter_success(monkeypatch)
 
-    exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+    exit_code = run_eval(
+        "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+    )
 
     assert exit_code == 0
     assert recording_platform.mark_run_status_calls == [
@@ -734,6 +772,7 @@ def test_run_eval_marks_run_status_complete_after_a_successful_record_run(
             "action_id": "12345678-1234-1234-1234-123456789012",
             "action_version": "1.0",
             "golden_version": recording_platform.record_run_calls[0]["metadata"]["golden_version"],  # type: ignore[index]
+            "golden_dataset_name": "idp-regression-golden",
         }
     ]
     # record_run happened strictly before the complete marker (ADR-0005 #9 step 4/5).
@@ -764,7 +803,9 @@ def test_run_eval_never_calls_record_run_before_every_gate_is_computed(
     fake_idp = _FakeIDPAdapter({path1: actual1, path2: actual2})
     monkeypatch.setattr(facade, "make_idp_adapter", lambda: fake_idp)
 
-    exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+    exit_code = run_eval(
+        "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+    )
 
     assert exit_code == 0
     assert len(fake_idp.calls) == 2
@@ -795,7 +836,9 @@ def test_run_eval_aborts_the_whole_run_and_stops_after_the_first_document_failur
     monkeypatch.setattr(facade, "make_idp_adapter", lambda: fake_idp)
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     assert len(fake_idp.calls) == 1  # doc-2 never attempted
@@ -839,7 +882,9 @@ def test_run_eval_maps_each_typed_idp_error_to_its_abort_reason(
     monkeypatch.setattr(facade, "make_idp_adapter", lambda: fake_idp)
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     assert expected_reason in caplog.text
@@ -861,7 +906,9 @@ def test_run_eval_writes_the_aborted_marker_on_a_per_document_abort(
     fake_idp = _FakeIDPAdapter(error=IDPAuthenticationError("token rejected"))
     monkeypatch.setattr(facade, "make_idp_adapter", lambda: fake_idp)
 
-    exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+    exit_code = run_eval(
+        "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+    )
 
     assert exit_code != 0
     assert len(recording_platform.mark_run_status_calls) == 1
@@ -893,7 +940,9 @@ def test_run_eval_mark_run_status_failure_is_best_effort_and_does_not_crash(
     monkeypatch.setattr(facade, "make_idp_adapter", lambda: fake_idp)
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     assert len(recording_platform.mark_run_status_calls) == 1  # exactly one attempt, no retry
@@ -916,7 +965,9 @@ def test_run_eval_returns_nonzero_when_record_run_raises_flush_failed(
     _stub_make_idp_adapter_success(monkeypatch)
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     assert "flush_failed" in caplog.text
@@ -941,7 +992,9 @@ def test_run_eval_returns_nonzero_when_record_run_raises_experiment_record_faile
     _stub_make_idp_adapter_success(monkeypatch)
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     assert "hard_failure" in caplog.text
@@ -969,7 +1022,9 @@ def test_run_eval_returns_nonzero_on_a_failing_gate_but_still_records_the_run(
     fake_idp = _FakeIDPAdapter({path: mismatched_actual})
     monkeypatch.setattr(facade, "make_idp_adapter", lambda: fake_idp)
 
-    exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+    exit_code = run_eval(
+        "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+    )
 
     assert exit_code != 0
     assert len(recording_platform.record_run_calls) == 1
@@ -983,6 +1038,7 @@ def test_run_eval_returns_nonzero_on_a_failing_gate_but_still_records_the_run(
             "action_id": "12345678-1234-1234-1234-123456789012",
             "action_version": "1.0",
             "golden_version": recording_platform.record_run_calls[0]["metadata"]["golden_version"],  # type: ignore[index]
+            "golden_dataset_name": "idp-regression-golden",
         }
     ]
 
@@ -1091,7 +1147,9 @@ def test_run_eval_aborts_on_path_containment_violation(
     monkeypatch.setattr(facade, "make_idp_adapter", lambda: fake_idp)
 
     with caplog.at_level(logging.ERROR):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     assert "path_containment_violation" in caplog.text
@@ -1116,7 +1174,9 @@ def test_run_eval_logs_run_start_with_item_count(
     _stub_make_idp_adapter_success(monkeypatch)
 
     with caplog.at_level(logging.INFO):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code == 0
     assert "items=1" in caplog.text
@@ -1133,7 +1193,9 @@ def test_run_eval_logs_run_end_with_outcome_exit_code_counts_and_elapsed_on_succ
     _stub_make_idp_adapter_success(monkeypatch)
 
     with caplog.at_level(logging.INFO):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code == 0
     end_lines = [line for line in caplog.text.splitlines() if "run_end" in line]
@@ -1158,7 +1220,9 @@ def test_run_eval_logs_run_end_with_elapsed_on_a_pre_run_credential_abort(
     monkeypatch.delenv("LANGFUSE_HOST", raising=False)
 
     with caplog.at_level(logging.INFO):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     end_lines = [line for line in caplog.text.splitlines() if "run_end" in line]
@@ -1185,7 +1249,9 @@ def test_run_eval_logs_run_end_with_elapsed_on_a_per_document_abort(
     )
 
     with caplog.at_level(logging.INFO):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     end_lines = [line for line in caplog.text.splitlines() if "run_end" in line]
@@ -1208,7 +1274,7 @@ def test_run_eval_logs_elapsed_for_each_document_linked_to_its_document_id(
     _stub_make_idp_adapter_success(monkeypatch)
 
     with caplog.at_level(logging.INFO):
-        run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden")
 
     doc_lines = [
         line
@@ -1262,7 +1328,7 @@ def test_run_eval_never_logs_golden_or_actual_field_values_in_telemetry(
     monkeypatch.setattr(facade, "make_idp_adapter", lambda: fake_idp)
 
     with caplog.at_level(logging.INFO):
-        run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden")
 
     assert sentinel_golden_value not in caplog.text
     assert sentinel_actual_value not in caplog.text
@@ -1281,7 +1347,9 @@ def test_run_eval_never_logs_the_document_dir_path_in_telemetry(
     _stub_make_idp_adapter_success(monkeypatch, document_dir=sentinel_dir)
 
     with caplog.at_level(logging.INFO):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code == 0
     assert sentinel_dir not in caplog.text
@@ -1323,7 +1391,9 @@ def test_run_eval_never_escapes_on_a_malformed_dataset_shape(
     monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(bad_dataset))
 
     with caplog.at_level(logging.INFO):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     assert "dataset_fetch_failed" in caplog.text
@@ -1348,7 +1418,9 @@ def test_run_eval_never_escapes_on_an_untyped_pre_run_exception(
     monkeypatch.setattr(facade, "check_schema_drift", _boom)
 
     with caplog.at_level(logging.INFO):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     assert "run_end" in caplog.text
@@ -1375,7 +1447,9 @@ def test_run_eval_writes_the_aborted_marker_on_an_untyped_in_loop_exception(
     monkeypatch.setattr(facade, "classify", _boom)
 
     with caplog.at_level(logging.INFO):
-        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden"
+        )
 
     assert exit_code != 0
     assert "run_end" in caplog.text
@@ -1399,4 +1473,4 @@ def test_run_eval_still_propagates_keyboard_interrupt(
     monkeypatch.setattr(facade, "check_schema_drift", _boom)
 
     with pytest.raises(KeyboardInterrupt):
-        run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+        run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden")
