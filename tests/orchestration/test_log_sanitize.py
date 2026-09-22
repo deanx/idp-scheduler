@@ -177,6 +177,35 @@ def test_frame_location_is_total_against_an_arbitrary_relpath_failure(
     assert location  # some safe string, not a crash
 
 
+# --- HARDEN-01 §10.5/§10.6 (P18, DEBT-58): `traceback.extract_tb` was
+# the ONE statement outside `frame_location`'s guarded `try` -- it does
+# file I/O via `linecache` and is not pure. Branca reproduced a genuine,
+# unmocked `RecursionError` escaping from inside it. Pin totality here
+# with a mocked failure (the deterministic half of that reproduction).
+
+
+def test_frame_location_is_total_when_extract_tb_itself_raises(
+    monkeypatch: object,
+) -> None:
+    """`frame_location` must be genuinely total: `traceback.extract_tb`
+    is not a pure function (it goes through `linecache`) and must be
+    inside the same guarded body as everything else, not a bare
+    statement ahead of the `try`."""
+    import traceback as traceback_module
+
+    def _boom(*args: object, **kwargs: object) -> list[object]:
+        raise RecursionError("maximum recursion depth exceeded (simulated)")
+
+    monkeypatch.setattr(traceback_module, "extract_tb", _boom)  # type: ignore[attr-defined]
+
+    try:
+        raise RuntimeError("boom")
+    except RuntimeError as exc:
+        location = frame_location(exc)  # must not raise
+
+    assert location == "<unavailable>"
+
+
 def test_frame_location_is_package_relative_for_a_facade_frame() -> None:
     """A frame inside `idp_regression` itself renders as
     `idp_regression/<...>.py:<line>:<func>` -- never a machine-specific

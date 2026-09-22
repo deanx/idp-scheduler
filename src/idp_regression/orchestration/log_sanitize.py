@@ -95,12 +95,23 @@ def frame_location(exc: BaseException) -> str:
     quoting/escaping), so an embedded newline (or quote) can never
     produce a second physical line. The static fallback literals
     (`<no traceback>`, `<unavailable>`) carry no untrusted data and are
-    returned as-is."""
-    frames = traceback.extract_tb(exc.__traceback__)
-    if not frames:
-        return "<no traceback>"
-    frame = frames[-1]
+    returned as-is.
+
+    ⚠️ Fixed a fifth time 2026-09-21 (Branca `/harden` §10.1/§10.5, P18,
+    DEBT-58 -- the last third of A-5): `traceback.extract_tb(...)` used
+    to be the ONE statement OUTSIDE the guarded body, on the assumption
+    it was a pure computation over `exc.__traceback__`. It is not:
+    `extract_tb` reads source lines through `linecache`, which does
+    file I/O, and a genuine (unmocked) `RecursionError` inside it was
+    reproduced escaping this function. It is now inside the same `try`
+    as everything else, so the "no traceback, no filename shape and no
+    unanticipated failure may ever raise out of this function" claim
+    above is actually true, not just true for the filename computation."""
     try:
+        frames = traceback.extract_tb(exc.__traceback__)
+        if not frames:
+            return "<no traceback>"
+        frame = frames[-1]
         if not os.path.isabs(frame.filename):
             filename = f"<external>/{os.path.basename(frame.filename)}"
         else:
