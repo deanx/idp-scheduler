@@ -1,25 +1,25 @@
 # HARDEN-01 — Containment report — UC-01 baseline regression
 
-**Verdict: ⚠️ PASS WITH RESIDUALS** — re-run #3 2026-09-21 (see §9; §8 is the superseded re-run #2 block)
+**Verdict: ⚠️ PASS WITH RESIDUALS** — re-run #4 2026-09-21 (see §10; §§7–9 are the superseded earlier re-run blocks)
 
 ```
 Verdict: PASS_WITH_RESIDUALS
-Date: 2026-09-21 (re-run #3)
-Commit: f63500d (code in 65098a5) - supersedes the 5c0f1ac pin of re-run #2
+Date: 2026-09-21 (re-run #4)
+Commit: b473ce4 (code in d966219) - supersedes the f63500d pin of re-run #3
 GAP-1: CLOSED (re-run #2, unchanged)
 GAP-2: CLOSED (re-run #2, unchanged)
 GAP-3: OPEN - Minor, accepted + carded (DEBT-53)
 GAP-4: CLOSED (re-run #2, unchanged)
-GAP-5: CLOSED - CancelledError contained at all 4 catch-alls (facade x2, cli x2); KeyboardInterrupt/SystemExit still propagate from all 4; asyncio cancellation NOT wedged (W1)
-GAP-6: CLOSED - all 11 reproductions now type-name + frame-location only, 0 sentinel hits
-GAP-7: CLOSED - load_dotenv inside the try in BOTH entry points; no .env path in any log or stderr, no traceback printed
-A-5 (incl. the re-run #2 sub-case): STILL OPEN - Minor, non-blocking - neither catch-all guards its OWN handling (extract_tb / relpath / log handler raising all escape) - DEBT-57
-GAP-8: NEW - Minor, non-blocking - frame_location() is unsafe for a frame outside the package tree: os.path.relpath TRAVERSES above _PACKAGE_PARENT and, for a non-absolute filename, prepends the cwd (reproduced on a stdlib frozen-dataclass "<string>" frame); it also RAISES FileNotFoundError when the cwd is gone
-GAP-8 at 1e8e1aa (landed mid-run, probed, NOT part of this discharge): disclosure half CLOSED by the <external>/ clamp; the raise half is STILL OPEN (only ValueError is caught, FileNotFoundError from getcwd is not) - see 9.7
+GAP-5: CLOSED - re-confirmed at b473ce4, incl. the FIFTH site (tail complete-marker): CancelledError contained, KeyboardInterrupt/SystemExit still propagate
+GAP-6: CLOSED - re-confirmed (planted golden+key sentinel in a check_schema_drift RuntimeError: 0 hits, type-name + frame-location only)
+GAP-7: CLOSED - re-confirmed (PermissionError naming /very/secret/deploy/path/.env: 0 path hits, run_end present)
+GAP-8: CLOSED at d966219 - 19 raise-attempts and 11 disclosure shapes against frame_location: 0 disclosures (0 hits for HOME/USER/cwd/site-packages/_PACKAGE_PARENT on <string>, <frozen ...>, relative, abs-in-cwd, abs-in-HOME, stdlib, site-packages and package-internal frames) and 0 raises from the guarded body (deleted cwd, unreadable cwd, dir-as-filename, NUL, 64k path, non-str filename, raising __str__, lineno=None, truncated tb, mocked isabs/relpath/basename/getcwd all raising -> <external>/... or <unavailable>)
+A-5: STILL OPEN but REDUCED from three thirds to two - Minor, non-blocking, DEBT-57 - the `relpath` third is closed by GAP-8's fix; `traceback.extract_tb` raising and a raising log handler still escape. NOTE: `frame_location` is NOT total as claimed - `extract_tb` (which does linecache file I/O) is the one statement OUTSIDE the try; a RecursionError raised there escaped (P18)
+A-6: NEW - Minor, non-blocking, advisory - frame_location's return value is the only untrusted-shaped value interpolated into a log line WITHOUT sanitize_for_log; a frame filename containing a newline splits the log line and forged a `run_eval: run_end outcome=success exit_code=0` second physical line (reproduced). Not reachable from project data today (all code objects come from real files); exit code, not the log, is the CI truth - so no GREEN build. Event-shaped obligation, same family as A-1/DEBT-54
 __context__: PASS (re-run #2, unchanged)
-Leak: PASS - 0 sentinel hits on all 11 GAP-6 paths and both GAP-7 paths; the 2 surviving str(exc) clauses (DatasetFetchFailedError, RunAborted) are typed and constructor-vetted (redact() at the transport source)
-Fail-open: PASS (no probe produced a GREEN build; green run still exits 0 with a single complete marker)
-Containment-REQUIRED: DISCHARGED at f63500d - discharge now covers the full committed tree, no longer pinned to an older commit
+Leak: PASS - 0 sentinel hits on the re-checked GAP-6/GAP-7 paths and on the <unavailable> fallback route
+Fail-open: PASS - no probe returned 0 on a failure; green control run exits 0 with a single complete marker (CT-04 intact)
+Containment-REQUIRED: DISCHARGED at b473ce4 (the commit S-01.4 is stamped and QA'd on)
 ```
 
 **Use case:** UC-01 · **Story under gate:** S-01.4 (orchestrator + CLI) · **Date:** 2026-09-21
@@ -562,3 +562,114 @@ Recorded for honesty, as §8's pin was. `feat/S-01.2-idp-adapter` advanced from 
 So `1e8e1aa` closes GAP-8's **disclosure** half (and more thoroughly than §9.4 asked for — it clamps the absolute-path traversal case as well), and leaves GAP-8's **raise** half open: `frame_location` can still raise inside the catch-all's own handler. One-line completion: catch `OSError` alongside `ValueError`, or wrap the whole body.
 
 **The discharge in §9.6 is pinned to `f63500d`.** It does *not* extend to `1e8e1aa` or to the current dirty tree; nothing probed at `1e8e1aa` weakens it (the one commit between them strictly improves containment), but a full re-gate at whatever commit the tree settles on should re-run the §9.6 scope.
+
+---
+
+## 10. Re-run #4 — 2026-09-21 — GAP-8 and the A-5 `relpath` third
+
+**Red-team:** Branca · **Commit under gate:** `b473ce4` (code in `d966219`, `feat/S-01.2-idp-adapter`) · **Scope, as asked:** GAP-8 and the A-5 `relpath` third only, plus anything those fixes introduce. Source changes since §9 are confined to `orchestration/{log_sanitize,facade,cli}.py` (`1e8e1aa`, `522f9e5`, `63141b3`, `d966219`).
+
+> **Method.** Per §9.6's own process note, **no `git worktree`**: the tree was materialised with `git archive b473ce4 | tar -x` into a plain, non-git directory (`scratchpad/tree4`), `PYTHONPATH` pinned to `tree4/src`, and **every probe asserts `facade.__file__` / `log_sanitize.__file__` resolution in-band** before injecting. 33 throwaway probes (19 raise-attempts, 11 disclosure shapes, 13 end-to-end containment probes), run from the scratchpad, never added to `tests/`. `src/` and existing tests untouched. Suite inside the export: **837 passed / 14 skipped / 2 failed**, both failures being the two `tests/tooling/test_secrets_gate.py` cases that shell out to `git` (837 + 2 = the stated 839 baseline) — the export, not a defect. No live IDP call, no live platform call, no document submitted.
+
+### 10.1 "Try to make `frame_location` raise" — the totality claim, tested
+
+| # | Injection | Result |
+|---|---|---|
+| P1 | deleted cwd + `<string>` frame (GAP-8's own trigger) | `'<external>/<string>:15:__setattr__'` — **no raise** |
+| P1b | deleted cwd + absolute external frame | `'<external>/decoder.py:361:raw_decode'` — no raise |
+| P2 | cwd `chmod 000` (unreadable) + `<string>` frame | no raise |
+| P3 | filename is a **directory** | `'<external>/T:7:fn'` — no raise |
+| P4 | filename containing a **NUL** byte | no raise (see A-6 below for the shape question) |
+| P5 | 64 KiB filename | no raise |
+| P6/P7/P8 | filename is **`bytes` / `None` / `int`** (not a string at all) | `'<unavailable>'` — no raise |
+| P9 | filename object whose `__str__` itself raises | `'<unavailable>'` — no raise |
+| P10 | `lineno` is `None` | `'<external>/x.py:None:fn'` — no raise |
+| P11 | truncated/re-pointed `__traceback__` | no raise |
+| P12 | `__traceback__ = None` | `'<no traceback>'` — no raise |
+| P14/P15/P16 | `os.path.isabs` / `relpath` / `basename` mocked to raise | `'<unavailable>'`, clamped, `'<unavailable>'` — **no raise** |
+| P17 | `os.getcwd` mocked to raise `PermissionError` | no raise (never reached — non-absolute filenames no longer call `relpath`) |
+| **P13** | **`traceback.extract_tb` mocked to raise** | ❌ **RAISED `MemoryError`** |
+| **P18** | called with the stack near the recursion limit | ❌ **RAISED `RecursionError`**, raise site `traceback.extract_tb` → `linecache.getlines` → `updatecache` |
+
+**GAP-8 is CLOSED**: every shape GAP-8 named, and every shape reachable through the guarded body, is contained. **The author's "`frame_location` is now total" claim is, however, not quite true, and P18 shows why it matters:** `frames = traceback.extract_tb(exc.__traceback__)` is the **one statement outside the `try`**, and `extract_tb` is not a pure function — it goes through `linecache`, which does **file I/O**. P18 is not a mock: a genuine `RecursionError` raised inside `extract_tb`'s own `linecache` call escaped `frame_location`, and therefore escaped the catch-all that called it. This is **exactly the `extract_tb` third of A-5**, already carded (DEBT-57) — it is not a new gap, and the one-line completion is to move that statement inside the existing `try`.
+
+### 10.2 "Try to make it disclose" — 0 hits
+
+Each rendered location was checked against `$HOME`, the username, the cwd, the interpreter's `site-packages`/stdlib directory and `_PACKAGE_PARENT`:
+
+| Frame shape | Rendered | Hits |
+|---|---|---|
+| frozen-`dataclass` `__setattr__` (`<string>`) | `<external>/<string>:15:__setattr__` | **none** |
+| stdlib absolute (`json.decoder`) | `<external>/decoder.py:361:raw_decode` | **none** |
+| site-packages / stdlib `urllib` | `<external>/request.py:1322:do_open` | **none** |
+| real frame, **relative** filename (`rel/sub/mod.py`) | `<external>/mod.py:1:<module>` | **none** |
+| real frame, `<frozen importlib._bootstrap>` | `<external>/<frozen importlib._bootstrap>:1:<module>` | **none** |
+| real frame, absolute **inside the cwd** | `<external>/abs_in_cwd.py:1:<module>` | **none** |
+| real frame, absolute **inside `$HOME`** | `<external>/app.py:1:<module>` | **none** |
+| package-internal frame | `idp_regression/orchestration/log_sanitize.py:27:…` | **none** (package-relative, as designed) |
+| the `<unavailable>` fallback route | `<unavailable>` | **none** |
+
+The §9.4 cwd disclosure (`'../../../../../../../var/folders/…/<string>'`) is **not reproducible** at `d966219`. The `<external>/` clamp plus the non-absolute short-circuit together close both disclosure halves.
+
+### 10.3 The fallback is honest (T3)
+
+Forcing `frame_location` onto the `<unavailable>` path during a real in-loop untyped failure yields:
+
+```
+run_eval: unexpected error: Boom at <unavailable>
+```
+
+— the exception **type** is still named, `run_end` is still emitted, the marker is still written, exit is 1, and the sentinel planted in the exception's message does not appear. Containment stays diagnosable when the location is lost; only the location is lost.
+
+### 10.4 GAP-5's fifth site — CLOSED (T1, T2)
+
+| Probe | Injection at the tail `status="complete"` marker | Result |
+|---|---|---|
+| T1 | `asyncio.CancelledError` | contained — exit **0** (the run itself passed; the marker is best-effort), `run_end` emitted, `mark_run_status` calls `['complete']` |
+| T2 | `KeyboardInterrupt` | **propagates** ✅ |
+| T2 | `SystemExit` | **propagates** ✅ |
+
+`_mark_run_status_best_effort` now matches the shape of the other four catch-alls exactly: `except (Exception, asyncio.CancelledError)`, never a bare `except BaseException`.
+
+### 10.5 A-5 — still open, and it has **shrunk**, not grown (DEBT-57)
+
+| Third | Status at `b473ce4` |
+|---|---|
+| `os.path.relpath` raising | ✅ **CLOSED** by `d966219` (P14/P15/P16/P17 all contained) |
+| `traceback.extract_tb` raising | ❌ **still escapes** — T4 (mocked) and **P18 (genuine `RecursionError` via `linecache`)** |
+| a raising log handler | ❌ **still escapes** — T5, a handler that raises while emitting the type-name line itself |
+
+No fourth member appeared. Still Minor, still non-blocking: each costs the `run_end` line and the return value, never safety, and each still exits non-zero through Python's own unhandled path.
+
+### 10.6 New advisory — **A-6**: `frame_location`'s output is the one log value not passed through `sanitize_for_log`
+
+Every other untrusted-shaped value at a log boundary in this codebase goes through `sanitize_for_log` (which escapes control characters and quotes). `frame_location(exc)` does not — it is interpolated raw via `%s`. A frame filename containing a newline therefore **splits the log line**. Reproduced end-to-end through `run_eval` with a frame compiled under the filename `"/tmp/a\nrun_eval: run_end outcome=success exit_code=0"`:
+
+```
+run_eval: unexpected error: ValueError at <external>/a
+run_eval: run_end outcome=success exit_code=0:1:<module>
+```
+
+— a **forged second physical line** claiming a successful run, on a run that exited 1. **Why it is non-blocking:** no project data reaches a frame filename today (every code object in this system comes from a real file on disk under a path this project controls), and **the CI gate reads the exit code, never the log**, so this cannot produce a GREEN build — it can only mislead a human or a log aggregator reading telemetry. It is an **event-shaped obligation** of the same family as A-1/DEBT-54: safe *by construction today*, and it becomes unsafe the moment any frame filename stops being project-controlled (an SDK that `exec`s templated code, a checkout path containing a newline). **Fix shape:** wrap the return in `sanitize_for_log(...)`, or reject any filename containing a control character down to `<external>/<invalid>`. One line, and it also settles P4's NUL shape.
+
+### 10.7 Regression spot-checks — GAP-5 / GAP-6 / GAP-7 still closed (not taken on faith)
+
+| Probe | Injection | Result |
+|---|---|---|
+| T6 (GAP-6) | `check_schema_drift` raises `RuntimeError("golden value LEAKSENT-777 and key LEAKSENT-888")` | exit 1, `run_end`, `RuntimeError` + frame location only, **0 sentinel hits** |
+| T7 (GAP-7) | `load_dotenv` raises `PermissionError(13, …, "/very/secret/deploy/path/.env")` | exit 1, `run_end`, **the path appears nowhere** |
+| T8 (GAP-5) | `CancelledError` from `extract` (in-loop) | exit 1, `run_end`, marker `['aborted']` |
+| T11 | deleted cwd, whole run driven end-to-end | contained — a pre-run `FileNotFoundError` from `pathlib` rendered `<external>/_local.py:649:absolute`, exit 1, `run_end` present, no disclosure |
+| T9 (control) | clean run | **exit 0**, single `complete` marker, `run_end` — CT-04 intact |
+
+### 10.8 Verdict — `Containment: REQUIRED` is **DISCHARGED at `b473ce4`**
+
+**GAP-8 is CLOSED** and **the A-5 `relpath` third is CLOSED**, both at `d966219` and both verified adversarially rather than read from the commit message: 19 attempts to make `frame_location` raise through its guarded body all returned a safe string, and 11 disclosure shapes produced zero hits for home, username, cwd, interpreter layout or deployment root. GAP-5's fifth site is closed without swallowing `KeyboardInterrupt`/`SystemExit`, and GAP-5/6/7 re-spot-check clean. Nothing found is fail-open; no probe produced a GREEN build.
+
+**`Containment: REQUIRED` (NFR-01, UC-01) is DISCHARGED at commit `b473ce4`** — named explicitly, because this is the commit S-01.4 is stamped and QA'd on. The discharge covers the full committed tree at that SHA; there is no scope pin and no excluded working tree this time (the checkout was clean but for `docs/state/STATE.json`).
+
+**Carry forward to `/debt` (Dunga), none blocking:** **A-6** (new — `frame_location` output is not `sanitize_for_log`'d; log-line splitting reproduced); **A-5, reduced to two thirds** (DEBT-57 — `extract_tb` outside the `try`, with P18 upgrading it from "mocked only" to a **genuine, unmocked `RecursionError` reproduction**, plus the raising log handler); GAP-3 (DEBT-53); A-1/A-2/A-3 (DEBT-54); A-4 (DEBT-57). **The GAP-8 debt item can be closed.**
+
+**Re-run scope if `orchestration/` changes again:** §10.1's P1/P13/P18, §10.2's nine disclosure shapes, T1/T2 (tail marker), T3 (fallback honesty) and T6/T7/T8/T9. Everything in §§3–9 is settled.
+
+⚠️ **Unchanged caveat, restated so no one reads this verdict as more than it is:** this discharges the *containment marker*, not CLAUDE.md § Rigor's own standing condition — "re-raise to `standard` before this tool gates another team's prompt changes" is untouched by anything in §10.
