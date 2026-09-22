@@ -75,7 +75,12 @@ class _RecordingPlatform:
         dataset: object,
         *,
         record_run_error: Exception | None = None,
-        mark_run_status_error: Exception | None = None,
+        # BaseException, not Exception: production's `_mark_run_status_
+        # best_effort` catches `(Exception, asyncio.CancelledError)`
+        # (facade.py GAP-5) -- asyncio.CancelledError is a BaseException,
+        # not an Exception, so this fixture must be able to raise one to
+        # prove that widened catch clause actually holds.
+        mark_run_status_error: BaseException | None = None,
     ) -> None:
         self._dataset = dataset
         self._record_run_error = record_run_error
@@ -265,7 +270,7 @@ def test_run_eval_has_nothing_outside_the_pre_run_try_between_load_dotenv_and_th
             return list.__len__(self)
 
     dataset = _well_formed_dataset()
-    dataset["items"] = _ExplodingLenList(dataset["items"])  # type: ignore[arg-type]
+    dataset["items"] = _ExplodingLenList(dataset["items"])
     monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(dataset))
 
     with caplog.at_level(logging.INFO):

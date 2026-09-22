@@ -32,7 +32,8 @@ from idp_regression.platform.langfuse_adapter import (
     make_platform,
 )
 from idp_regression.platform.scoring import RUN_LEVEL_TRACE_SENTINEL, score_id, trace_id
-from idp_regression.platform.types import DatasetItem
+from idp_regression.platform.transport import UrllibHttpClient
+from idp_regression.platform.types import DatasetItem, ScoreInput
 from idp_regression.platform.types import RunStatus as _RunStatus
 from tests.platform._type_pins import _str_fields
 
@@ -57,7 +58,7 @@ class FakeHttpClient:
 
 def _derived_score(
     *, document_id: str, name: str, value: str, run_id: str = "run-1"
-) -> dict[str, Any]:
+) -> ScoreInput:
     """A ScoreInput whose id is derived from the SAME run_id record_run is
     called with — record_run's A3 precondition (ADR-0005 #9) refuses any
     other id, so fixtures must use the real derivation, not a stub."""
@@ -686,6 +687,11 @@ def test_make_platform_dispatches_on_platform_env(monkeypatch: pytest.MonkeyPatc
 
     # -- raw-REST UrllibHttpClient (datasets/schema/scores) --
     http_client = adapter._client  # noqa: SLF001
+    # Narrow HttpClient (Protocol) -> UrllibHttpClient (the concrete
+    # transport) so mypy can see _host/_auth_header — also strengthens the
+    # assertion: it now verifies make_platform() wired the REAL transport,
+    # not just something Protocol-shaped.
+    assert isinstance(http_client, UrllibHttpClient)
     assert http_client._host == "https://example.invalid"  # noqa: SLF001
     decoded = base64.b64decode(
         http_client._auth_header.removeprefix("Basic ")  # noqa: SLF001
@@ -694,6 +700,12 @@ def test_make_platform_dispatches_on_platform_env(monkeypatch: pytest.MonkeyPatc
 
     # -- Langfuse SDK client (OTLP trace + dataset-run linkage) --
     sdk_client = adapter._tracing_client  # noqa: SLF001
+    # Narrow ExperimentRunner | None -> not-None (make_platform always wires
+    # one); the *remaining* attr-defined errors below are the deliberate
+    # part: _base_url / api._client_wrapper are Langfuse SDK privates, not
+    # on the ExperimentRunner Protocol by design (CLAUDE.md ## External
+    # services) -- pinning them IS the point of this test.
+    assert sdk_client is not None
     assert sdk_client._base_url == "https://example.invalid"  # type: ignore[attr-defined]  # noqa: SLF001
     sdk_headers = sdk_client.api._client_wrapper.get_headers()  # type: ignore[attr-defined]
     assert sdk_headers["X-Langfuse-Public-Key"] == "distinctive-pub-9f3a"
@@ -893,9 +905,12 @@ def test_make_platform_resolves_both_clients_to_the_same_host_when_unset_or_equa
         monkeypatch.setenv("LANGFUSE_BASE_URL", base_url_env)
 
     adapter = make_platform()
+    assert isinstance(adapter, LangfuseAdapter)
 
     http_client = adapter._client  # noqa: SLF001
     sdk_client = adapter._tracing_client  # noqa: SLF001
+    assert isinstance(http_client, UrllibHttpClient)
+    assert sdk_client is not None
     assert http_client._host == "https://example.invalid"  # noqa: SLF001
     assert sdk_client._base_url == "https://example.invalid"  # type: ignore[attr-defined]  # noqa: SLF001
 

@@ -1,0 +1,95 @@
+name: quality-gate
+
+# /signoff blocker B-4 -- CI ran no tests and no type-check at all (the
+# only automated gate before this was secret scanning). This workflow is
+# the real gate: it runs the four commands CLAUDE.md ## Commands
+# documents as this project's contract, and it is blocking -- no
+# `continue-on-error` anywhere in this file. A red job fails the build;
+# that is the entire point of closing B-4.
+#
+# Four independent jobs (not one job with four steps) so a failure in one
+# gate is visible on its own line in the PR checks list, and so they run
+# concurrently rather than paying setup cost serially.
+#
+# Integration tests stay opt-in behind RUN_INTEGRATION_TESTS=1 (CLAUDE.md
+# ## Commands) and are deliberately NOT run here -- CI has no IDP or
+# Langfuse credentials, and none are added for this workflow.
+#
+# Dependency install follows the same uv-locked convention as
+# secrets-gate.yml's `lockfile-pin` job: `uv sync --locked` only, never a
+# re-resolve, so CI installs exactly what `uv.lock` pins (CLAUDE.md
+# ## Tooling).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # A stale .pyc from a same-second revert has produced false failures
+  # locally (CLAUDE.md ## Commands) -- never write bytecode in CI either.
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  tests:
+    name: pytest (unit suite; integration stays opt-in)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: install from the lock file only (no re-resolution)
+        run: uv sync --locked --all-extras --dev
+
+      - name: pytest -q
+        run: .venv/bin/python -m pytest -q
+
+  typecheck:
+    name: mypy src tests (strict)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: install from the lock file only (no re-resolution)
+        run: uv sync --locked --all-extras --dev
+
+      - name: mypy src tests
+        run: .venv/bin/mypy src tests
+
+  lint:
+    name: ruff check src tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: install from the lock file only (no re-resolution)
+        run: uv sync --locked --all-extras --dev
+
+      - name: ruff check
+        run: .venv/bin/ruff check src tests
+
+  dependency-audit:
+    name: pip-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: install from the lock file only (no re-resolution)
+        run: uv sync --locked --all-extras --dev
+
+      - name: pip-audit
+        run: .venv/bin/pip-audit

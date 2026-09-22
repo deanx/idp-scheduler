@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
+
+import pytest
 
 from idp_regression.adapter.errors import IDPExecutionFailedError
 from idp_regression.adapter.transport import sanitize_for_log
@@ -136,7 +139,7 @@ def test_frame_location_for_a_non_absolute_filename_never_joins_the_cwd() -> Non
 
 
 def test_frame_location_never_raises_when_the_cwd_no_longer_exists(
-    tmp_path: object, monkeypatch: object
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Direct pin for the raise half of GAP-8: `os.path.relpath`/
     `os.path.abspath` calls `os.getcwd()` for any non-absolute argument,
@@ -144,9 +147,9 @@ def test_frame_location_never_raises_when_the_cwd_no_longer_exists(
     `frame_location` must be total and never propagate that."""
     import os as os_module
 
-    workdir = tmp_path / "gone"  # type: ignore[operator]
-    workdir.mkdir()  # type: ignore[attr-defined]
-    monkeypatch.chdir(workdir)  # type: ignore[attr-defined]
+    workdir = tmp_path / "gone"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
     os_module.rmdir(workdir)
 
     try:

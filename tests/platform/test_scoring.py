@@ -8,6 +8,7 @@ from typing import get_args
 
 import pytest
 
+from idp_regression.classifier.types import Golden
 from idp_regression.platform.scoring import (
     _VALID_GATES,
     NAMESPACE,
@@ -121,7 +122,7 @@ def test_trace_id_run_level_sentinel_for_run_status() -> None:
 # (DEBT-40/43/47), and fail loud on an unrecognised value instead of letting
 # it sail into the platform-bound `gate` score's `value` verbatim.
 
-_EMPTY_GOLDEN = {"fields": {}, "prompts": {}}
+_EMPTY_GOLDEN: Golden = {"fields": {}, "prompts": {}}
 
 
 def test_drift_pin_valid_gates_is_derived_from_the_literal_not_hand_written() -> None:

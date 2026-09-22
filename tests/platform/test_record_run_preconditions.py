@@ -654,7 +654,9 @@ def test_score_field_wrong_type_raises_typed_error_before_any_sdk_call(field_nam
     }
     bad_score[field_name] = [_SENTINEL_SCORE_FIELD_MARKER]  # wrong TYPE, never a synthesised value
     records: list[DocumentRecord] = [
-        {"item_id": "item-1", "document_id": "doc-0", "scores": [bad_score]}
+        # bad_score deliberately carries a wrong-typed field (see above) --
+        # that IS the ScoreInput-shape violation this test proves is rejected.
+        {"item_id": "item-1", "document_id": "doc-0", "scores": [bad_score]}  # type: ignore[list-item]
     ]
 
     with pytest.raises(ExperimentRecordFailedError) as excinfo:
@@ -698,10 +700,12 @@ def test_scores_not_a_list_raises_typed_error_before_any_sdk_call() -> None:
     so it would silently iterate its keys as if they were score dicts)."""
     adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
     records: list[DocumentRecord] = [
-        {  # type: ignore[typeddict-item]
+        {
             "item_id": "item-1",
             "document_id": "doc-0",
-            "scores": {"id": _SENTINEL_SCORE_ID},
+            # wrong TYPE for "scores" (dict, not list) -- the point of
+            # this test is that record_run rejects it before any write.
+            "scores": {"id": _SENTINEL_SCORE_ID},  # type: ignore[typeddict-item]
         }
     ]
 
@@ -776,7 +780,7 @@ def test_a_non_dict_score_raises_typed_error_before_any_sdk_call() -> None:
     instead of exercising the isinstance leg."""
     adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
     records: list[DocumentRecord] = [
-        {"item_id": "item-1", "document_id": "doc-0", "scores": [5]}  # type: ignore[typeddict-item]
+        {"item_id": "item-1", "document_id": "doc-0", "scores": [5]}  # type: ignore[list-item]
     ]
 
     with pytest.raises(ExperimentRecordFailedError) as excinfo:
