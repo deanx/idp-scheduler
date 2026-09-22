@@ -27,14 +27,22 @@ deliberately did NOT construct a platform client (DEBT-30/C-1/R-3 fix).
 That constraint applied ONLY to the credential-presence check itself --
 it was never a claim that `run_eval` would stay client-free forever.
 
-**Still NOT built** (next batch, T-01.4.7/.8/.9): the CT-04 contract
-test, additional observability polish, and the e2e harness.
+**Still NOT built** (next batch, T-01.4.7/.9): the CT-04 contract
+test and the e2e harness. Observability (T-01.4.8, NFR N10) IS built as
+of this batch -- a run-start line (item count), a run-end line (outcome,
+exit code, pass/fail counts, elapsed on a monotonic clock -- emitted at
+EVERY exit point, not only on success), and per-document elapsed
+attached to the SAME log line that already carries `document_id` (never
+a separate untethered timing line). Hard rule, asserted by
+`tests/orchestration/test_facade.py`: no golden value, extracted value,
+token or path ever reaches any of these lines.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any, cast
 
 from idp_regression.adapter.errors import (
@@ -206,12 +214,34 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
     (ADR-0004 amendment 2026-09-19) -- this function trusts its inputs
     and does not re-validate their shape.
     """
+    started_at = time.monotonic()
+
+    def _log_run_end(
+        outcome: str, exit_code: int, *, pass_count: int = 0, fail_count: int = 0
+    ) -> None:
+        """T-01.4.8 (NFR N10): emitted at EVERY exit point of `run_eval`,
+        not only on success (Zangado's S-01.2 note) -- `outcome`/
+        `exit_code`/the counts are fixed, non-secret values, and
+        `elapsed_seconds` comes from stdlib's monotonic clock, so this
+        line needs no `sanitize_for_log` pass (nothing here is a golden
+        value, an extracted value, a token, or a path)."""
+        logger.info(
+            "run_eval: run_end outcome=%s exit_code=%s pass_count=%d fail_count=%d "
+            "elapsed_seconds=%.3f",
+            outcome,
+            exit_code,
+            pass_count,
+            fail_count,
+            time.monotonic() - started_at,
+        )
+
     load_dotenv()
 
     try:
         validate_platform_credentials()
     except MissingCredentialError as exc:
         logger.error("run_eval: missing required env var %s", exc.variable_name)
+        _log_run_end("aborted", 1)
         return 1
 
     try:
@@ -232,16 +262,19 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
         # not otherwise routed through it, and that safety is not
         # guaranteed to hold for every future raiser of these types.
         logger.error("run_eval: %s", sanitize_for_log(str(exc)))
+        _log_run_end("aborted", 1)
         return 1
 
     dataset_name = (os.environ.get(GOLDEN_DATASET_NAME_VAR) or "").strip()
     if not dataset_name:
         logger.error("run_eval: missing required env var %s", GOLDEN_DATASET_NAME_VAR)
+        _log_run_end("aborted", 1)
         return 1
 
     document_dir = (os.environ.get(IDP_DOCUMENT_DIR_VAR) or "").strip()
     if not document_dir:
         logger.error("run_eval: missing required env var %s", IDP_DOCUMENT_DIR_VAR)
+        _log_run_end("aborted", 1)
         return 1
 
     try:
@@ -251,12 +284,14 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
         # offending variable/config (INV-02), still routed through
         # sanitize_for_log defensively.
         logger.error("run_eval: %s", sanitize_for_log(str(exc)))
+        _log_run_end("aborted", 1)
         return 1
 
     try:
         dataset = platform.get_dataset(dataset_name)
     except DatasetFetchFailedError as exc:
         logger.error("run_eval: dataset_fetch_failed: %s", sanitize_for_log(str(exc)))
+        _log_run_end("aborted", 1)
         return 1
 
     # Pinned pre-run order (S-01.4-KICKOFF.md, TP-40): schema-drift, THEN
@@ -269,6 +304,7 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
         validate_golden_set(dataset)
     except RunAborted as exc:
         logger.error("run_eval: %s: %s", exc.reason, sanitize_for_log(str(exc)))
+        _log_run_end("aborted", 1)
         return 1
 
     # T-01.4.6 (INV-04): golden_version is a content hash over the SAME
@@ -283,12 +319,13 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
     experiment_name = compose_experiment_name(run_name, run_id)
     logger.info(
         "run_eval: pre-run checks passed run=%s experiment=%s action=%s "
-        "version=%s golden_version=%s",
+        "version=%s golden_version=%s items=%d",
         sanitize_for_log(run_name),
         sanitize_for_log(experiment_name),
         sanitize_for_log(action_id),
         sanitize_for_log(version),
         sanitize_for_log(golden_version),
+        len(dataset["items"]),
     )
 
     def _abort(reason: AbortReason, document_id: str | None, detail: str) -> RunAborted:
@@ -326,8 +363,11 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
     # path out of it.
     records: list[DocumentRecord] = []
     any_gate_failed = False
+    passed_count = 0
+    failed_count = 0
     try:
         for item in dataset["items"]:
+            document_started_at = time.monotonic()
             document_id = item["document_id"]
             golden = item["golden"]
             try:
@@ -370,6 +410,9 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
 
             if gate == "FAIL":
                 any_gate_failed = True
+                failed_count += 1
+            else:
+                passed_count += 1
 
             scores = build_score_inputs(
                 golden=golden,
@@ -381,10 +424,15 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
             records.append(
                 {"item_id": item["item_id"], "document_id": document_id, "scores": scores}
             )
+            # T-01.4.8: elapsed for THIS document, on the SAME log line
+            # that already carries its document_id (Zangado's S-01.2 note
+            # -- a timing line must be linked to the document it
+            # describes, not a separate untethered one).
             logger.info(
-                "run_eval: document processed document_id=%s gate=%s",
+                "run_eval: document processed document_id=%s gate=%s elapsed_seconds=%.3f",
                 sanitize_for_log(document_id),
                 gate,
+                time.monotonic() - document_started_at,
             )
 
         # ADR-0005 #9 step 4: a single record_run call, after the loop.
@@ -408,6 +456,7 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
             raise _abort("hard_failure", None, str(exc)) from None
     except RunAborted as exc:
         logger.error("run_eval: %s: %s", exc.reason, sanitize_for_log(str(exc)))
+        _log_run_end("aborted", 1, pass_count=passed_count, fail_count=failed_count)
         return 1
 
     # ADR-0005 #9 step 5: mark_run_status("complete", ...), best-effort --
@@ -422,4 +471,11 @@ def run_eval(action_id: str, version: str, run_name: str) -> int:
         golden_version=golden_version,
     )
 
-    return 1 if any_gate_failed else 0
+    exit_code = 1 if any_gate_failed else 0
+    _log_run_end(
+        "gate_failed" if any_gate_failed else "success",
+        exit_code,
+        pass_count=passed_count,
+        fail_count=failed_count,
+    )
+    return exit_code

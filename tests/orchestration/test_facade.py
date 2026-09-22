@@ -1078,3 +1078,188 @@ def test_run_eval_aborts_on_path_containment_violation(
     # but the resolved/candidate filesystem path never is.
     assert json.dumps(hostile_document_id) in caplog.text
     assert "/etc/passwd" not in caplog.text.replace(json.dumps(hostile_document_id), "")
+
+
+# --- T-01.4.8: observability (NFR N10) ---------------------------------
+
+
+def test_run_eval_logs_run_start_with_item_count(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
+    _stub_make_idp_adapter_success(monkeypatch)
+
+    with caplog.at_level(logging.INFO):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code == 0
+    assert "items=1" in caplog.text
+
+
+def test_run_eval_logs_run_end_with_outcome_exit_code_counts_and_elapsed_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
+    _stub_make_idp_adapter_success(monkeypatch)
+
+    with caplog.at_level(logging.INFO):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code == 0
+    end_lines = [line for line in caplog.text.splitlines() if "run_end" in line]
+    assert len(end_lines) == 1
+    assert "outcome=success" in end_lines[0]
+    assert "exit_code=0" in end_lines[0]
+    assert "pass_count=1" in end_lines[0]
+    assert "fail_count=0" in end_lines[0]
+    assert "elapsed_seconds=" in end_lines[0]
+
+
+def test_run_eval_logs_run_end_with_elapsed_on_a_pre_run_credential_abort(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The elapsed clock and run_end line must be emitted even when the
+    run never reaches the loop -- not only on a full success (Zangado's
+    S-01.2 note)."""
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.delenv("LANGFUSE_HOST", raising=False)
+
+    with caplog.at_level(logging.INFO):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    end_lines = [line for line in caplog.text.splitlines() if "run_end" in line]
+    assert len(end_lines) == 1
+    assert "outcome=aborted" in end_lines[0]
+    assert "exit_code=1" in end_lines[0]
+    assert "elapsed_seconds=" in end_lines[0]
+
+
+def test_run_eval_logs_run_end_with_elapsed_on_a_per_document_abort(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
+    from idp_regression.adapter.errors import IDPAuthenticationError
+
+    monkeypatch.setattr(
+        facade,
+        "make_idp_adapter",
+        lambda: _FakeIDPAdapter(error=IDPAuthenticationError("boom")),
+    )
+
+    with caplog.at_level(logging.INFO):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code != 0
+    end_lines = [line for line in caplog.text.splitlines() if "run_end" in line]
+    assert len(end_lines) == 1
+    assert "outcome=aborted" in end_lines[0]
+    assert "exit_code=1" in end_lines[0]
+    assert "pass_count=0" in end_lines[0]
+    assert "fail_count=0" in end_lines[0]
+    assert "elapsed_seconds=" in end_lines[0]
+
+
+def test_run_eval_logs_elapsed_for_each_document_linked_to_its_document_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
+    _stub_make_idp_adapter_success(monkeypatch)
+
+    with caplog.at_level(logging.INFO):
+        run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    doc_lines = [
+        line
+        for line in caplog.text.splitlines()
+        if "document processed" in line and "document_id=" in line
+    ]
+    assert len(doc_lines) == 1
+    assert "elapsed_seconds=" in doc_lines[0]
+
+
+def test_run_eval_never_logs_golden_or_actual_field_values_in_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Sentinel golden/actual VALUES planted in the fixtures must never
+    reach any telemetry line -- only document_id/gate/outcome/counts."""
+    from idp_regression.platform.schema import load_golden_schema
+
+    sentinel_golden_value = "SENTINEL-GOLDEN-VALUE-9f21"
+    sentinel_actual_value = "SENTINEL-ACTUAL-VALUE-4b7e"
+    dataset = {
+        "items": [
+            {
+                "item_id": "item-1",
+                "document_id": "doc-1",
+                "golden": {
+                    "fields": {
+                        "total": {
+                            "value": sentinel_golden_value,
+                            "type": "text",
+                            "critical": True,
+                        }
+                    }
+                },
+            }
+        ],
+        "expected_output_schema": load_golden_schema(),
+    }
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(dataset))
+    fake_idp = _FakeIDPAdapter(
+        {
+            "/documents/doc-1": {
+                "status": "SUCCEEDED",
+                "fields": {"total": {"value": sentinel_actual_value, "confidence": 0.9}},
+            }
+        }
+    )
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda: fake_idp)
+
+    with caplog.at_level(logging.INFO):
+        run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert sentinel_golden_value not in caplog.text
+    assert sentinel_actual_value not in caplog.text
+
+
+def test_run_eval_never_logs_the_document_dir_path_in_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sentinel_dir = "/sekret-document-root-9f21"
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.setenv("IDP_DOCUMENT_DIR", sentinel_dir)
+    _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
+    _stub_make_idp_adapter_success(monkeypatch, document_dir=sentinel_dir)
+
+    with caplog.at_level(logging.INFO):
+        exit_code = run_eval("12345678-1234-1234-1234-123456789012", "1.0", "nightly")
+
+    assert exit_code == 0
+    assert sentinel_dir not in caplog.text
