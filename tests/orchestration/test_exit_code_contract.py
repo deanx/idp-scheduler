@@ -24,8 +24,8 @@ site, independent of this file's own fakes.
 
 from __future__ import annotations
 
+import ast
 import logging
-import re
 from pathlib import Path
 from typing import get_args
 
@@ -195,6 +195,49 @@ def test_taxonomy_is_read_from_errors_module_not_hardcoded() -> None:
     assert expected_floor.issubset(set(ALL_ABORT_REASONS))
 
 
+def _abort_reason_string_literals_at_real_sites(source: str) -> set[str]:
+    """Collect every string-literal `AbortReason` that appears as an
+    argument to a REAL raise/log call: `_abort(...)`, `RunAborted(...)`,
+    or a `<logger-name>.error(...)`/`.warning(...)` call. AST-based, not
+    a text grep -- a reason spelled only in a comment or a bare
+    docstring statement can never satisfy this (comments aren't even in
+    the AST; a docstring `Expr` statement is not a `Call`, so it is
+    never visited below). This is what
+    `test_every_abort_reason_has_a_real_raise_site` needs: coverage audit
+    gap 3 (2026-09-21) found the previous text-substring version would
+    pass even for a reason named ONLY in a comment."""
+    tree = ast.parse(source)
+    found: set[str] = set()
+
+    def _string_constants(call: ast.Call) -> list[str]:
+        values = []
+        for arg in call.args:
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                values.append(arg.value)
+            elif isinstance(arg, ast.JoinedStr):
+                for piece in arg.values:
+                    if isinstance(piece, ast.Constant) and isinstance(piece.value, str):
+                        values.append(piece.value)
+        return values
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        is_abort_or_raised = (isinstance(func, ast.Name) and func.id in {"_abort", "RunAborted"})
+        is_logger_call = isinstance(func, ast.Attribute) and func.attr in {
+            "error",
+            "warning",
+        }
+        if not (is_abort_or_raised or is_logger_call):
+            continue
+        for value in _string_constants(node):
+            for reason in ALL_ABORT_REASONS:
+                if reason in value:
+                    found.add(reason)
+    return found
+
+
 def test_every_abort_reason_has_a_real_raise_site() -> None:
     """S-1: the ONLY test in this file that would fail if a new
     `AbortReason` member were added to the `Literal` with no real raise
@@ -207,24 +250,44 @@ def test_every_abort_reason_has_a_real_raise_site() -> None:
     module docstring name every reason in prose -- that's the
     declaration, not evidence of a raise site, and including it would
     make this test pass vacuously for a brand-new, never-raised member).
-    A reason must appear as a substring somewhere in the remaining
-    corpus -- in practice that is always `raise _abort(...)`,
-    `raise RunAborted(...)`, or (for `dataset_fetch_failed`, which
-    `facade.py` handles with a direct `except .../return 1`, never
-    through `RunAborted`) the `logger.error` call in that except block."""
+    A reason must appear as a string-literal argument to a real
+    `_abort(...)`/`RunAborted(...)`/`logger.error(...)`/`logger.warning(...)`
+    call (AST, see `_abort_reason_string_literals_at_real_sites` --
+    coverage audit gap 3, 2026-09-21: the prior version substring-grepped
+    the raw source TEXT, including comments and docstrings, so a reason
+    spelled only in a comment would have passed vacuously)."""
     src_root = Path(__file__).resolve().parents[2] / "src" / "idp_regression"
-    corpus = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in src_root.rglob("*.py")
-        if path.name != "errors.py"
-    )
+    found: set[str] = set()
+    for path in src_root.rglob("*.py"):
+        if path.name == "errors.py":
+            continue
+        found |= _abort_reason_string_literals_at_real_sites(path.read_text(encoding="utf-8"))
     for reason in ALL_ABORT_REASONS:
-        pattern = re.compile(re.escape(reason))
-        assert pattern.search(corpus), (
+        assert reason in found, (
             f"AbortReason {reason!r} has no real raise/log site outside "
             "orchestration/errors.py -- the Literal and production code "
             "have drifted apart"
         )
+
+
+def test_a_reason_named_only_in_a_comment_or_docstring_does_not_satisfy_the_check() -> None:
+    """Coverage audit gap 3's own mutation pin: the prior text-substring
+    version would have passed on a source file containing a REAL
+    `AbortReason` member ONLY in a comment/docstring (no real call
+    site) -- this asserts the AST-based collector correctly finds
+    nothing for that case, and DOES find it once a real call site is
+    added (proving the collector isn't just vacuously empty)."""
+    reason = ALL_ABORT_REASONS[0]
+    prose_only = (
+        f'# TODO: someday raise RunAborted("{reason}", "...")\n'
+        "def f() -> None:\n"
+        f'    """docstring mentioning {reason} too."""\n'
+        "    pass\n"
+    )
+    assert reason not in _abort_reason_string_literals_at_real_sites(prose_only)
+
+    with_real_site = prose_only + f'\n\ndef g() -> None:\n    raise RunAborted("{reason}", "x")\n'
+    assert reason in _abort_reason_string_literals_at_real_sites(with_real_site)
 
 
 # --- Ordering case: empty set AND drifted schema -> schema_drift -------
