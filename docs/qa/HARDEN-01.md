@@ -1,24 +1,25 @@
 # HARDEN-01 — Containment report — UC-01 baseline regression
 
-**Verdict: ⚠️ PASS WITH RESIDUALS** — re-run #2 2026-09-21 (see §8)
+**Verdict: ⚠️ PASS WITH RESIDUALS** — re-run #3 2026-09-21 (see §9; §8 is the superseded re-run #2 block)
 
 ```
 Verdict: PASS_WITH_RESIDUALS
-Date: 2026-09-21 (re-run #2)
-Commit: 5c0f1ac
-GAP-1: CLOSED (all 13 reproductions + all 5 named pre-run seams contained: exit 1, typed reason, run_end, marker iff a run exists)
-GAP-2: CLOSED (re-confirmed)
+Date: 2026-09-21 (re-run #3)
+Commit: f63500d (code in 65098a5) - supersedes the 5c0f1ac pin of re-run #2
+GAP-1: CLOSED (re-run #2, unchanged)
+GAP-2: CLOSED (re-run #2, unchanged)
 GAP-3: OPEN - Minor, accepted + carded (DEBT-53)
-GAP-4: CLOSED (item_results block fully guarded; 5 drift probes all typed)
-GAP-5: PARTIALLY CLOSED - closed in platform/tracing.py; STILL OPEN in orchestration/facade.py and orchestration/cli.py (asyncio.CancelledError escapes both) - Minor, non-blocking
-GAP-6: NEW - Minor, non-blocking - the widened pre-run typed except-clause logs raw str(exc) for the WHOLE pre-run chain (6 sentinel leaks reproduced)
-GAP-7: NEW - Minor, non-blocking - load_dotenv() sits OUTSIDE the merged try in BOTH run_eval and cli.main; an OSError there escapes both, no run_end
-A-4: unchanged (whitespace-only item_id) - DEBT-57
-A-5: unchanged + one new sub-case (an exception inside the catch-all's OWN handling) - DEBT-57
-__context__: PASS (None on every wrapped tracing raise, verified with a planted SDK secret sentinel)
-Leak: PASS on all GAP-1/GAP-4 paths and on the frame-location string; ⚠️ GAP-6 on the pre-run typed clause
-Fail-open: PASS (no probe produced a GREEN build; every deviation exits non-zero)
-Containment-REQUIRED: DISCHARGED (residuals GAP-5/6/7 carded, none blocking)
+GAP-4: CLOSED (re-run #2, unchanged)
+GAP-5: CLOSED - CancelledError contained at all 4 catch-alls (facade x2, cli x2); KeyboardInterrupt/SystemExit still propagate from all 4; asyncio cancellation NOT wedged (W1)
+GAP-6: CLOSED - all 11 reproductions now type-name + frame-location only, 0 sentinel hits
+GAP-7: CLOSED - load_dotenv inside the try in BOTH entry points; no .env path in any log or stderr, no traceback printed
+A-5 (incl. the re-run #2 sub-case): STILL OPEN - Minor, non-blocking - neither catch-all guards its OWN handling (extract_tb / relpath / log handler raising all escape) - DEBT-57
+GAP-8: NEW - Minor, non-blocking - frame_location() is unsafe for a frame outside the package tree: os.path.relpath TRAVERSES above _PACKAGE_PARENT and, for a non-absolute filename, prepends the cwd (reproduced on a stdlib frozen-dataclass "<string>" frame); it also RAISES FileNotFoundError when the cwd is gone
+GAP-8 at 1e8e1aa (landed mid-run, probed, NOT part of this discharge): disclosure half CLOSED by the <external>/ clamp; the raise half is STILL OPEN (only ValueError is caught, FileNotFoundError from getcwd is not) - see 9.7
+__context__: PASS (re-run #2, unchanged)
+Leak: PASS - 0 sentinel hits on all 11 GAP-6 paths and both GAP-7 paths; the 2 surviving str(exc) clauses (DatasetFetchFailedError, RunAborted) are typed and constructor-vetted (redact() at the transport source)
+Fail-open: PASS (no probe produced a GREEN build; green run still exits 0 with a single complete marker)
+Containment-REQUIRED: DISCHARGED at f63500d - discharge now covers the full committed tree, no longer pinned to an older commit
 ```
 
 **Use case:** UC-01 · **Story under gate:** S-01.4 (orchestrator + CLI) · **Date:** 2026-09-21
@@ -445,3 +446,119 @@ GAP-1 and GAP-2 — the two Major, blocking findings — are **closed**, verifie
 **Re-run scope if `orchestration/` or `platform/` changes again:** N1a–N1f, X5/X7/X10 and C1–C3 only. The GAP-1/GAP-2/GAP-4 suites and the 24 probe families of §3 are settled.
 
 > ⚠️ **Scope pin, recorded 2026-09-21 at hand-off.** This verdict is pinned to **committed `5c0f1ac`**, which is what the worktree and every probe in §8 ran against. While §8 was being written, **uncommitted changes appeared in the main checkout's `src/` and `tests/`** (`orchestration/facade.py`, a new `log_sanitize.frame_location`, `tests/orchestration/test_facade.py`, `tests/orchestration/test_cli.py`) — they appear to move `load_dotenv()` inside the merged `try` (GAP-7) and to relocate `_frame_location`. **Branca did not author them and has not red-teamed them.** The discharge below does **not** extend to that working tree; if those changes land, re-run the §8.8 scope (N1a–N1f, X5/X7/X10, C1–C3) against the resulting commit.
+
+---
+
+## 9. Re-run #3 — 2026-09-21 — the three residuals of §8 (GAP-5 / GAP-6 / GAP-7) + the A-5 sub-case
+
+**Red-team:** Branca · **Commit under gate:** `f63500d` (code in `65098a5`, `feat/S-01.2-idp-adapter`) · **Scope:** the three residuals §8 raised, the A-5 sub-case, and anything the fixes introduce. `orchestration/facade.py`, `orchestration/cli.py`, `orchestration/log_sanitize.py` only — no other file changed in that batch.
+
+> **Method.** ⚠️ The detached `git worktree` used by §8 **vanished again, mid-session, for the second time** (re-confirmed live: the directory was gone between two consecutive tool calls while its sibling scratchpad files survived; `git worktree prune` then reclaimed the metadata). The tree was therefore re-materialised with **`git archive f63500d | tar -x`** into a plain, non-git directory (`scratchpad/tree3`) — no worktree metadata, nothing for a prune/GC to reclaim — and `PYTHONPATH` pinned to `tree3/src`. **Every probe asserts resolution in-band** (`facade.__file__`, `cli.__file__` and `log_sanitize.__file__` must all start with `…/tree3/src/`) before it injects anything; no probe result below was accepted without that assertion passing. Project `.venv` (CPython 3.13.5). 45 throwaway probes, run from the scratchpad, never added to `tests/`. `src/` and existing tests untouched. Suite re-run inside the exported tree: **830 passed / 14 skipped / 2 failed**, and both failures are artefacts of the export, not regressions — `tests/tooling/test_secrets_gate.py::TestLeg3AssertionNotScan::test_env_is_actually_ignored` and `::TestLockFilePin::test_lockfile_is_tracked_by_git` both shell out to `git`, which a `git archive` export has no repository for (830 + 2 = the stated 832 baseline). No live IDP call, no live platform call, no document submitted.
+
+### 9.1 GAP-6 — **CLOSED** (this was §8's only reproduced leak)
+
+All eight §8 reproductions re-run, plus three more raisers inside the same widened perimeter. Every one now logs **`type(exc).__name__` + `frame_location(exc)`** and nothing else; **zero sentinel hits** in `caplog` across all eleven (golden value, extracted value, platform secret key, public key, IDP client secret all planted in the raised message).
+
+| Probe | Raiser | Type raised | Escaped? | exit | `run_end` | Sentinels leaked |
+|---|---|---|---|---|---|---|
+| N1a | `get_dataset` | `ValueError` (secret) | no | 1 | yes | **none** |
+| N1b | `get_dataset` | `RuntimeError` (golden) | no | 1 | yes | **none** |
+| N1c | `get_dataset` | `RecursionError` (secret) — the `RuntimeError`-subclass case | no | 1 | yes | **none** |
+| N1d | `check_schema_drift` | `ValueError` (secret) | no | 1 | yes | **none** |
+| N1e | `validate_golden_set` | `RuntimeError` (golden) | no | 1 | yes | **none** |
+| N1f | `validate_platform_credentials` | `ValueError` (secret) | no | 1 | yes | **none** |
+| P8 | `hash_dataset` | `RecursionError` (golden) | no | 1 | yes | **none** |
+| P8c | `compose_experiment_name` | `ValueError` (golden) | no | 1 | yes | **none** |
+| N1g | `make_platform` | `RuntimeError` (secret) | no | 1 | yes | **none** |
+| N1h | `make_idp_adapter` | `ValueError` (IDP client secret) | no | 1 | yes | **none** |
+| N1i | `generate_run_id` | `RuntimeError` (golden) | no | 1 | yes | **none** |
+
+Marker discipline held on all eleven (`marks == []` — every one is a pre-run abort, so nothing is owed a marker).
+
+**Probe for other surviving `str(exc)` paths — two remain in `facade.py`, both vetted, neither a new gap.**
+
+- `except DatasetFetchFailedError` (`facade.py:439`) still logs `sanitize_for_log(str(exc))`. Probed with a sentinel-bearing message (N3): it reaches the log verbatim aside from quoting — **as designed**, because this type is constructed only inside `langfuse_adapter.get_dataset`, where every message is either a literal or, on the one interpolating site (`langfuse_adapter.py:406`, `f"get_dataset transport failure: {exc}"`), built from a `TransportError` whose own message has already been through **`redact()`** at `platform/transport.py:131/141`. The vetting chain is real and traced, not assumed.
+- `except RunAborted` (`facade.py:443`, `:596`) logs `str(exc)`, whose detail is orchestrator-built from the typed adapter errors (N4). Same A-1/DEBT-54 family, unchanged.
+
+No third `str(exc)` path exists in the orchestration package (`prerun.py:159` interpolates `document_id`, not an exception, and is already sanitized).
+
+### 9.2 GAP-7 — **CLOSED**, in both entry points
+
+`load_dotenv()` now sits inside the merged pre-run `try` in `run_eval` and inside `main()`'s own `try`. Probed with a `PermissionError(13, …, "/very/secret/deploy/path/.env")` and a `UnicodeDecodeError` naming the same path.
+
+| Probe | Raiser | Entry point | Escaped? | exit | `.env` path in log | in stderr | raw traceback |
+|---|---|---|---|---|---|---|---|
+| X5-oserr / X5-ude | facade's `load_dotenv` | `run_eval` | no | 1 (+`run_end`) | **no** | — | — |
+| C2-oserr / C2-ude | cli's own `load_dotenv` | `cli.main` | no | 1 | **no** | **no** | **no** |
+| C3-oserr / C3-ude | facade's `load_dotenv`, reached through the CLI | `cli.main` | no | 1 (+`run_end`, now emitted) | **no** | **no** | **no** |
+
+The `run_end`-loss half of §8's C3 is gone too: because the facade now catches it, the `run_end` line is emitted before the CLI ever sees the return value. Nothing is owed a marker at that point (no `run_id`), and none was written. The `OSError` lands in the type-name-only catch-all, the `UnicodeDecodeError` in the (now equally safe) `ValueError` clause — `UnicodeDecodeError` is a `ValueError` subclass, which would have been a live `.env`-path leak before the GAP-6 fix and is not one now.
+
+### 9.3 GAP-5 — **CLOSED**
+
+| Probe | Injection | Escaped? | exit | `run_end` | Markers |
+|---|---|---|---|---|---|
+| X7 | `CancelledError` from `extract` (in-loop) | no | 1 | yes | `['aborted']` ✅ |
+| X10 | `CancelledError` from `get_dataset` (pre-run) | no | 1 | yes | none ✅ |
+| X11 | `CancelledError` from `record_run` (record phase) | no | 1 | yes | `['aborted']` ✅ |
+| C1 | `CancelledError` from `run_eval`, caught by `cli.main`'s second catch-all | no | 1 | — | — |
+| C1b | `CancelledError` from cli's own `load_dotenv`, first catch-all | no | 1 | — | — |
+
+**`KeyboardInterrupt` / `SystemExit` still propagate from every one of the four catch-alls** — 8/8 probes (`prerun`, `inloop`, `cli_dotenv`, `cli_run` × `KI`, `SE`) raised out of the call, none returned an exit code. The `(Exception, asyncio.CancelledError)` tuple is doing exactly the narrow widening it claims; no `except BaseException` crept in.
+
+**Does absorbing `CancelledError` wedge a caller relying on cancellation? No (W1).** `run_eval` was driven from inside an `asyncio` task that had already called `task.cancel()` on itself; `run_eval` swallowed the injected `CancelledError` and returned `1`, and the outer `await` **still raised `CancelledError`** and the task still finished cancelled. The reason is structural, not incidental: `run_eval` is synchronous and contains no `await`, so it is never a cancellation delivery point — a `CancelledError` arriving in its frame can only have been *raised by a callee as a value*, never *delivered by the event loop*. Absorbing it costs a caller nothing; the loop re-delivers at the next real suspension point.
+
+### 9.4 A-5 sub-case — **STILL OPEN** (Minor, non-blocking, DEBT-57)
+
+The move of `_frame_location` into a shared `log_sanitize.frame_location()` did not change this, and was not meant to. **Neither catch-all guards its own handling**, in either module:
+
+| Probe | Injection | `run_eval` pre-run | `run_eval` in-loop | `cli.main` |
+|---|---|---|---|---|
+| A5-4 | `traceback.extract_tb` raises | ❌ escapes | ❌ escapes (marker `aborted` already written) | ❌ escapes |
+| A5-5 | `os.path.relpath` raises (the line the dedup added) | ❌ escapes | — | — |
+| A5-6 | a log handler raises **while emitting the type-name line itself** | ❌ escapes | — | — |
+
+Clean on the paths that were expected to be clean: **A5-1** an exception whose `__traceback__` is `None` → `frame_location` returns the literal `'<no traceback>'`, no raise; **A5-7** an abort raised while the marker write is *already* failing (`record_run` raises **and** `mark_run_status` raises) → contained, exit 1, `marks == ['aborted']` attempted-and-swallowed, `run_end` present; **A5-8** the transition into the loop (a raising `sanitize_for_log` on the 7th call, i.e. after the `pre-run checks passed` line's own arguments) → contained, exit 1, marker, `run_end` — the §8 X6 window is genuinely closed by the widened `try`.
+
+Realism is unchanged and still low, so this stays an advisory on DEBT-57 rather than a blocking gap — **with one exception, which is new and is not low-realism:**
+
+#### GAP-8 — NEW — Minor, non-blocking — `frame_location()` is unsafe for a **non-absolute** frame filename
+
+The dedup added `os.path.relpath(frame.filename, _PACKAGE_PARENT)` to strip the deployment path. That is correct for package frames (Python ≥ 3.11 guarantees `__file__` is absolute, so `relpath` is a pure string operation there). It is **not** correct for a last frame that is *not* a real file — and such a frame is entirely ordinary, because `exec`-generated stdlib code carries the filename `<string>`. Two consequences, both reproduced:
+
+- **Path disclosure — the very thing the fix was added to prevent.** `relpath` calls `abspath`, which prepends the **cwd** to a non-absolute filename. Reproduced on a stdlib frozen-`dataclass` `__setattr__` (`FrozenInstanceError`) and on a `namedtuple` `TypeError` — both last frames are `<string>` — and on an `exec`'d module: the rendered location was `'../../../../../../../var/folders/g2/…/pytest-of-alex/pytest-819/test_a5…/<string>:1:<module>'`, i.e. **the absolute working directory, spelled out**, reached through a `../` chain whose depth alone already discloses the cwd's depth. This is a live INV-02 path-disclosure on an exception class that real code raises.
+- **`frame_location` itself raises.** With the cwd deleted (a real condition: a run whose working directory is removed under it) and a non-absolute frame filename, `abspath` calls `os.getcwd()` and `frame_location` raised **`FileNotFoundError: [Errno 2]`** — *inside the catch-all's own handler*, so it escapes `run_eval` (A5-2b). This is the A-5 family with a concrete, non-contrived trigger, which is why it is broken out rather than folded into DEBT-57.
+
+**Why non-blocking:** both consequences cost *observability* and *a directory name*, never safety — no golden value, no extracted value, no credential, and no GREEN build (the escape still exits non-zero through Python's own unhandled path). **Fix shape:** `if not os.path.isabs(frame.filename): return f"{frame.filename}:{frame.lineno}:{frame.name}"` before the `relpath`, and wrap the whole body in a `try: … except Exception: return "<unavailable>"`, which closes the A-5 sub-case for this function at the same time.
+
+### 9.5 Leak and fail-open re-check — **PASS**
+
+- **Leak:** 0 sentinel hits across all 11 GAP-6 probes and both GAP-7 probes (log *and* stderr). The two surviving `str(exc)` clauses are typed and vetted to their construction sites (§9.1). The one new disclosure is GAP-8's cwd, which is a directory name, not project data.
+- **Fail-open:** no probe of the 45 returned `0` on a failure. Control runs: a non-aborting run whose extracted value differs from the golden → exit 1, marker `complete`, one `record_run`, `run_end` (**a gate failure, correctly not an abort**); a matching run → **exit 0**, marker `complete`, `run_end`. The 0/non-zero CI-gate contract (CT-04) is intact.
+
+### 9.6 Verdict — `Containment: REQUIRED` remains **DISCHARGED**, and the discharge now covers the full tree
+
+The three residuals §8 carried are **closed**: GAP-6 (the only leak it reproduced) on all eleven raisers, GAP-7 in both entry points, GAP-5 at all four catch-alls without wedging cancellation and without swallowing `KeyboardInterrupt`/`SystemExit`. The A-5 sub-case is unchanged and stays advisory, and the fixes introduced exactly one new finding, **GAP-8**, which is Minor and non-blocking.
+
+**`Containment: REQUIRED` (NFR-01, UC-01) is discharged as of `f63500d`.** The §8 scope pin is **lifted**: this run was executed against the committed tree that contains the changes §8 explicitly refused to cover, so the discharge is no longer pinned to `5c0f1ac` and no longer excludes an unreviewed working tree. S-01.4 is unblocked from this gate.
+
+**Carry forward to `/debt` (Dunga), none blocking:** **GAP-8** (new — `frame_location` on a non-absolute frame filename; the highest-value of the open items, it is the only reproduced disclosure and the only non-contrived way the catch-all's own handler raises), A-5 incl. its sub-case (DEBT-57, unchanged), GAP-3 (DEBT-53), A-1/A-2/A-3 (DEBT-54), A-4 (DEBT-57). **DEBT items for GAP-5/GAP-6/GAP-7 can be closed.**
+
+**Re-run scope if `orchestration/` changes again:** N1a–N1i, X5/C2/C3, X7/X10/X11/C1/C1b, the 8 `KI`/`SE` propagation probes and A5-1…A5-8. Everything else in §§3–8 is settled.
+
+### 9.7 Scope note — a newer commit landed **during** this run, and the working tree is dirty again
+
+Recorded for honesty, as §8's pin was. `feat/S-01.2-idp-adapter` advanced from `f63500d` to **`1e8e1aa`** ("fix(orchestration): clamp frame_location to `<external>` outside the package tree") **while §9 was being probed and written**, and the checkout's `src/idp_regression/orchestration/{facade,cli,log_sanitize}.py` and `tests/orchestration/test_{facade,cli}.py` are **currently modified-uncommitted** relative to it, their content reverting to the `f63500d` text (the shape of an in-flight mutation-test restore, but Branca did not author it and cannot vouch for it).
+
+**Everything in §§9.1–9.6 was probed against committed `f63500d`**, as scoped, and stands. `1e8e1aa` was additionally probed **only** for its effect on GAP-8, because it lands on exactly that finding:
+
+| Probe (at `1e8e1aa`) | Result |
+|---|---|
+| frozen-`dataclass` `__setattr__` (`<string>` frame) | `'<external>/<string>:15:__setattr__'` — **cwd disclosure closed** |
+| `json.loads('{')` (stdlib frame, absolute, outside the package) | `'<external>/decoder.py:361:raw_decode'` — the `../../../Users/…` traversal is **closed** too |
+| exception with `__traceback__ is None` | `'<no traceback>'` — unchanged, no raise |
+| non-absolute frame filename with the **cwd deleted** | ❌ **still raises `FileNotFoundError`** — the clamp catches only `ValueError`, and the `getcwd()` inside `abspath` raises `FileNotFoundError`/`OSError` |
+
+So `1e8e1aa` closes GAP-8's **disclosure** half (and more thoroughly than §9.4 asked for — it clamps the absolute-path traversal case as well), and leaves GAP-8's **raise** half open: `frame_location` can still raise inside the catch-all's own handler. One-line completion: catch `OSError` alongside `ValueError`, or wrap the whole body.
+
+**The discharge in §9.6 is pinned to `f63500d`.** It does *not* extend to `1e8e1aa` or to the current dirty tree; nothing probed at `1e8e1aa` weakens it (the one commit between them strictly improves containment), but a full re-gate at whatever commit the tree settles on should re-run the §9.6 scope.
