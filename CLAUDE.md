@@ -94,3 +94,42 @@ Solo mode — no per-human role assignment. Each role below is driven by whoever
 | Branca | Resilience & prompt-security red-team — `/harden` |
 | Zangado | QA / Definition-of-Done audit — `/qa` |
 | Mestre | Project setup, credential tracking, blocker escalation |
+
+## Commands
+
+Everything runs from the project venv; dependencies are uv-managed (`uv add`, `uv lock`) with `uv.lock` committed.
+
+| Task | Command |
+|---|---|
+| Tests | `.venv/bin/python -m pytest -q` |
+| One test | `.venv/bin/python -m pytest tests/platform/test_scoring.py::test_name` (or `-k <expr>`) |
+| Live/integration | `set -a; source .env; set +a; RUN_INTEGRATION_TESTS=1 .venv/bin/python -m pytest -q` |
+| Types + lint | `.venv/bin/mypy src tests` (strict) · `.venv/bin/ruff check src tests` |
+| Dependency CVEs | `.venv/bin/pip-audit` |
+| Secret-scan hook | `./scripts/install-git-hooks.sh` — once per clone; sets `core.hooksPath=.githooks` (not versionable) |
+| CLI | `.venv/bin/python -m idp_regression.orchestration.cli --version <v> --run <name> [--action <id>]` |
+
+- **Integration tests are opt-in** (`RUN_INTEGRATION_TESTS=1`) and need the local Langfuse at `LANGFUSE_HOST` plus IDP credentials from `.env`. Live IDP *submit/poll* stays skipped until a real action id + published version exist (S-01.6); **do not submit documents to the live IDP casually** — it costs org quota and processes real files.
+- **After mutation testing, run `PYTHONDONTWRITEBYTECODE=1` and delete `__pycache__`.** A stale `.pyc` from a same-second revert once made three passing tests fail, and the source looked correct.
+- `pytest-timeout` is set to 120 s so a regression in poll/retry budget math cannot hang the suite.
+
+## Architecture
+
+Four packages under `src/idp_regression/`, one seam each. The dependency direction is adapter → classifier → platform, with orchestration on top; nothing flows back.
+
+- **`adapter/`** — the IDP boundary. OAuth token cache, urllib transport (no-redirect opener, so a 3xx can never re-send the Bearer token), submit + poll loop against a configurable terminal-status allowlist, and `normalize()` mapping IDP's volatile `pages[]` into the stable `NormalizedOutput`. Every failure is a typed error from `errors.py`; **no raw exception may escape `normalize()` or `extract()`**, and no extracted value, token or path appears in a message, log or `__cause__` chain.
+- **`classifier/`** — pure. `classify()` + `overall_gate()` over the six verdicts. No I/O and no adapter/platform imports (INV-02, enforced by a test). This suite is the CI gate.
+- **`platform/`** — Langfuse. The `PlatformAdapter` Protocol is `get_dataset` / `record_run` / `mark_run_status`. **Record-after (ADR-0005 #9):** the orchestrator computes every gate first and writes nothing during its loop; then one `record_run` replays the stored results through the SDK's `run_experiment` and attaches scores to the trace ids it returns. The Langfuse SDK import is confined to `make_platform()` (NFR N24).
+- **`orchestration/`** — the `run_eval` facade and CLI (S-01.4, in progress). `load_dotenv()` runs before any SDK client is constructed (INV-05). The action id and version are **per-run CLI parameters, never env config**; `--version` is required with no fallback.
+
+Where the "why" lives: `docs/adr/` (0002 adapter · 0003 classifier · 0004 orchestration and failure containment · 0005 platform), `docs/design/{CONTRACTS,INVARIANTS,DATA-MODEL-01}.md`, per-story stamps and audits in `docs/qa/`, and running state in `docs/state/` (`PROGRESS.md` is the source of truth for what happened and why; also `HANDOFFS.md`, `DEBT.md`, `REGRESSIONS.md`).
+
+## Langfuse facts that bite
+
+Established live against 4.38.0 OSS in `events_only` mode; re-verify before a version bump.
+
+- Every score needs **exactly one** target (`traceId` / `sessionId` / `datasetRunId`) plus an explicit `dataType`, or the write is a 400. Scores are idempotent on a client-supplied `uuid5` id.
+- A run appears in the UI **only** when created via the SDK's `run_experiment`. REST `dataset-run-items` alone stores the link but surfaces nothing.
+- `GET /v2/scores` is gone — use `/v3/scores`, filtered by `id`. Public reads lag, so poll with a bound and never read-after-write.
+- `GET /api/public/v2/datasets/{name}` does **not** return items; fetch them from the paginated `/api/public/dataset-items`. Getting this wrong yields a silently empty golden set that passes vacuously.
+- The committed golden schema (`src/idp_regression/platform/schema/golden_schema_v1.json`) must satisfy Ajv `strict: true`: every `if`/`then` declares a `type`, every `required` key is in `properties`, and the minified schema stays under 10,000 characters (CT-05).
