@@ -468,12 +468,14 @@ def test_run_eval_returns_nonzero_on_an_empty_dataset_name(
     caplog: pytest.LogCaptureFixture,
     tmp_path: object,
 ) -> None:
-    """A6 (ADR-0004 amendment T-01.4.12 / DEBT-48): `dataset_name` is now
-    a required parameter (precedence resolution moved to `cli.py::main`,
-    mirroring `--action`/`IDP_ACTION_ID`) -- `run_eval` itself no longer
-    reads `GOLDEN_DATASET_NAME` from the environment, but still
+    """A6 (ADR-0004 amendment T-01.4.12 / DEBT-48; A8, 2026-09-22 user
+    decision): `dataset_name` is a required parameter -- `--dataset` is a
+    required CLI flag with no environment fallback (same shape as
+    `--action`/`--version`, `cli.py::main`), and `run_eval` itself never
+    reads `GOLDEN_DATASET_NAME` from the environment. This function still
     fail-closes (N6 shape, zero network calls) on an empty/whitespace-only
-    value passed directly by any caller."""
+    value passed directly by any caller, since a caller bypassing the CLI
+    could still pass one."""
     _disable_dotenv_file_loading(monkeypatch, tmp_path)
     _set_all_credential_env(monkeypatch)
 

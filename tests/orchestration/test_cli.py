@@ -1,12 +1,15 @@
-"""T-01.4.1 CLI entry + TP-31 (ADR-0002/0004 amendment 2026-09-19):
+"""T-01.4.1 CLI entry + TP-31 (ADR-0002/0004 amendment 2026-09-19;
+tightened 2026-09-22 -- user decision):
 
-`run_eval --version <v> --run <name> [--action <id>]`.
-- Missing `--version` -> exit non-zero (no env fallback).
-- `--action` omitted -> `IDP_ACTION_ID` used; neither set -> exit non-zero.
+`run_eval --version <v> --run <name> --action <id> --dataset <name>`.
+- Missing `--version`, `--action` or `--dataset` -> exit non-zero (no env
+  fallback for any of the three; argparse's own `required=True`).
 - Malformed `action_id` (non-UUID) or `version` (e.g. `../x`, `1.0/../`)
   -> exit non-zero with ZERO IDP/platform calls (`run_eval` never called).
+- A whitespace-only `--dataset` value is rejected the same way (`.strip()`
+  fail-closed, mirroring `bootstrap.py`'s N6 credential guard).
 - `load_dotenv()` is the first line of the script (INV-05) -- it must run
-  before the `--action` default is resolved from `IDP_ACTION_ID`.
+  before `parse_args`, so any credential a later step reads is present.
 """
 
 from __future__ import annotations
@@ -36,55 +39,43 @@ def test_missing_version_exits_nonzero_without_calling_run_eval(
     assert exit_code != 0
 
 
-def test_missing_action_and_no_env_fallback_exits_nonzero_without_calling_run_eval(
+def test_missing_action_exits_via_the_argparse_required_path_not_calling_run_eval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Tightened 2026-09-22 (user decision): `--action` is required, no
+    env fallback -- omitting it is now an argparse `required=True`
+    failure (exit 2), same shape as omitting `--version`. Pinned as
+    EXACTLY 2, not merely nonzero: `action_id = None` would ALSO fail
+    the downstream UUID check (exit 1) if `required=True` were quietly
+    dropped, so a plain `!= 0` assertion can't tell `required=True` apart
+    from `required=False` -- exact-code-2 is the mutation-sensitive
+    assertion (confirmed live: reverting to `required=False` here still
+    exits nonzero, via the UUID check, but never with code 2)."""
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
     monkeypatch.setattr(cli, "run_eval", _fail_if_called)
     monkeypatch.delenv("IDP_ACTION_ID", raising=False)
+    monkeypatch.setenv("GOLDEN_DATASET_NAME", "idp-regression-golden")
 
-    exit_code = cli.main(["--version", "1.0", "--run", "nightly"])
+    exit_code = cli.main(["--version", "1.0", "--run", "nightly", "--dataset", "d"])
 
-    assert exit_code != 0
+    assert exit_code == 2
 
 
-def test_action_defaults_to_idp_action_id_env_var_when_omitted(
+def test_idp_action_id_env_var_is_no_longer_read_as_a_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[str, str, str, str]] = []
-
-    def _record(action_id: str, version: str, run_name: str, dataset_name: str) -> int:
-        calls.append((action_id, version, run_name, dataset_name))
-        return 0
-
+    """Tightened 2026-09-22 (user decision) mutation pin: setting
+    `IDP_ACTION_ID` in the environment must NOT make an omitted
+    `--action` succeed -- the env fallback is deleted, not merely
+    shadowed by the flag. Exact-code-2, see the docstring above."""
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
-    monkeypatch.setattr(cli, "run_eval", _record)
+    monkeypatch.setattr(cli, "run_eval", _fail_if_called)
     monkeypatch.setenv("IDP_ACTION_ID", _VALID_UUID)
     monkeypatch.setenv("GOLDEN_DATASET_NAME", "idp-regression-golden")
 
     exit_code = cli.main(["--version", "1.0", "--run", "nightly"])
 
-    assert exit_code == 0
-    assert calls == [(_VALID_UUID, "1.0", "nightly", "idp-regression-golden")]
-
-
-def test_explicit_action_flag_overrides_the_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
-    other_uuid = "87654321-4321-4321-4321-210987654321"
-    calls: list[tuple[str, str, str, str]] = []
-
-    def _record(action_id: str, version: str, run_name: str, dataset_name: str) -> int:
-        calls.append((action_id, version, run_name, dataset_name))
-        return 0
-
-    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
-    monkeypatch.setattr(cli, "run_eval", _record)
-    monkeypatch.setenv("IDP_ACTION_ID", _VALID_UUID)
-    monkeypatch.setenv("GOLDEN_DATASET_NAME", "idp-regression-golden")
-
-    exit_code = cli.main(["--action", other_uuid, "--version", "1.0", "--run", "nightly"])
-
-    assert exit_code == 0
-    assert calls == [(other_uuid, "1.0", "nightly", "idp-regression-golden")]
+    assert exit_code == 2
 
 
 @pytest.mark.parametrize(
@@ -158,43 +149,12 @@ def test_malformed_action_id_error_message_never_echoes_the_value(
     assert distinctive_bad_value not in caplog.text
 
 
-def test_load_dotenv_runs_before_the_action_default_is_resolved(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """INV-05 functional pin: IDP_ACTION_ID only 'arrives' via the faked
-    `load_dotenv()` -- if the CLI resolved the `--action` default before
-    calling `load_dotenv()`, this value would never be seen and the run
-    would abort as if no action were configured at all."""
-
-    def _fake_load_dotenv() -> None:
-        import os
-
-        os.environ["IDP_ACTION_ID"] = _VALID_UUID
-
-    monkeypatch.delenv("IDP_ACTION_ID", raising=False)
-    monkeypatch.setattr(cli, "load_dotenv", _fake_load_dotenv)
-    monkeypatch.setenv("GOLDEN_DATASET_NAME", "idp-regression-golden")
-
-    calls: list[tuple[str, str, str, str]] = []
-    monkeypatch.setattr(
-        cli,
-        "run_eval",
-        lambda a, v, r, d: calls.append((a, v, r, d)) or 0,  # type: ignore[func-returns-value]
-    )
-
-    exit_code = cli.main(["--version", "1.0", "--run", "nightly"])
-
-    assert exit_code == 0
-    assert calls == [(_VALID_UUID, "1.0", "nightly", "idp-regression-golden")]
-
-
 def test_load_dotenv_is_called_before_parse_args(monkeypatch: pytest.MonkeyPatch) -> None:
-    """DEBT-44 gate finding 2 (2026-09-21): the functional pin above
-    (`test_load_dotenv_runs_before_the_action_default_is_resolved`) still
-    passes if `load_dotenv()` runs anywhere before the `--action`
-    fallback lookup specifically -- a mutant that moves the
-    `load_dotenv()` call to AFTER `parser.parse_args(argv)` but still
-    before that fallback lookup survives it. This test pins the stronger,
+    """DEBT-44 gate finding 2 (2026-09-21; still applies after the
+    2026-09-22 required-flags tightening, since `load_dotenv()` still
+    must precede any credential read downstream of a successful parse):
+    a mutant that moves the `load_dotenv()` call to AFTER
+    `parser.parse_args(argv)` must be caught. This test pins the
     literal property the module docstring claims: `load_dotenv()` is
     called before `parse_args` is ever invoked, the same `call_order`
     shape already used for `run_eval` in `test_facade.py`."""
@@ -240,9 +200,19 @@ def test_main_reaches_the_real_facade_and_returns_its_exit_code(
     still fail this test."""
     monkeypatch.chdir(tmp_path)  # type: ignore[arg-type]
     monkeypatch.delenv("IDP_DOCUMENT_DIR", raising=False)
-    monkeypatch.setenv("GOLDEN_DATASET_NAME", "idp-regression-golden")
 
-    exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
+    exit_code = cli.main(
+        [
+            "--action",
+            _VALID_UUID,
+            "--version",
+            "1.0",
+            "--run",
+            "nightly",
+            "--dataset",
+            "idp-regression-golden",
+        ]
+    )
 
     assert exit_code == 1
 
@@ -313,14 +283,24 @@ def test_main_converts_an_unexpected_exception_from_run_eval_into_a_nonzero_exit
     message through `sanitize_for_log`, and returns a plain non-zero exit
     -- never re-raises, never prints the raw traceback."""
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
-    monkeypatch.setenv("GOLDEN_DATASET_NAME", "idp-regression-golden")
 
     def _boom(action_id: str, version: str, run_name: str, dataset_name: str) -> int:
         raise RuntimeError("unexpected\nfailure with embedded newline")
 
     monkeypatch.setattr(cli, "run_eval", _boom)
 
-    exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
+    exit_code = cli.main(
+        [
+            "--action",
+            _VALID_UUID,
+            "--version",
+            "1.0",
+            "--run",
+            "nightly",
+            "--dataset",
+            "idp-regression-golden",
+        ]
+    )
 
     assert exit_code != 0
 
@@ -338,7 +318,6 @@ def test_main_never_logs_the_raw_message_of_an_unexpected_exception_from_run_eva
     type name plus its last traceback frame's location (same shape as
     `run_eval`'s own catch-alls, R-2) -- never `str(exc)`."""
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
-    monkeypatch.setenv("GOLDEN_DATASET_NAME", "idp-regression-golden")
 
     sentinel = "Bearer sk-lf-SEKRIT-should-never-be-logged"
 
@@ -348,7 +327,18 @@ def test_main_never_logs_the_raw_message_of_an_unexpected_exception_from_run_eva
     monkeypatch.setattr(cli, "run_eval", _boom)
 
     with caplog.at_level(logging.ERROR):
-        exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
+        exit_code = cli.main(
+            [
+                "--action",
+                _VALID_UUID,
+                "--version",
+                "1.0",
+                "--run",
+                "nightly",
+                "--dataset",
+                "idp-regression-golden",
+            ]
+        )
 
     assert exit_code != 0
     assert sentinel not in caplog.text
@@ -363,7 +353,6 @@ def test_main_never_escapes_on_a_cancelled_error_from_run_eval(
     `BaseException` subclass, not an `Exception` subclass -- it slips
     through `except Exception` and escaped `main()`'s own catch-all raw."""
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
-    monkeypatch.setenv("GOLDEN_DATASET_NAME", "idp-regression-golden")
 
     import asyncio
 
@@ -373,7 +362,18 @@ def test_main_never_escapes_on_a_cancelled_error_from_run_eval(
     monkeypatch.setattr(cli, "run_eval", _boom)
 
     with caplog.at_level(logging.ERROR):
-        exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
+        exit_code = cli.main(
+            [
+                "--action",
+                _VALID_UUID,
+                "--version",
+                "1.0",
+                "--run",
+                "nightly",
+                "--dataset",
+                "idp-regression-golden",
+            ]
+        )
 
     assert exit_code != 0
 
@@ -409,18 +409,53 @@ def test_version_at_the_64_char_cap_is_accepted(monkeypatch: pytest.MonkeyPatch)
     assert calls == [(_VALID_UUID, version, "nightly", "idp-regression-golden")]
 
 
-def test_dataset_flag_overrides_the_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A6 (DEBT-48): `--dataset` > `GOLDEN_DATASET_NAME`, same precedence
-    shape as `--action`/`IDP_ACTION_ID`."""
-    calls: list[tuple[str, str, str, str]] = []
-
-    def _record(action_id: str, version: str, run_name: str, dataset_name: str) -> int:
-        calls.append((action_id, version, run_name, dataset_name))
-        return 0
-
+def test_golden_dataset_name_env_var_is_no_longer_read_as_a_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tightened 2026-09-22 (user decision) mutation pin: setting
+    `GOLDEN_DATASET_NAME` in the environment must NOT make an omitted
+    `--dataset` succeed -- the A6/DEBT-48 env fallback is deleted, not
+    merely shadowed by the flag (mirrors the equivalent `--action` pin
+    above). Exact-code-2: a bare `!= 0` can't distinguish `required=True`
+    from `required=False`, since an omitted `--dataset` also fails the
+    downstream blank-after-`.strip()` check (exit 1) either way -- code 2
+    is only reachable via the argparse `required=True` path."""
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
-    monkeypatch.setattr(cli, "run_eval", _record)
+    monkeypatch.setattr(cli, "run_eval", _fail_if_called)
     monkeypatch.setenv("GOLDEN_DATASET_NAME", "env-dataset")
+
+    exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
+
+    assert exit_code == 2
+
+
+def test_missing_dataset_exits_via_the_argparse_required_path_not_calling_run_eval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tightened 2026-09-22 (user decision): `--dataset` is required, no
+    env fallback -- omitting it is now an argparse `required=True`
+    failure (exit 2), same shape as omitting `--action`/`--version`. See
+    the exact-code-2 rationale in the test above."""
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(cli, "run_eval", _fail_if_called)
+    monkeypatch.delenv("GOLDEN_DATASET_NAME", raising=False)
+
+    exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
+
+    assert exit_code == 2
+
+
+@pytest.mark.parametrize("blank_dataset_flag", ["", "   "])
+def test_blank_dataset_flag_value_is_rejected_including_whitespace_only(
+    blank_dataset_flag: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N6 shape, carried over from the env-fallback guard: a
+    whitespace-only `--dataset` VALUE (not env var -- there is no env
+    fallback anymore) must be rejected exactly like an empty one,
+    mirroring bootstrap.py's credential guard."""
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(cli, "run_eval", _fail_if_called)
 
     exit_code = cli.main(
         [
@@ -431,58 +466,9 @@ def test_dataset_flag_overrides_the_env_var(monkeypatch: pytest.MonkeyPatch) -> 
             "--run",
             "nightly",
             "--dataset",
-            "flag-dataset",
+            blank_dataset_flag,
         ]
     )
-
-    assert exit_code == 0
-    assert calls == [(_VALID_UUID, "1.0", "nightly", "flag-dataset")]
-
-
-def test_dataset_defaults_to_golden_dataset_name_env_var_when_omitted(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[str, str, str, str]] = []
-
-    def _record(action_id: str, version: str, run_name: str, dataset_name: str) -> int:
-        calls.append((action_id, version, run_name, dataset_name))
-        return 0
-
-    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
-    monkeypatch.setattr(cli, "run_eval", _record)
-    monkeypatch.setenv("GOLDEN_DATASET_NAME", "env-dataset")
-
-    exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
-
-    assert exit_code == 0
-    assert calls == [(_VALID_UUID, "1.0", "nightly", "env-dataset")]
-
-
-def test_missing_dataset_and_no_env_fallback_exits_nonzero_without_calling_run_eval(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
-    monkeypatch.setattr(cli, "run_eval", _fail_if_called)
-    monkeypatch.delenv("GOLDEN_DATASET_NAME", raising=False)
-
-    exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
-
-    assert exit_code != 0
-
-
-@pytest.mark.parametrize("blank_dataset_env", ["", "   "])
-def test_missing_dataset_env_var_is_treated_as_unset_including_whitespace_only(
-    blank_dataset_env: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """N6 shape: a whitespace-only `GOLDEN_DATASET_NAME` must be rejected
-    exactly like an unset/empty one, mirroring bootstrap.py's credential
-    guard."""
-    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
-    monkeypatch.setattr(cli, "run_eval", _fail_if_called)
-    monkeypatch.setenv("GOLDEN_DATASET_NAME", blank_dataset_env)
-
-    exit_code = cli.main(["--action", _VALID_UUID, "--version", "1.0", "--run", "nightly"])
 
     assert exit_code != 0
 
@@ -509,18 +495,19 @@ def test_version_one_char_past_the_64_char_cap_is_rejected(
 # boundary in this codebase.
 #
 # The argparse path's fix is `sanitize_for_log`, not redaction: the value
-# CAN still appear (safely quoted/escaped), unlike the other three paths'
+# CAN still appear (safely quoted/escaped), unlike the other two paths'
 # fixed, field-name-only messages, which never include a value at all.
 # These are two different invariants and get two different assertion
 # shapes below -- asserting "value never appears anywhere" against the
 # argparse path would be a false claim about the actual, correct fix.
+#
+# ⚠️ Tightened 2026-09-22 (user decision): the THIRD field-name-only
+# scenario that used to live here ("missing_action_no_env_fallback") is
+# retired -- `--action` is now argparse `required=True`, so omitting it
+# is the argparse-failure path (covered by the tests below), not a
+# manually-written field-name-only message anymore.
 
 _FIELD_NAME_ONLY_INV02_SCENARIOS = [
-    pytest.param(
-        "distinctive-missing-action-sentinel-7b1e",
-        lambda sentinel: ["--version", sentinel, "--run", "nightly"],
-        id="missing_action_no_env_fallback",
-    ),
     pytest.param(
         "distinctive-bad-action-sentinel-4d9c",
         lambda sentinel: [
@@ -530,6 +517,8 @@ _FIELD_NAME_ONLY_INV02_SCENARIOS = [
             "1.0",
             "--run",
             "nightly",
+            "--dataset",
+            "idp-regression-golden",
         ],
         id="malformed_action_id",
     ),
@@ -542,6 +531,8 @@ _FIELD_NAME_ONLY_INV02_SCENARIOS = [
             sentinel,
             "--run",
             "nightly",
+            "--dataset",
+            "idp-regression-golden",
         ],
         id="malformed_version",
     ),
@@ -555,14 +546,17 @@ def test_field_name_only_error_paths_never_echo_the_attacker_controlled_value(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """DEBT-44 gate, fifth instance, finding (b): parametrized across the
-    THREE of `main()`'s four non-network-call error-return paths whose
-    messages are fixed strings that name only the field -- not just the
-    one (`malformed_action_id`) that already had its own dedicated test
+    """DEBT-44 gate, fifth instance, finding (b); tightened 2026-09-22
+    (user decision): parametrized across the TWO of `main()`'s remaining
+    non-network-call error-return paths whose messages are fixed strings
+    that name only the field -- malformed `--action` and malformed
+    `--version` (the third, "missing `--action`", is retired now that
+    `--action` is argparse `required=True` -- see the module comment
+    above `_FIELD_NAME_ONLY_INV02_SCENARIOS`) -- not just the one
+    (`malformed_action_id`) that already had its own dedicated test
     above."""
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
     monkeypatch.setattr(cli, "run_eval", _fail_if_called)
-    monkeypatch.delenv("IDP_ACTION_ID", raising=False)
 
     with caplog.at_level(logging.ERROR):
         exit_code = cli.main(build_argv(sentinel))  # type: ignore[operator]
@@ -598,6 +592,8 @@ def test_argparse_error_path_sanitizes_rather_than_leaks_the_raw_value(
                 "1.0",
                 "--run",
                 "nightly",
+                "--dataset",
+                "idp-regression-golden",
             ]
         )
 
@@ -632,6 +628,8 @@ def test_argparse_error_path_does_not_let_an_embedded_newline_forge_a_log_line(
                 "1.0",
                 "--run",
                 "nightly",
+                "--dataset",
+                "idp-regression-golden",
             ]
         )
 

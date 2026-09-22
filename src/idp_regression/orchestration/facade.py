@@ -88,21 +88,20 @@ from idp_regression.platform.types import DocumentRecord, PlatformAdapter, RunMe
 
 logger = logging.getLogger(__name__)
 
-#: The golden dataset name's env var (config, not secret -- like
-#: `IDP_DOCUMENT_DIR`, ADR-0004's ".env holds only environment facts"
-#: list). ⚠️ Updated 2026-09-21 (ADR-0004 amendment T-01.4.12 A6 /
-#: DEBT-48): `run_eval` itself no longer reads this var -- `dataset_name`
-#: is now a required parameter (see `run_eval`'s docstring), resolved by
-#: `cli.py::main` with the same flag > env > fail-closed precedence as
-#: `--action`/`IDP_ACTION_ID`. This constant is kept here, exported, so
-#: `cli.py` (and any other caller) names the var once, not by a
-#: hand-copied string literal.
-GOLDEN_DATASET_NAME_VAR = "GOLDEN_DATASET_NAME"
+#: ⚠️ Updated 2026-09-22 (user decision): `GOLDEN_DATASET_NAME` is no
+#: longer read anywhere in this codebase, not even as a fallback --
+#: `--dataset` is a required CLI flag with no environment fallback
+#: (`cli.py::main`), and `run_eval` itself takes `dataset_name` as a
+#: required parameter. `GOLDEN_DATASET_NAME` survives only as a
+#: test-harness convenience var (see `.env.example`), unread by the app.
+#: The `GOLDEN_DATASET_NAME_VAR` constant that used to live here (ADR-0004
+#: amendment T-01.4.12 A6 / DEBT-48) is retired along with the fallback it
+#: named -- nothing in `src/` reads it anymore.
 
 #: The local directory holding the document files under test
 #: (ADR-0004 Flow step 5a: "the orchestrator resolves `IDP_DOCUMENT_DIR /
 #: {item.document_id}` to a local path"). Read and validated fail-closed
-#: (N6 shape) alongside `GOLDEN_DATASET_NAME_VAR`, before any network call.
+#: (N6 shape), before any network call.
 IDP_DOCUMENT_DIR_VAR = "IDP_DOCUMENT_DIR"
 
 
@@ -263,14 +262,14 @@ def run_eval(action_id: str, version: str, run_name: str, dataset_name: str) -> 
     named golden set (`dataset_name`), writing per-field + gate scores to
     a run derived from `run_name` on the platform (ADR-0004, ADR-0005 #9).
 
-    `dataset_name` (ADR-0004 amendment T-01.4.12 A6 / DEBT-48): a
-    required, plain parameter -- like `action_id`/`version` above, this
-    function does NOT read `GOLDEN_DATASET_NAME` from the environment
-    itself. Precedence resolution (`--dataset` flag > `GOLDEN_DATASET_NAME`
-    env > fail-closed) is the CLI's job (`cli.py::main`), exactly mirroring
-    how `--action`/`IDP_ACTION_ID` is already resolved there before
-    `run_eval` is ever entered. A caller of this public function directly
-    (bypassing the CLI) must supply `dataset_name` explicitly.
+    `dataset_name` (ADR-0004 amendment T-01.4.12 A6 / DEBT-48; tightened
+    2026-09-22 -- user decision): a required, plain parameter -- like
+    `action_id`/`version` above, this function does NOT read
+    `GOLDEN_DATASET_NAME` from the environment, and neither does the CLI
+    anymore: `--dataset` is a required flag with no env fallback
+    (`cli.py::main`), exactly mirroring `--action`'s own required-flag
+    shape. A caller of this public function directly (bypassing the CLI)
+    must supply `dataset_name` explicitly.
 
     Returns a process exit code: `0` iff every document's gate was
     `PASS` and no error occurred anywhere in the run; non-zero on any

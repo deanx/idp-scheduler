@@ -136,3 +136,82 @@ def test_jsonschema_import_check_catches_import_and_import_from_and_alias() -> N
     assert not _imports_jsonschema(
         ast.parse('"""a docstring that just says jsonschema, no import"""')
     )
+
+
+# --- A8 (ADR-0004 amendment, 2026-09-22): no production read of the -----
+# --- two retired env-fallback var names -----------------------------------
+
+SRC_DIR = pathlib.Path(__file__).resolve().parents[2] / "src" / "idp_regression"
+
+#: The two env var names A8 declares dead: `--action`/`--dataset` are
+#: required CLI flags with no environment fallback (user decision,
+#: 2026-09-22) -- neither name may be read by any production code path
+#: again. They survive only as test-harness conveniences (`.env.example`,
+#: `tests/adapter/test_integration_idp.py`,
+#: `tests/orchestration/test_integration_e2e.py`).
+_RETIRED_ENV_VAR_NAMES = frozenset({"IDP_ACTION_ID", "GOLDEN_DATASET_NAME"})
+
+
+def _docstring_constant_ids(tree: ast.AST) -> set[int]:
+    """`id()` of every AST string-`Constant` node that is a module/class/
+    function docstring -- excluded from the literal scan below so a
+    docstring MENTIONING a retired var name (as this file's own
+    docstrings do) can never satisfy the check, only real code use can."""
+    ids: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            body = node.body
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                ids.add(id(body[0].value))
+    return ids
+
+
+def _non_docstring_string_literals(source: str) -> set[str]:
+    """Every string-literal `Constant`'s value, MINUS docstrings. Comments
+    are invisible to `ast` entirely, so a mention there already can't
+    satisfy this -- the docstring exclusion closes the other prose-
+    tolerant gap (the earlier finding in this project was a plain grep
+    that a comment alone could satisfy; this walks parsed code instead)."""
+    tree = ast.parse(source)
+    excluded = _docstring_constant_ids(tree)
+    return {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in excluded
+    }
+
+
+def test_no_production_code_reads_the_retired_env_var_names() -> None:
+    """A8: `IDP_ACTION_ID` and `GOLDEN_DATASET_NAME` are read by NO
+    production code path under `src/idp_regression/` -- `--action` and
+    `--dataset` are required CLI flags with no environment fallback
+    (2026-09-22 user decision). Scans all of `src/idp_regression/`, not
+    just `orchestration/`, since A8's claim is codebase-wide."""
+    offenders: dict[str, set[str]] = {}
+    for path in SRC_DIR.rglob("*.py"):
+        literals = _non_docstring_string_literals(path.read_text(encoding="utf-8"))
+        hit = literals & _RETIRED_ENV_VAR_NAMES
+        if hit:
+            offenders[str(path)] = hit
+    assert offenders == {}, f"retired env var name read in production code: {offenders}"
+
+
+def test_retired_env_var_check_ignores_docstring_mentions_but_catches_real_reads() -> None:
+    """Mutation pin: a docstring mentioning a retired name must NOT
+    satisfy the check (this file's own module docstring above does
+    exactly that); a real `os.environ.get("IDP_ACTION_ID")`-shaped read
+    must."""
+    docstring_only = '"""mentions IDP_ACTION_ID and GOLDEN_DATASET_NAME, no read."""\n'
+    real_read = 'import os\naction = os.environ.get("IDP_ACTION_ID")\n'
+
+    assert _non_docstring_string_literals(docstring_only) & _RETIRED_ENV_VAR_NAMES == set()
+    assert _non_docstring_string_literals(real_read) & _RETIRED_ENV_VAR_NAMES == {
+        "IDP_ACTION_ID"
+    }

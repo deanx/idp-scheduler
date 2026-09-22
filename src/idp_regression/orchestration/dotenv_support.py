@@ -41,9 +41,12 @@ they understand it.
 present in the real environment **wins** over the file. That ordering is
 what lets CI inject credentials without a `.env`, and what makes the
 double call from `cli.main()` and `run_eval()` idempotent — `cli.main()`
-needs it before `--action`'s `IDP_ACTION_ID` fallback is resolved, and
-`run_eval()` needs it because it is the direct caller of
-`make_platform()` / `make_idp_adapter()`.
+needs it before any credential is read (INV-05), and `run_eval()` needs
+it because it is the direct caller of `make_platform()` /
+`make_idp_adapter()`. (`--action` and `--dataset` are required CLI flags
+with no environment fallback as of 2026-09-22 — user decision — this
+call no longer resolves either of them; it still gates every credential
+read.)
 """
 
 from __future__ import annotations

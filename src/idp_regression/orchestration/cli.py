@@ -3,28 +3,36 @@ amendment T-01.4.12 A6 / DEBT-48).
 
 ::
 
-    run_eval --version <v> --run <name> [--action <id>] [--dataset <name>]
+    run_eval --version <v> --run <name> --action <id> --dataset <name>
 
 `load_dotenv()` is the first line of this script, before argparse even
-resolves `--action`'s `IDP_ACTION_ID` default (ADR-0004, INV-05) -- `main`
-is the outermost caller in this codebase, the one place the ADR's "first
-line of the script" DoD language literally applies. `run_eval` (the
-facade) ALSO calls `load_dotenv()` as its own first statement -- ⚠️
-corrected 2026-09-21 (DEBT-44 gate overclaim sweep): NOT because it is
-"the direct caller of `make_platform()`" (it no longer calls that
-function at all since the C-1/R-3 fix; see `facade.py`'s own corrected
-docstring), simply because INV-05 requires `load_dotenv()` before ANY
-credential read, and `run_eval` is a public function other callers may
-invoke directly, bypassing this CLI. The second call is a harmless no-op
-(never overrides an already-set var -- see `dotenv_support.load_dotenv`)
-and holds INV-05 for any caller of `run_eval`, not only this CLI.
+parses argv (ADR-0004, INV-05) -- `main` is the outermost caller in this
+codebase, the one place the ADR's "first line of the script" DoD
+language literally applies. `run_eval` (the facade) ALSO calls
+`load_dotenv()` as its own first statement -- ⚠️ corrected 2026-09-21
+(DEBT-44 gate overclaim sweep): NOT because it is "the direct caller of
+`make_platform()`" (it no longer calls that function at all since the
+C-1/R-3 fix; see `facade.py`'s own corrected docstring), simply because
+INV-05 requires `load_dotenv()` before ANY credential read, and
+`run_eval` is a public function other callers may invoke directly,
+bypassing this CLI. The second call is a harmless no-op (never overrides
+an already-set var -- see `dotenv_support.load_dotenv`) and holds INV-05
+for any caller of `run_eval`, not only this CLI.
 
-Argument validation (TP-31, ADR-0004 amendment 2026-09-19): `--version`
-is required with no env fallback (argparse enforces this, exit code 2);
-`--action` defaults to `IDP_ACTION_ID`, exit non-zero if neither is set;
-both are validated here (`action_id` UUID, `version`
-`^[A-Za-z0-9._-]{1,64}$`) before `run_eval` -- and therefore before any
-IDP/platform network call -- is ever entered.
+Argument validation (TP-31, ADR-0004 amendment 2026-09-19; tightened
+2026-09-22 -- user decision): `--version`, `--action` and `--dataset` are
+ALL required with no environment fallback (argparse enforces this, exit
+code 2) -- every input that defines *what was tested* comes from the
+command line, so it is visible in a CI invocation and its PR diff.
+Ambient environment can no longer decide what a run measured; it still
+supplies what describes the *machine and account* (IDP credentials,
+org/region, `IDP_DOCUMENT_DIR`, the evaluation platform's own host/key
+vars (N24 -- this module names no vendor), the timeouts). `--action`
+and `--version` are validated here (`action_id` UUID, `version`
+`^[A-Za-z0-9._-]{1,64}$`) and `--dataset` is rejected if blank after
+`.strip()` (the same fail-closed shape `bootstrap.py`'s N6 guard uses for
+credentials) -- all before `run_eval`, and therefore before any
+IDP/platform network call, is ever entered.
 
 INV-02 (message hygiene, corrected 2026-09-21 -- DEBT-44 gate, fifth
 instance, finding (b)): the three validation error messages this
@@ -47,7 +55,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import os
 import re
 import sys
 import uuid
@@ -55,7 +62,7 @@ from collections.abc import Sequence
 
 from idp_regression.adapter.transport import sanitize_for_log
 from idp_regression.orchestration.dotenv_support import load_dotenv
-from idp_regression.orchestration.facade import GOLDEN_DATASET_NAME_VAR, run_eval
+from idp_regression.orchestration.facade import run_eval
 from idp_regression.orchestration.log_sanitize import frame_location
 
 logger = logging.getLogger(__name__)
@@ -94,14 +101,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = _NonExitingArgumentParser(prog="run_eval")
     parser.add_argument("--version", dest="version", required=True)
     parser.add_argument("--run", dest="run_name", required=True)
-    parser.add_argument("--action", dest="action", default=None)
-    # ADR-0004 amendment T-01.4.12 A6 (DEBT-48): same precedence shape as
-    # `--action`/`IDP_ACTION_ID` -- flag wins, `GOLDEN_DATASET_NAME` is
-    # the local-convenience fallback, neither set is a pre-network
-    # non-zero exit (N6). CI pipelines are expected to pass `--dataset`
-    # explicitly, next to `--version`, so the pointer is visible in the
-    # PR diff that changes it rather than buried in a runner's env.
-    parser.add_argument("--dataset", dest="dataset", default=None)
+    # Tightened 2026-09-22 (user decision): required, no env fallback --
+    # what a run measured must be visible in the invocation itself and
+    # its PR diff, not resolvable from ambient environment.
+    parser.add_argument("--action", dest="action", required=True)
+    parser.add_argument("--dataset", dest="dataset", required=True)
     return parser
 
 
@@ -150,12 +154,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         logger.error("run_eval: invalid arguments: %s", sanitize_for_log(str(exc)))
         return 2
 
-    action_id = args.action or os.environ.get("IDP_ACTION_ID")
-    if not action_id:
-        logger.error(
-            "run_eval: no --action given and IDP_ACTION_ID is not set in the environment"
-        )
-        return 1
+    action_id = args.action
 
     if not _is_valid_action_id(action_id):
         logger.error("run_eval: --action is not a valid UUID")
@@ -165,15 +164,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         logger.error("run_eval: --version has an invalid format")
         return 1
 
-    # A6 (DEBT-48): flag > GOLDEN_DATASET_NAME env > fail-closed, same
-    # shape as --action/IDP_ACTION_ID above. `.strip()` rejects a
-    # whitespace-only env value the same way `bootstrap.py`'s N6 guard
-    # already does for the platform/IDP credentials.
-    dataset_name = (args.dataset or os.environ.get(GOLDEN_DATASET_NAME_VAR) or "").strip()
+    # Tightened 2026-09-22 (user decision): `--dataset` is required, no
+    # env fallback. `.strip()` still rejects a whitespace-only value the
+    # same way `bootstrap.py`'s N6 guard does for the platform/IDP
+    # credentials -- a blank string is still a blank string when it
+    # arrives via a required flag instead of an env var.
+    dataset_name = (args.dataset or "").strip()
     if not dataset_name:
-        logger.error(
-            "run_eval: no --dataset given and GOLDEN_DATASET_NAME is not set in the environment"
-        )
+        logger.error("run_eval: --dataset must not be blank")
         return 1
 
     try:
