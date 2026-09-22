@@ -23,6 +23,7 @@ structural check on the returned ``item_results``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -116,6 +117,20 @@ def record_experiment(
     langfuse_logger = logging.getLogger(LANGFUSE_SDK_LOGGER_NAME)
     otlp_logger.addHandler(otlp_watcher)
     langfuse_logger.addHandler(langfuse_watcher)
+    # `to_raise` is set INSIDE an except block but raised OUTSIDE it
+    # (below, after the `finally`) -- deliberately, to close the
+    # `__context__` leak (Atchim suggestion, 2026-09-21): raising a NEW
+    # exception WHILE Python is still handling `exc` makes the
+    # interpreter attach `exc` to the new exception's `__context__`
+    # regardless of `from None` (that only sets `__suppress_context__`,
+    # which hides it from DEFAULT traceback printing -- the original
+    # exception object, e.g. `RuntimeError('Bearer sk-lf-SECRET')`,
+    # still lives on `.__context__` and would survive a custom
+    # exc_info-walking logger, which is exactly what Atchim reproduced).
+    # No exception is being handled once control reaches the deferred
+    # `raise to_raise` below, so `__context__` is naturally `None` there.
+    to_raise: Exception | None = None
+    result: Any = None
     try:
         try:
             result = tracing_client.run_experiment(
@@ -126,7 +141,7 @@ def record_experiment(
                 max_concurrency=1,
                 metadata=metadata,
             )
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             # HARDEN-01 GAP-2 (2026-09-21): `run_experiment` was called
             # with no `except Exception` at all -- any exception the SDK
             # raises (transport, auth) propagated untyped straight out of
@@ -135,22 +150,33 @@ def record_experiment(
             # contract says is impossible). `str(exc)` is not
             # interpolated (INV-02: SDK exception text may carry
             # transport/auth response content this codebase never logs).
-            raise ExperimentRecordFailedError(
+            # GAP-5 (Branca `/harden` re-run, 2026-09-21): `run_experiment`
+            # internally uses `asyncio.gather`, which can raise
+            # `asyncio.CancelledError` -- a `BaseException` subclass a
+            # plain `except Exception` does NOT catch. Caught explicitly
+            # here alongside `Exception`; `KeyboardInterrupt`/`SystemExit`
+            # are deliberately NOT in this tuple and still propagate.
+            to_raise = ExperimentRecordFailedError(
                 f"record_experiment: run_experiment raised {type(exc).__name__}"
-            ) from None
-        try:
-            tracing_client.flush()
-        except Exception as exc:
-            # Same GAP-2 finding, the flush() call -- mapped to
-            # FlushFailedError specifically (not ExperimentRecordFailedError)
-            # so a raised flush failure is indistinguishable, at the
-            # caller, from a LOGGED one (`otlp_watcher.failed` below).
-            raise FlushFailedError(
-                f"record_experiment: flush() raised {type(exc).__name__}"
-            ) from None
+            )
+        if to_raise is None:
+            try:
+                tracing_client.flush()
+            except (Exception, asyncio.CancelledError) as exc:
+                # Same GAP-2/GAP-5 findings, the flush() call -- mapped to
+                # FlushFailedError specifically (not
+                # ExperimentRecordFailedError) so a raised flush failure
+                # is indistinguishable, at the caller, from a LOGGED one
+                # (`otlp_watcher.failed` below).
+                to_raise = FlushFailedError(
+                    f"record_experiment: flush() raised {type(exc).__name__}"
+                )
     finally:
         otlp_logger.removeHandler(otlp_watcher)
         langfuse_logger.removeHandler(langfuse_watcher)
+
+    if to_raise is not None:
+        raise to_raise
 
     if otlp_watcher.failed:
         raise FlushFailedError(
@@ -163,40 +189,62 @@ def record_experiment(
             "(see the langfuse logger's own ERROR log for detail)"
         )
 
+    # GAP-4 (Branca `/harden` re-run, 2026-09-21): the structural checks
+    # below used to guard ONLY `list(result.item_results)`, with `except
+    # AttributeError`. A lazily-raising `item_results` (any exception
+    # type), or `.trace_id`/`.dataset_run_id`/`.item.id` access failing
+    # on a drifted item shape, were unguarded and escaped raw. The WHOLE
+    # block is now one try, and the same deferred-raise shape as above
+    # avoids the `__context__` leak for the catch-all branch; the
+    # deliberate structural-check raises (item count / missing field /
+    # mismatched IDs) are re-raised as-is (they are already
+    # `ExperimentRecordFailedError`, already INV-02-safe, and were never
+    # raised while handling another exception, so they carry no context
+    # to strip).
+    structural_error: ExperimentRecordFailedError | None = None
+    trace_ids: dict[str, str] = {}
     try:
         item_results = list(result.item_results)
-    except AttributeError as exc:
-        # GAP-2: a version bump that renames/removes `item_results` (the
-        # exact class of drift CLAUDE.md's SDK-internals warning names)
-        # must not leak a raw AttributeError either.
-        raise ExperimentRecordFailedError(
-            f"record_experiment: the tracing client's result has no {exc.name!r} attribute "
+
+        if len(item_results) != len(items):
+            raise ExperimentRecordFailedError(
+                f"record_experiment structural check failed: expected {len(items)} "
+                f"item results, got {len(item_results)}"
+            )
+
+        dataset_run_ids: set[str] = set()
+        for item_result in item_results:
+            if not item_result.trace_id:
+                raise ExperimentRecordFailedError(
+                    "record_experiment structural check failed: an item result has no trace_id"
+                )
+            if not item_result.dataset_run_id:
+                raise ExperimentRecordFailedError(
+                    "record_experiment structural check failed: "
+                    "an item result has no dataset_run_id"
+                )
+            dataset_run_ids.add(item_result.dataset_run_id)
+            trace_ids[item_result.item.id] = item_result.trace_id
+
+        if len(dataset_run_ids) != 1:
+            raise ExperimentRecordFailedError(
+                "record_experiment structural check failed: item results don't share a "
+                f"single dataset_run_id (got {len(dataset_run_ids)} distinct values)"
+            )
+    except ExperimentRecordFailedError as exc:
+        structural_error = exc
+    except (Exception, asyncio.CancelledError) as exc:
+        # A version bump that renames/removes `item_results`/`.trace_id`/
+        # `.dataset_run_id`/`.item.id` (the exact class of drift
+        # CLAUDE.md's SDK-internals warning names), or any other
+        # unanticipated failure walking this structure, must not leak a
+        # raw exception either. `type(exc).__name__` only (INV-02).
+        structural_error = ExperimentRecordFailedError(
+            f"record_experiment structural check failed: {type(exc).__name__} "
             "(SDK return shape drift?)"
-        ) from None
-    if len(item_results) != len(items):
-        raise ExperimentRecordFailedError(
-            f"record_experiment structural check failed: expected {len(items)} "
-            f"item results, got {len(item_results)}"
         )
 
-    trace_ids: dict[str, str] = {}
-    dataset_run_ids: set[str] = set()
-    for item_result in item_results:
-        if not item_result.trace_id:
-            raise ExperimentRecordFailedError(
-                "record_experiment structural check failed: an item result has no trace_id"
-            )
-        if not item_result.dataset_run_id:
-            raise ExperimentRecordFailedError(
-                "record_experiment structural check failed: an item result has no dataset_run_id"
-            )
-        dataset_run_ids.add(item_result.dataset_run_id)
-        trace_ids[item_result.item.id] = item_result.trace_id
-
-    if len(dataset_run_ids) != 1:
-        raise ExperimentRecordFailedError(
-            "record_experiment structural check failed: item results don't share a "
-            f"single dataset_run_id (got {len(dataset_run_ids)} distinct values)"
-        )
+    if structural_error is not None:
+        raise structural_error
 
     return trace_ids

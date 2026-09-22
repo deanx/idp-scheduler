@@ -13,6 +13,7 @@ R5 false negatives Atchim listed, each with its own test:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from dataclasses import dataclass
@@ -235,6 +236,137 @@ def test_gap2_drifted_item_results_attribute_is_wrapped_not_leaked() -> None:
 
     with pytest.raises(ExperimentRecordFailedError):
         record_experiment(_DriftedResultClient(items), run_name="r", items=items, task=_task)
+
+
+def test_run_experiment_raising_does_not_leak_the_original_exception_via_context() -> None:
+    """Suggestion (Atchim gate, 2026-09-21): `raise ... from None` only
+    sets `__suppress_context__` -- the ORIGINAL exception object still
+    sits on `__context__`, so a future `exc_info=True`/rich-traceback
+    logger walking `__context__` directly (ignoring the suppress flag)
+    could still print it. Atchim observed exactly this:
+    `RuntimeError('Bearer sk-lf-SECRET')` surviving on `__context__`.
+    `__context__` must be cleared, not merely suppressed."""
+    items = _items(1)
+
+    class _RaisingClient(_OkTracingClient):
+        def run_experiment(self, **kwargs: object) -> _FakeResult:
+            raise RuntimeError("Bearer sk-lf-SECRET")
+
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        record_experiment(_RaisingClient(items), run_name="r", items=items, task=_task)
+
+    assert excinfo.value.__context__ is None
+
+
+def test_flush_raising_does_not_leak_the_original_exception_via_context() -> None:
+    items = _items(1)
+
+    class _RaisingFlush(_OkTracingClient):
+        def flush(self) -> None:
+            raise RuntimeError("Bearer sk-lf-SECRET")
+
+    with pytest.raises(FlushFailedError) as excinfo:
+        record_experiment(_RaisingFlush(items), run_name="r", items=items, task=_task)
+
+    assert excinfo.value.__context__ is None
+
+
+def test_drifted_item_results_attribute_does_not_leak_via_context() -> None:
+    items = _items(1)
+
+    class _NoItemResultsAttr:
+        pass
+
+    class _DriftedResultClient(_OkTracingClient):
+        def run_experiment(self, **kwargs: object) -> Any:
+            return _NoItemResultsAttr()
+
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        record_experiment(_DriftedResultClient(items), run_name="r", items=items, task=_task)
+
+    assert excinfo.value.__context__ is None
+
+
+def test_gap4_a_lazily_raising_item_results_attribute_is_wrapped_not_leaked() -> None:
+    """GAP-4 (Branca `/harden` re-run, 2026-09-21): the structural check
+    below `list(result.item_results)` only guarded THAT access with
+    `except AttributeError` -- iterating a lazy/property-backed
+    `item_results` that raises something else (or accessing `.trace_id`/
+    `.dataset_run_id`/`.item.id` on a drifted item shape) was
+    unguarded and escaped raw."""
+    items = _items(1)
+
+    class _LazyBoomItemResults:
+        def __iter__(self) -> Any:
+            raise RuntimeError("SDK internals drifted")
+
+    class _LazyResult:
+        item_results = _LazyBoomItemResults()
+
+    class _LazyDriftClient(_OkTracingClient):
+        def run_experiment(self, **kwargs: object) -> Any:
+            return _LazyResult()
+
+    with pytest.raises(ExperimentRecordFailedError):
+        record_experiment(_LazyDriftClient(items), run_name="r", items=items, task=_task)
+
+
+def test_gap4_an_item_result_missing_expected_attributes_is_wrapped_not_leaked() -> None:
+    """GAP-4: `.trace_id`/`.dataset_run_id`/`.item.id` access on a
+    drifted item-result shape (e.g. a version bump renaming `.item` or
+    `.trace_id`) must not escape as a raw `AttributeError` either."""
+    items = _items(1)
+
+    class _NoAttrsItemResult:
+        pass
+
+    class _DriftedItemResultClient(_OkTracingClient):
+        def run_experiment(self, **kwargs: object) -> _FakeResult:
+            return _FakeResult([_NoAttrsItemResult()])  # type: ignore[list-item]
+
+    with pytest.raises(ExperimentRecordFailedError):
+        record_experiment(_DriftedItemResultClient(items), run_name="r", items=items, task=_task)
+
+
+def test_gap5_a_cancelled_error_from_run_experiment_is_wrapped_not_leaked() -> None:
+    """GAP-5 (Branca `/harden` re-run, 2026-09-21): `run_experiment`'s own
+    internal `asyncio.gather` can raise `asyncio.CancelledError`, a
+    `BaseException` subclass NOT caught by a plain `except Exception`.
+    `record_experiment`'s two `except Exception` blocks (run_experiment,
+    flush) must also catch it -- unlike `KeyboardInterrupt`/
+    `SystemExit`, which must still propagate uncaught."""
+    items = _items(1)
+
+    class _CancelledClient(_OkTracingClient):
+        def run_experiment(self, **kwargs: object) -> _FakeResult:
+            raise asyncio.CancelledError()
+
+    with pytest.raises(ExperimentRecordFailedError):
+        record_experiment(_CancelledClient(items), run_name="r", items=items, task=_task)
+
+
+def test_gap5_a_cancelled_error_from_flush_is_wrapped_not_leaked() -> None:
+    items = _items(1)
+
+    class _CancelledFlushClient(_OkTracingClient):
+        def flush(self) -> None:
+            raise asyncio.CancelledError()
+
+    with pytest.raises(FlushFailedError):
+        record_experiment(_CancelledFlushClient(items), run_name="r", items=items, task=_task)
+
+
+def test_gap5_keyboard_interrupt_still_propagates_through_record_experiment() -> None:
+    """GAP-5's fix must not become a bare `except BaseException` --
+    `KeyboardInterrupt` must still propagate uncaught."""
+    items = _items(1)
+
+    class _InterruptedClient(_OkTracingClient):
+        def run_experiment(self, **kwargs: object) -> _FakeResult:
+            raise KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+        record_experiment(_InterruptedClient(items), run_name="r", items=items, task=_task)
 
 
 def test_watcher_handlers_are_removed_after_the_call() -> None:
