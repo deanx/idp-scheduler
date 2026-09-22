@@ -107,6 +107,73 @@ def test_frame_location_returns_no_traceback_placeholder_when_traceback_is_none(
     assert frame_location(exc) == "<no traceback>"
 
 
+# --- GAP-8 (Branca /harden re-run #3, 2026-09-21, live-reproduced against
+# 1e8e1aa): the <external>/ clamp above closed the disclosure for an
+# out-of-tree ABSOLUTE frame, but a non-absolute frame filename (a
+# stdlib synthetic frame, e.g. `<string>` from `exec`/`compile`, or
+# `<frozen importlib._bootstrap>`) still went through `os.path.relpath`,
+# which silently joins a non-absolute argument onto `os.getcwd()` --
+# another absolute-path disclosure, and a `FileNotFoundError` (an
+# `OSError`) from `getcwd()` itself when the cwd no longer exists,
+# raised from INSIDE this exact catch-all-safety helper (the A-5 class).
+
+
+def test_frame_location_for_a_non_absolute_filename_never_joins_the_cwd() -> None:
+    """A synthetic frame (`exec`-compiled code defaults to the filename
+    `<string>`) is never inside `idp_regression` and must never be
+    resolved relative to the cwd."""
+    try:
+        exec("raise RuntimeError('boom')", {})  # noqa: S102 - deliberate synthetic frame
+    except RuntimeError as exc:
+        location = frame_location(exc)
+
+    assert location.startswith("<external>/<string>:")
+    assert os.getcwd() not in location
+    assert not os.path.isabs(location.split(":")[0])
+
+
+def test_frame_location_never_raises_when_the_cwd_no_longer_exists(
+    tmp_path: object, monkeypatch: object
+) -> None:
+    """Direct pin for the raise half of GAP-8: `os.path.relpath`/
+    `os.path.abspath` calls `os.getcwd()` for any non-absolute argument,
+    which raises `FileNotFoundError` once the cwd has been deleted --
+    `frame_location` must be total and never propagate that."""
+    import os as os_module
+
+    workdir = tmp_path / "gone"  # type: ignore[operator]
+    workdir.mkdir()  # type: ignore[attr-defined]
+    monkeypatch.chdir(workdir)  # type: ignore[attr-defined]
+    os_module.rmdir(workdir)
+
+    try:
+        exec("raise RuntimeError('boom')", {})  # noqa: S102 - deliberate synthetic frame
+    except RuntimeError as exc:
+        location = frame_location(exc)  # must not raise
+
+    assert location.startswith("<external>/<string>:")
+
+
+def test_frame_location_is_total_against_an_arbitrary_relpath_failure(
+    monkeypatch: object,
+) -> None:
+    """`frame_location` must never raise, no matter what `os.path.relpath`
+    itself does -- not just `ValueError`/`OSError`, ANY exception."""
+    import os as os_module
+
+    def _boom(*args: object, **kwargs: object) -> str:
+        raise RuntimeError("relpath exploded unexpectedly")
+
+    monkeypatch.setattr(os_module.path, "relpath", _boom)  # type: ignore[attr-defined]
+
+    try:
+        raise RuntimeError("boom")
+    except RuntimeError as exc:
+        location = frame_location(exc)  # must not raise
+
+    assert location  # some safe string, not a crash
+
+
 def test_frame_location_is_package_relative_for_a_facade_frame() -> None:
     """A frame inside `idp_regression` itself renders as
     `idp_regression/<...>.py:<line>:<func>` -- never a machine-specific

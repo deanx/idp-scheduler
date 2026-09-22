@@ -53,8 +53,8 @@ def frame_location(exc: BaseException) -> str:
     `os.path.relpath` does not clamp to `_PACKAGE_PARENT` -- it happily
     TRAVERSES above it. Whenever the innermost frame lives OUTSIDE
     `idp_regression` (the normal case for the unanticipated-exception
-    catch-alls this feeds: the Langfuse SDK, httpx, the stdlib), the
-    result is a string like
+    catch-alls this feeds: the evaluation-platform SDK, httpx, the
+    stdlib), the result is a string like
     `../../../../../../Users/alex/.../json/decoder.py:361:raw_decode` --
     the exact absolute-path disclosure the first fix above was written to
     close, just re-opened one level up. Any frame whose relative path
@@ -62,16 +62,42 @@ def frame_location(exc: BaseException) -> str:
     `_PACKAGE_PARENT` (`relpath` raises `ValueError` on Windows for
     that), is rendered as `<external>/{basename}` instead -- code-location
     metadata for a third-party frame is not worth an absolute-path leak.
-    A package-internal frame keeps the existing package-relative form."""
+    A package-internal frame keeps the existing package-relative form.
+
+    ⚠️ Fixed a third time 2026-09-21 (Branca `/harden` re-run #3, GAP-8,
+    live-reproduced against `1e8e1aa`): the `<external>/` clamp above
+    only covered an out-of-tree ABSOLUTE frame filename. A synthetic
+    stdlib frame (`<string>` from `exec`/`compile`, `<frozen
+    importlib._bootstrap>`, ...) is NOT absolute -- `os.path.relpath`
+    silently joins a non-absolute argument onto `os.getcwd()` first,
+    which is (a) yet another absolute-path disclosure route and (b)
+    raises `FileNotFoundError` (an `OSError`) from `getcwd()` itself if
+    the current working directory has since been deleted -- an
+    exception escaping from INSIDE this exact catch-all-safety helper.
+    A non-absolute filename is now recognised and routed to
+    `<external>/{basename}` directly, without ever calling `relpath`.
+    `OSError` is now also caught alongside `ValueError` around the
+    remaining (absolute-frame) `relpath` call, and the whole filename
+    computation is wrapped in a final `except Exception` so this
+    function is TOTAL -- no traceback, no filename shape and no
+    unanticipated `relpath` failure may ever raise out of it; the
+    fallback is `<unavailable>`, never a crash inside a catch-all whose
+    entire job is to make an unanticipated failure safe to log."""
     frames = traceback.extract_tb(exc.__traceback__)
     if not frames:
         return "<no traceback>"
     frame = frames[-1]
     try:
-        filename = os.path.relpath(frame.filename, _PACKAGE_PARENT)
-    except ValueError:
-        filename = f"<external>/{os.path.basename(frame.filename)}"
-    else:
-        if filename.split(os.sep, 1)[0] == os.pardir:
+        if not os.path.isabs(frame.filename):
             filename = f"<external>/{os.path.basename(frame.filename)}"
-    return f"{filename}:{frame.lineno}:{frame.name}"
+        else:
+            try:
+                filename = os.path.relpath(frame.filename, _PACKAGE_PARENT)
+            except (ValueError, OSError):
+                filename = f"<external>/{os.path.basename(frame.filename)}"
+            else:
+                if filename.split(os.sep, 1)[0] == os.pardir:
+                    filename = f"<external>/{os.path.basename(frame.filename)}"
+        return f"{filename}:{frame.lineno}:{frame.name}"
+    except Exception:  # noqa: BLE001 - this IS the catch-all's own safety net; must never raise
+        return "<unavailable>"
