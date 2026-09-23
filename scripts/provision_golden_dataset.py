@@ -18,7 +18,11 @@ Design constraints this script honours (CLAUDE.md ## Domain):
   - no golden value is printed with its real content beyond what the
     operator explicitly asked to perturb (and even then, only the field
     name + new value the operator supplied on the command line, never
-    logged to a persistent file).
+    logged to a persistent file); ``--dry-run`` prints field names + a
+    payload digest by default, full values only under ``--show-values``;
+    and an HTTP error from the platform never echoes its response body,
+    since Langfuse's own 400 for a bad dataset item can echo back the
+    submitted golden value.
 
 Usage::
 
@@ -39,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import sys
@@ -123,6 +128,22 @@ def _build_item_payload(dataset_name: str, seed: dict[str, Any]) -> dict[str, An
     }
 
 
+def _summarize_payload(item_payload: dict[str, Any]) -> str:
+    """A `--dry-run`-safe stand-in for the real item payload: field/table
+    *names* and a digest of the whole payload, never a value (L7 -- the
+    prior dry-run printed the full payload including real golden field
+    values, the same class of leak H1 closed on the error path)."""
+    expected = item_payload.get("expectedOutput", {})
+    field_names = sorted(expected.get("fields", {}))
+    table_names = sorted(expected.get("tables", {})) if expected.get("tables") else []
+    digest = hashlib.sha256(json.dumps(item_payload, sort_keys=True).encode("utf-8")).hexdigest()
+    return (
+        f"document_id={item_payload['input']['document_id']!r} "
+        f"field_names={field_names} table_names={table_names} "
+        f"payload_sha256={digest[:16]}..."
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, help="Langfuse dataset name to provision")
@@ -146,7 +167,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="print the schema-provision + item-create request bodies, make no network call",
+        help=(
+            "print the schema-provision + item-create request shape (field names + a digest, "
+            "not values -- pass --show-values too for full field values), make no network call"
+        ),
+    )
+    parser.add_argument(
+        "--show-values",
+        action="store_true",
+        help="with --dry-run, print full golden field values instead of just names + a digest",
     )
     args = parser.parse_args(argv)
 
@@ -159,7 +188,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         print(f"provision_golden_dataset: DRY RUN -- dataset={args.dataset!r} seed={args.seed!r}")
         print("  would POST /api/public/v2/datasets  {name, expectedOutputSchema=<committed>}")
-        print(f"  would POST /api/public/dataset-items  {json.dumps(item_payload)}")
+        if args.show_values:
+            print(f"  would POST /api/public/dataset-items  {json.dumps(item_payload)}")
+        else:
+            print(f"  would POST /api/public/dataset-items  {_summarize_payload(item_payload)}")
         return 0
 
     host = _require_env("LANGFUSE_HOST")
@@ -179,8 +211,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"provision_golden_dataset: item create transport failure: {exc}", file=sys.stderr)
         return 1
     if status >= 400:
+        # Never print `body` here: Langfuse's dataset-item 400 echoes back
+        # the offending part of the submitted `expectedOutput` (golden
+        # values) in its validation message -- the exact rule
+        # `platform/errors.py` states (NFR N5, INV-02). Status code only.
         print(
-            f"provision_golden_dataset: item create failed: HTTP {status} {body}",
+            f"provision_golden_dataset: item create failed: HTTP {status} "
+            "(response body withheld -- may echo golden values)",
             file=sys.stderr,
         )
         return 1

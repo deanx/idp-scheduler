@@ -25,10 +25,34 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
+# M3 fix (resilience review, 2026-09-23): a malformed `.env` line (e.g.
+# the common unquoted-space typo `IDP_CLIENT_SECRET=Abc123 SeCrEtTaIl`)
+# makes `source .env` run the trailing word as a command, and bash's own
+# "command not found" diagnostic -- which can contain credential
+# fragments -- lands on stderr. That diagnostic must never reach the
+# caller's log verbatim. `source` sits in an `if` condition, so `set -e`
+# does not fire on failure; its stderr is captured, never echoed.
+env_parse_err="$(mktemp)"
+# `set +e` around the source itself: a failing simple command WITHIN a
+# sourced file still trips `errexit` even inside an `if ! source ...;
+# then` condition (a long-standing bash quirk -- errexit suppression
+# inside `if`/`while` conditions does not reliably reach across a
+# `source` boundary), so testing the exit status via `if !` alone is not
+# enough; toggle `-e` off for the source, capture `$?` explicitly, then
+# restore it before anything else runs.
 set -a
+set +e
 # shellcheck disable=SC1091
-source .env
+source .env 2>"${env_parse_err}"
+env_rc=$?
+set -e
 set +a
+if [ "${env_rc}" -ne 0 ]; then
+  rm -f "${env_parse_err}"
+  echo "run_eval_local: .env failed to parse (contents withheld)" >&2
+  exit 1
+fi
+rm -f "${env_parse_err}"
 
 missing=()
 [ -z "${IDP_ORG_ID:-}" ] && missing+=("IDP_ORG_ID")

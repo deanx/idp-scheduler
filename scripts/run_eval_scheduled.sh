@@ -68,6 +68,21 @@ FAILURE_MARKER="${LOG_DIR}/FAILED-${TS}.marker"
 #: already held and `-t 0` gives up immediately, per lockf(1).
 readonly EX_TEMPFAIL=75
 
+# L9 fix (resilience review, 2026-09-23, reproduced live with
+# `lockf … /bin/bash -c 'exit 75'`): the prior version read `lockf`'s own
+# exit status and the wrapped command's real exit status off the SAME
+# variable, so a child that legitimately exits 75 (unrelated to this
+# script's own sysexits use) was indistinguishable from "lock busy" -- a
+# fail-open: the wrapper printed SKIPPED and exited 0 even though
+# `run_eval_local.sh` actually ran and failed with a real 75.
+#
+# Fix: the child's real exit status is captured to a status file INSIDE
+# the locked region, on its own channel -- `lockf`'s own exit code is
+# used ONLY to detect "did the wrapped command run at all", never to
+# stand in for the command's own exit status.
+STATUS_FILE="${LOG_DIR}/.status-${TS}"
+rm -f "${STATUS_FILE}"
+
 {
   echo "=== idp-regression scheduled run: started ${TS} (UTC) ==="
   echo "log file: ${LOG_FILE}"
@@ -82,14 +97,27 @@ readonly EX_TEMPFAIL=75
 # `-s`: silent -- `lockf`'s own "already locked" line would otherwise
 # land in the log looking like an error; this script narrates the
 # skip itself, in its own words, below.
+# `bash -c '"$0" ...; echo $? > "$1"'` runs INSIDE the lock: the real
+# child status lands in STATUS_FILE only if the wrapped command actually
+# started, so its presence is what tells "the lock was busy" apart from
+# "the child ran and (maybe) itself exited 75" -- not lockf's own exit
+# code, which stays EX_TEMPFAIL either way it's read.
 /usr/bin/lockf -k -s -t 0 "${LOCK_FILE}" \
-  "${REPO_ROOT}/scripts/run_eval_local.sh" >>"${LOG_FILE}" 2>&1
-status=$?
+  /bin/bash -c '"$0" >>"$1" 2>&1; echo "$?" > "$2"' \
+  "${REPO_ROOT}/scripts/run_eval_local.sh" "${LOG_FILE}" "${STATUS_FILE}"
+lockf_status=$?
 
-if [ "${status}" -eq "${EX_TEMPFAIL}" ]; then
-  echo "=== SKIPPED: another scheduled run already holds ${LOCK_FILE} -- exiting 0 by design, this is not a failure ===" >>"${LOG_FILE}"
+if [ ! -f "${STATUS_FILE}" ]; then
+  # The child never got to run and record its own status -- lockf itself
+  # refused to acquire the lock (EX_TEMPFAIL) or failed to exec at all.
+  # Either way this is "someone/something else holds it", not a child
+  # failure, so it is reported the same way: skip, exit 0.
+  echo "=== SKIPPED: another scheduled run already holds ${LOCK_FILE} (lockf exit ${lockf_status}) -- exiting 0 by design, this is not a failure ===" >>"${LOG_FILE}"
   exit 0
 fi
+
+status="$(cat "${STATUS_FILE}")"
+rm -f "${STATUS_FILE}"
 
 echo "=== idp-regression scheduled run: finished ${TS} (UTC), exit=${status} ===" >>"${LOG_FILE}"
 
@@ -97,7 +125,24 @@ if [ "${status}" -ne 0 ]; then
   {
     echo "run_eval exited ${status} -- per CT-04 this means EITHER the regression gate FAILed OR the run ABORTed before a gate could be computed; see ${LOG_FILE} for which."
   } >"${FAILURE_MARKER}"
-  osascript -e "display notification \"exit ${status} -- see ${LOG_FILE}\" with title \"IDP Regression scheduled run FAILED\" subtitle \"gate FAIL or run aborted (CT-04)\"" >/dev/null 2>&1 || true
+  # M4 fix: text is passed as an ARGUMENT to a fixed AppleScript handler
+  # (`on run argv`), never string-concatenated into the `-e` source --
+  # `LOG_FILE` derives from `pwd` and a `"` in the checkout path used to
+  # terminate the AppleScript string literal early (reproduced: a
+  # `qu"ote` path both broke the notification AND, crafted further,
+  # executed injected AppleScript). Also: `osascript`'s own failure
+  # (non-zero exit, e.g. an ungranted Notification Center/TCC permission
+  # under launchd) used to be silently swallowed by `|| true` even though
+  # the notification is the only human-facing signal this design relies
+  # on -- a failed delivery is now itself a logged line, not silence.
+  notif_text="exit ${status} -- see ${LOG_FILE}"
+  if ! osascript \
+      -e 'on run argv' \
+      -e 'display notification (item 1 of argv) with title "IDP Regression scheduled run FAILED" subtitle "gate FAIL or run aborted (CT-04)"' \
+      -e 'end run' \
+      -- "${notif_text}" >/dev/null 2>&1; then
+    echo "=== notification delivery FAILED (osascript nonzero) -- the failure marker at ${FAILURE_MARKER} is the durable record; no user notification was shown for this run ===" >>"${LOG_FILE}"
+  fi
 fi
 
 exit "${status}"

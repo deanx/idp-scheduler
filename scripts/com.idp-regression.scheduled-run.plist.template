@@ -44,10 +44,18 @@
     <key>Label</key>
     <string>com.idp-regression.scheduled-run</string>
 
+    <!-- L11 fix (resilience review, 2026-09-23): the prior form ran
+         `/bin/bash -lc "__REPO_ROOT__/scripts/run_eval_scheduled.sh"` --
+         `-l` sources the operator's login profile (exactly the ambient
+         environment ADR-0004 A8 argues against for what a run measures),
+         and because the path sat inside a SHELL STRING rather than its
+         own array element, an unquoted space in __REPO_ROOT__ breaks the
+         command and a `;` in it executes as a second command. Each
+         argument is now its own array element with no shell in between,
+         so there is no string for a space/`;`/quote in the substituted
+         path to break out of. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/bash</string>
-        <string>-lc</string>
         <string>__REPO_ROOT__/scripts/run_eval_scheduled.sh</string>
     </array>
 
@@ -77,5 +85,12 @@
     <string>__REPO_ROOT__/logs/launchd/scheduled-run.stdout.log</string>
     <key>StandardErrorPath</key>
     <string>__REPO_ROOT__/logs/launchd/scheduled-run.stderr.log</string>
+
+    <!-- L13 fix: launchd's default umask left these logs world/group
+         readable (0644) -- they can contain frame-location/type-name
+         diagnostics from a live run. 0077 matches the log directory's
+         own credential-adjacent sensitivity. -->
+    <key>Umask</key>
+    <string>0077</string>
 </dict>
 </plist>
