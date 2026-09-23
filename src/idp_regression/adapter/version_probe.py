@@ -111,6 +111,15 @@ def classify_probe_response(
 
 
 class IDPVersionProbe(Protocol):
+    #: F-3 (2026-09-23, `/test` gate): promoted from an implementation
+    #: detail reached only via `getattr(probe, "last_status_code", None)`
+    #: (a default that degrades silently to "never rate-limited", which
+    #: mypy could not flag) to part of the Protocol itself -- the
+    #: 429-abandon rule in `check_versions.py` depends on this attribute
+    #: existing, so a conformant probe must declare it, not merely
+    #: happen to have it.
+    last_status_code: int | None
+
     def probe(self, org_id: str, action_id: str, version: str) -> ProbeResult: ...
 
 

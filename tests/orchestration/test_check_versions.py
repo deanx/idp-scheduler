@@ -243,7 +243,7 @@ def test_pending_unknowns_is_capped_rather_than_growing_unbounded() -> None:
 
 def test_an_unknown_candidate_never_becomes_absent_and_is_recorded() -> None:
     class UnknownOnceProbe:
-        last_status_code = None
+        last_status_code: int | None = None
 
         def __init__(self) -> None:
             self.calls: list[str] = []

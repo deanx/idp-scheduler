@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from idp_regression.adapter.version_probe import NEGATIVE_CONTROL_VERSION, ProbeResult
+from idp_regression.orchestration import check_versions as check_versions_module
 from idp_regression.orchestration.check_versions import (
     StateFileLocked,
     TickState,
@@ -47,17 +48,36 @@ class FakeProbe:
 class RaisesOnceThenProbe:
     """A transient failure on its first call (a network blip), then
     delegates to a FakeProbe -- proves a tick failure doesn't kill the
-    loop."""
+    loop.
+
+    F-3: carries `last_status_code` even though it never sets it to
+    anything but `None` -- this is the Protocol-conformant double the
+    F-3 finding names as already existing in the suite, now that
+    `last_status_code` is part of `IDPVersionProbe` itself rather than
+    reached only via `getattr(..., None)`."""
 
     def __init__(self, inner: FakeProbe) -> None:
         self.inner = inner
         self._raised = False
+        self.last_status_code: int | None = None
 
     def probe(self, org_id: str, action_id: str, version: str) -> ProbeResult:
         if not self._raised:
             self._raised = True
             raise ConnectionError("simulated transient network failure")
         return self.inner.probe(org_id, action_id, version)
+
+
+class RaisesForeverProbe:
+    """Every call raises -- the F-1 reproduction: a watcher whose every
+    tick fails must eventually escalate to a halt instead of running
+    forever while its own summary line claims "no new versions found"."""
+
+    def __init__(self) -> None:
+        self.last_status_code: int | None = None
+
+    def probe(self, org_id: str, action_id: str, version: str) -> ProbeResult:
+        raise ConnectionError("simulated permanent transient failure")
 
 
 def _controls_ok(anchor: str) -> dict[str, ProbeResult]:
@@ -195,6 +215,40 @@ def test_a_transient_probe_exception_does_not_kill_the_loop(
     assert len(sleep_fn.calls) == 2
 
 
+def test_a_probe_that_fails_every_tick_eventually_halts_instead_of_running_forever(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F-1 (Critical): before this fix, an `except Exception` with no
+    ceiling on CONSECUTIVE failures meant a watcher whose every tick
+    raised (revoked credentials, a wrong IDP_REGION, a dead endpoint)
+    ran forever and reported "no new versions found" -- the ceiling
+    below is the escalation half `test_a_transient_probe_exception_does_
+    not_kill_the_loop` never covered: a failing tick must not kill the
+    loop, but it also must not be allowed to hide behind it forever."""
+    probe = RaisesForeverProbe()
+    sleep_fn = _stop_after(100)  # a safety net far past where the ceiling must fire
+
+    exit_code = run_watch_loop(
+        probe=probe,
+        sleep_fn=sleep_fn,
+        max_consecutive_tick_failures=3,
+        **_base_kwargs(),
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "WATCHER STOPPED" in out
+    assert "TICK FAILURES" in out
+    # halts on the 4th consecutive failure -- 3 sleeps happened first,
+    # mirroring max_indeterminate_ticks's own ">" (not ">=") semantics.
+    assert len(sleep_fn.calls) == 3
+    # F-1's other half: the summary must never misreport "no answer" as
+    # "no new versions found".
+    assert "no new versions found" not in out
+    assert "never got an answer" in out
+    assert "4 tick(s)" in out
+
+
 def test_anchor_vanished_halts_the_loop_loudly_and_returns_nonzero(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -280,11 +334,17 @@ def test_auto_run_is_bounded_by_max_runs_per_tick(capsys: pytest.CaptureFixture[
     assert "left for a future manual run" in out
 
 
-def test_a_gate_fail_from_auto_run_is_never_retried() -> None:
+def test_a_gate_fail_from_auto_run_is_never_retried(capsys: pytest.CaptureFixture[str]) -> None:
     """A FAIL is a successful detection-and-run (ADR-0006 A'.5) -- the
     version is already folded into state.known_versions by check_once
     regardless of the run's outcome, so a second tick must not see it as
-    `new_version_detected` again and must not call run_eval for it twice."""
+    `new_version_detected` again and must not call run_eval for it twice.
+
+    F-4 fix: the name's load-bearing half -- the gate FAIL itself -- is
+    now actually asserted (mutating `_failing_run_eval` to `return 0`
+    must turn this test RED), and the loop's own exit code is pinned as
+    NOT reflecting a --auto-run gate outcome (see the ADR-0006 A'.5
+    implementation note this test cites for the "why")."""
     probe = FakeProbe({**_controls_ok("1.0.0"), "1.0.1": ProbeResult.EXISTS})
     calls: list[tuple[object, ...]] = []
 
@@ -292,7 +352,7 @@ def test_a_gate_fail_from_auto_run_is_never_retried() -> None:
         calls.append(args)
         return 1  # gate FAIL
 
-    run_watch_loop(
+    exit_code = run_watch_loop(
         probe=probe,
         sleep_fn=_stop_after(2),
         auto_run=True,
@@ -302,6 +362,17 @@ def test_a_gate_fail_from_auto_run_is_never_retried() -> None:
     )
 
     assert len(calls) == 1
+    out = capsys.readouterr().out
+    # the load-bearing half: the gate FAIL is surfaced on the console the
+    # sponsor is watching, since there is no alerting sink yet (ADR-0006
+    # A'.5).
+    assert "gate FAIL or abort" in out
+    # the decision (recorded in ADR-0006 A'.5): a --auto-run gate outcome
+    # does NOT propagate into run_watch_loop's own exit code -- the loop
+    # keeps running (this is a foreground watcher, not a one-shot gate),
+    # so its exit code reflects the WATCHER's own health (halted vs.
+    # Ctrl-C'd), never a single run's verdict.
+    assert exit_code == 0
 
 
 # -- CLI wiring ----------------------------------------------------------------
@@ -533,6 +604,122 @@ def test_watch_main_a_load_dotenv_failure_is_a_controlled_exit_not_a_traceback(
     )
 
     assert exit_code == 1
+
+
+# -- F-2: an OSError from state-file prep must never escape as a raw ---------
+# -- traceback carrying a filesystem path (INV-02) ---------------------------
+
+
+def test_watch_main_an_oserror_preparing_the_state_file_is_a_controlled_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-2 (Major): `main()`'s try only caught `CheckVersionsRefused` --
+    an `OSError` from `state_file.parent.mkdir()` (e.g. a read-only
+    parent) escaped `main()`, the outermost caller, as a RAW TRACEBACK
+    carrying the state-file path -- the same INV-02 bug class `cli.py`
+    closed 2026-09-21, just not carried into this newer entry point.
+    Reproduced here without touching the real filesystem permissions
+    (CI-portable) by monkeypatching `Path.mkdir` to raise."""
+    sentinel = "/some/should-never-leak/path"
+
+    def _boom(self: Path, *args: object, **kwargs: object) -> None:
+        raise OSError(f"[Errno 13] Permission denied: '{sentinel}'")
+
+    monkeypatch.setattr(Path, "mkdir", _boom)
+
+    exit_code = main(
+        [
+            "--org",
+            "org1",
+            "--action",
+            "12345678-1234-1234-1234-123456789012",
+            "--dataset",
+            "ds1",
+            "--state-file",
+            str(tmp_path / "sub" / "state.json"),
+        ]
+    )
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert sentinel not in err
+
+
+def test_watch_main_an_unexpected_lock_error_is_a_controlled_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-2: `open_state_file_locked` raising anything OTHER than
+    `StateFileLocked` (a bare `OSError` from the sidecar's own `os.open`,
+    say a permission error) must not escape `main()` as a raw traceback
+    either -- only `StateFileLocked` was ever caught."""
+    sentinel = "/some/should-never-leak/lock-path"
+
+    def _boom(state_file: Path) -> int:
+        raise OSError(f"[Errno 13] Permission denied: '{sentinel}'")
+
+    monkeypatch.setattr("idp_regression.orchestration.watch.open_state_file_locked", _boom)
+
+    exit_code = main(
+        [
+            "--org",
+            "org1",
+            "--action",
+            "12345678-1234-1234-1234-123456789012",
+            "--dataset",
+            "ds1",
+            "--state-file",
+            str(tmp_path / "state.json"),
+        ]
+    )
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert sentinel not in err
+
+
+def test_check_versions_main_an_oserror_preparing_the_state_file_is_a_controlled_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-2, the identical shape at `check_versions.py:765-768` -- the
+    outer `try` there only ever caught `CheckVersionsRefused`, so an
+    `OSError` from `mkdir` (or from anything else under it, e.g.
+    `open_state_file_locked` raising a bare `OSError`) escaped
+    `check_versions.main()` as a raw traceback too. Named, not
+    line-numbered (DEBT-42): this test lives in test_watch.py per this
+    task's declared test-file scope, exercising `check_versions.main`
+    directly via the module import at the top of this file."""
+    sentinel = "/some/should-never-leak/cv-path"
+
+    def _boom(self: Path, *args: object, **kwargs: object) -> None:
+        raise OSError(f"[Errno 13] Permission denied: '{sentinel}'")
+
+    monkeypatch.setattr(Path, "mkdir", _boom)
+    monkeypatch.setattr(check_versions_module, "load_dotenv", lambda: None)
+
+    exit_code = check_versions_module.main(
+        [
+            "--org", "org1",
+            "--action", "12345678-1234-1234-1234-123456789012",
+            "--dataset", "ds1",
+            "--state-file", str(tmp_path / "sub" / "state.json"),
+            "--max-probes-per-tick", "20",
+            "--max-probes-per-sweep", "40",
+            "--patch-lookahead", "3",
+            "--minor-lookahead", "3",
+            "--major-lookahead", "1",
+            "--sweep-every-n-ticks", "10",
+            "--max-indeterminate-ticks", "3",
+        ]
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err
+    assert "Traceback" not in captured.out
+    assert sentinel not in captured.err
+    assert sentinel not in captured.out
 
 
 # -- Suggestion: --max-runs-per-tick must be >= 1 ----------------------------

@@ -123,6 +123,22 @@ _OUTCOME_PHRASES = {
 
 _RUN_VERSION_PATTERN = re.compile(r"--version (\S+)")
 
+#: F-1 (2026-09-23, `/test` gate, Critical, reproduced): before this
+#: ceiling existed, `except Exception` had no bound on CONSECUTIVE tick
+#: failures -- a watcher whose every tick raised (revoked credentials, a
+#: wrong `IDP_REGION`, a dead endpoint) ran forever, logging "continuing"
+#: every time, and its own terminal summary then read the absence of any
+#: detection as `"no new versions found"` -- a silently-wrong claim to
+#: the human watching. Mirrors `check_once`'s own
+#: `consecutive_indeterminate_ticks` -> `max_indeterminate_ticks` ->
+#: `detector_degraded` escalation (same ">" not ">=" semantics: the
+#: ceiling fires on the (max+1)th consecutive failure, a healthy tick
+#: resets the counter to zero) -- that escalates an AMBIGUOUS answer;
+#: this escalates NO answer at all, which the old code never did.
+DEFAULT_MAX_CONSECUTIVE_TICK_FAILURES = 3
+
+_TICK_FAILURES_HALT_PHRASE = "TICK FAILURES EXCEEDED CEILING -- stopping"
+
 
 def _anchor_vanished_phrase(event: dict[str, Any]) -> str:
     if event.get("positive_control") == str(ProbeResult.UNKNOWN):
@@ -290,6 +306,7 @@ def run_watch_loop(
     max_probes_per_sweep: int,
     max_indeterminate_ticks: int,
     interval_seconds: int,
+    max_consecutive_tick_failures: int = DEFAULT_MAX_CONSECUTIVE_TICK_FAILURES,
     state_file: Path | None = None,
     auto_run: bool = False,
     max_runs_per_tick: int = 0,
@@ -312,7 +329,14 @@ def run_watch_loop(
     `CheckVersionsRefused` (an unparseable anchor, an uninitialised
     bootstrap) is different: it is a structurally broken setup that
     waiting out an interval cannot fix, so it halts like the named
-    outcomes."""
+    outcomes.
+
+    F-1: a tick failure surviving does NOT mean it survives forever --
+    `max_consecutive_tick_failures` consecutive failures (a successful
+    tick resets the count to zero) halts the loop exactly like a named
+    `_HALT_OUTCOMES` outcome, exit code 1. Without this, a permanently
+    broken credential or endpoint looks identical, on the console and in
+    the exit code, to a perfectly healthy quiet watcher."""
     print(
         _startup_banner(
             org_id=org_id,
@@ -336,6 +360,9 @@ def run_watch_loop(
 
     iteration = 0
     detected_versions: list[str] = []
+    healthy_ticks = 0
+    failed_ticks = 0
+    consecutive_tick_failures = 0
     started_at = clock()
     exit_code = 0
     try:
@@ -368,19 +395,45 @@ def run_watch_loop(
                 exit_code = 1
                 break
             except Exception as exc:  # noqa: BLE001 - a tick failing must not kill the loop
+                failed_ticks += 1
+                consecutive_tick_failures += 1
                 logger.error(
-                    "tick %d  FAILED (transient) type=%s at %s -- continuing",
+                    "tick %d  FAILED (transient) type=%s at %s -- continuing "
+                    "(%d consecutive failure(s), ceiling %d)",
                     iteration,
                     type(exc).__name__,
                     frame_location(exc),
+                    consecutive_tick_failures,
+                    max_consecutive_tick_failures,
                 )
                 print(
                     f"{_now_str(clock)}  tick {iteration:<3} "
                     "FAILED (transient) -- will retry next tick"
                 )
+                # F-1: escalate NO answer at all, not just an ambiguous one --
+                # mirrors check_once's own consecutive_indeterminate_ticks ->
+                # max_indeterminate_ticks escalation, ">" not ">=" so the
+                # ceiling fires on the (max+1)th consecutive failure.
+                if consecutive_tick_failures > max_consecutive_tick_failures:
+                    logger.error(
+                        "watch: halting -- %d consecutive tick failures exceeds "
+                        "ceiling %d",
+                        consecutive_tick_failures,
+                        max_consecutive_tick_failures,
+                    )
+                    _print_halt_block(
+                        _TICK_FAILURES_HALT_PHRASE,
+                        f"{consecutive_tick_failures} consecutive tick(s) got no "
+                        f"answer (ceiling {max_consecutive_tick_failures}) -- see "
+                        f"tick {iteration}'s log line above",
+                    )
+                    exit_code = 1
+                    break
                 sleep_fn(interval_seconds)
                 continue
 
+            consecutive_tick_failures = 0
+            healthy_ticks += 1
             state = result.new_state
             print(_human_tick_line(iteration, result.event, clock=clock))
             _emit_structured_event(result.event, json_events=json_events)
@@ -426,6 +479,13 @@ def run_watch_loop(
     elapsed_str = f"{int(elapsed // 60)}m{int(elapsed % 60):02d}s"
     if detected_versions:
         found = f"detected {len(detected_versions)} new version(s): {', '.join(detected_versions)}"
+    elif healthy_ticks == 0 and failed_ticks > 0:
+        # F-1: 0 detections here is NOT evidence of "no new versions" --
+        # every tick either failed transiently or the loop halted before
+        # one ever completed. Must never share a substring with the
+        # healthy-but-quiet branch below, so a human (or a script) can't
+        # mistake "never got an answer" for "asked and the answer was no".
+        found = f"no answer -- {failed_ticks} tick(s) never got an answer"
     else:
         found = "no new versions found"
     print(f"\nStopped after {iteration} tick(s) ({elapsed_str}). {found}.")
@@ -457,6 +517,18 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--major-lookahead", type=int, default=1)
     parser.add_argument("--sweep-every-n-ticks", type=int, default=10)
     parser.add_argument("--max-indeterminate-ticks", type=int, default=3)
+    parser.add_argument(
+        "--max-consecutive-tick-failures",
+        type=int,
+        default=DEFAULT_MAX_CONSECUTIVE_TICK_FAILURES,
+        help=(
+            "F-1: consecutive ticks that raise (not merely come back "
+            "ambiguous) before the watcher halts loudly instead of running "
+            f"forever silently reporting no detections (default "
+            f"{DEFAULT_MAX_CONSECUTIVE_TICK_FAILURES}). A successful tick "
+            "resets the count."
+        ),
+    )
     parser.add_argument(
         "--known-version",
         default=None,
@@ -554,6 +626,20 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("watch: %s", sanitize_for_log(str(exc)))
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except Exception as exc:  # noqa: BLE001 - F-2/INV-02: never a raw traceback/path here
+        # ⚠️ Fixed 2026-09-23 (`/test` gate, F-2): this try used to catch
+        # ONLY `CheckVersionsRefused` -- an `OSError` from `mkdir()` (e.g.
+        # a read-only parent) escaped `main()`, the outermost caller, as
+        # a RAW TRACEBACK carrying the state-file path. Same shape as
+        # every other catch-all in this codebase: only the type name and
+        # frame location are logged, never `str(exc)`.
+        logger.error(
+            "watch: unexpected error preparing state file: %s at %s",
+            type(exc).__name__,
+            frame_location(exc),
+        )
+        print("error: unexpected error preparing state file -- see log", file=sys.stderr)
+        return 1
 
     # R2 fix (2026-09-23, reviewer REQUEST CHANGES): this used to just
     # `open()` the state file -- no lock at all -- then
@@ -584,6 +670,17 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 0
+    except Exception as exc:  # noqa: BLE001 - F-2/INV-02: never a raw traceback/path here
+        # F-2: `open_state_file_locked` raising anything OTHER than
+        # `StateFileLocked` (a bare `OSError` from the sidecar's own
+        # `os.open`) was not caught here either.
+        logger.error(
+            "watch: unexpected error locking state file: %s at %s",
+            type(exc).__name__,
+            frame_location(exc),
+        )
+        print("error: unexpected error locking state file -- see log", file=sys.stderr)
+        return 1
 
     try:
         try:
@@ -640,6 +737,7 @@ def main(argv: list[str] | None = None) -> int:
                 sweep_every_n_ticks=args.sweep_every_n_ticks,
                 max_probes_per_sweep=args.max_probes_per_sweep,
                 max_indeterminate_ticks=args.max_indeterminate_ticks,
+                max_consecutive_tick_failures=args.max_consecutive_tick_failures,
                 interval_seconds=args.interval_seconds,
                 state_file=args.state_file,
                 auto_run=args.auto_run,

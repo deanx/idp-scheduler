@@ -43,6 +43,7 @@ from idp_regression.adapter.version_probe import (
 )
 from idp_regression.orchestration.cli import configure_logging
 from idp_regression.orchestration.dotenv_support import load_dotenv
+from idp_regression.orchestration.log_sanitize import frame_location
 
 #: NOT `logging.getLogger(__name__)` -- the identical bug fixed in
 #: `cli.py` 2026-09-23 (`318c9ff`): under `python -m
@@ -179,7 +180,11 @@ def _probe_with_rate_limit_check(
     walk -> sweep edge; `_resolve_unknowns` and the sweep loop itself
     still kept probing past a 429 before this fix."""
     result = probe.probe(org_id, action_id, candidate)
-    rate_limited = getattr(probe, "last_status_code", None) == 429
+    # F-3 (2026-09-23, `/test` gate): `last_status_code` is now part of
+    # `IDPVersionProbe` itself, not merely `getattr(..., None)`-reached --
+    # a Protocol-conformant probe lacking it is a mypy error at the call
+    # site, not a silent "never rate-limited" default.
+    rate_limited = probe.last_status_code == 429
     return result, rate_limited
 
 
@@ -822,6 +827,20 @@ def main(argv: list[str] | None = None) -> int:
             os.close(fd)
     except CheckVersionsRefused as exc:
         _emit({"event": "check_tick", "outcome": exc.outcome, "message": str(exc)})
+        return 1
+    except Exception as exc:  # noqa: BLE001 - F-2/INV-02: never a raw traceback/path here
+        # ⚠️ Fixed 2026-09-23 (`/test` gate, F-2): this try only ever
+        # caught `CheckVersionsRefused` -- an `OSError` from `mkdir()`
+        # (or from `open_state_file_locked` raising anything other than
+        # `StateFileLocked`) escaped `main()`, the outermost caller, as a
+        # RAW TRACEBACK carrying the state-file path. Identical shape and
+        # identical fix to `cli.py`'s own catch-all: only the type name
+        # and frame location are logged, never `str(exc)`.
+        logger.error(
+            "check-versions: unexpected error: %s at %s",
+            type(exc).__name__,
+            frame_location(exc),
+        )
         return 1
 
 
