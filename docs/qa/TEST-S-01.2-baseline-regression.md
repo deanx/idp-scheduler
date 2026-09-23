@@ -1,87 +1,101 @@
 # /test stamp — SPEC-01 (S-01.2 IDP adapter + normalize)
 
 **Status:** ✅ PASSED
-**Source:** /test gap-fill (Atchim TDD gate)
-**Date:** 2026-09-19
-**Commit:** 367065b — **re-gated 2026-09-22** by a fresh Atchim instance (DEBT-44) after S-01.4 work edited this story's modules (+206 lines in `idp_client.py`/`transport.py`), which had staled this stamp (DEBT-46). Falsifiable check, re-baselined: `git diff --stat 367065b HEAD -- src/idp_regression/adapter/` must be empty. The re-gate initially found **three stated guarantees that no test pinned** (each proven by a surviving mutant); `367065b` closed them tests-only, and a second fresh instance re-applied all four mutants itself — all killed by assertion or wrong-exception-type in under 0.2 s, answering the earlier slow-signal complaint. Prior: 2ae8617d10a0406417260f017d18f7ad3cbf8073
-**Author:** alex@divinocosta.com.br
-**Atchim TDD gate:** PASSED. /test gate over b393564..d84bfa6 (6 Scenario-B defects fixed, 7 coverage gaps pinned). Then, after QA S-01.2 ⚠️, a /test gate over the fix round cadbb69..2ae8617: F-1 non-finite timing config, F-2 redirect credential leak, and an independent fix-round audit (float-overflow defect plus two gaps fixed in 2ae8617). All mutants killed.
-**Independence:** ✅ structural (different models): Dengoso (sonnet) reviewed by Atchim (opus). SPEC-01 is Risk: high.
-**Static:** ✅ clean: mypy strict (57 files) + ruff. `# type: ignore` appears only in tests: 15 in tests/adapter/test_idp_client.py and 3 in tests/adapter/test_transport.py. All are deliberate: they feed invalid types or type test helpers and fake HTTP handlers. (QA S-01.2 F-4 corrected the earlier claim twice.) None in src/.
-**Files:** docs/adr/0002-idp-adapter-and-normalize-contract.md, docs/design/CONTRACTS.md, docs/design/INVARIANTS.md, docs/qa/QA-01-baseline-regression-S-01.2.md, docs/qa/TEST-S-01.2-baseline-regression.md, pyproject.toml, src/idp_regression/adapter/errors.py, src/idp_regression/adapter/idp_client.py, src/idp_regression/adapter/normalize.py, src/idp_regression/adapter/token_cache.py, src/idp_regression/adapter/transport.py, src/idp_regression/adapter/types.py, tests/adapter/__init__.py, tests/adapter/fixtures/raw_idp_response.json, tests/adapter/test_errors.py, tests/adapter/test_idp_client.py, tests/adapter/test_integration_idp.py, tests/adapter/test_make_idp_adapter.py, tests/adapter/test_module_boundary.py, tests/adapter/test_normalize.py, tests/adapter/test_normalize_contract.py, tests/adapter/test_token_cache.py, tests/adapter/test_transport.py, uv.lock
-**Sequence:** test-first per slice:
-- types/errors/TokenCache (6bc5e02)
-- transport (622d7c8)
-- normalize (ec6805a)
-- extract + CT-01 (e86b3ed)
-- live integration (354b863)
+**Source:** /test re-gate (DEBT-46 staleness — `adapter/` moved substantially since 2026-09-22)
+**Date:** 2026-09-23 · **Commit gated:** `a5805ec` (`feat/S-01.2-idp-adapter`)
+**Rigor:** SPEC-01 header is `Risk: high` ⇒ this stamp is required regardless of the `prototype`
+profile. **Profile ≠ risk level.**
 
-Fix rounds: R1 8d84491, R2 7131712, R3 e1742d3, R4/R5/R8 75987a8, R7 320fd7c, R6 fa94db1, suggestions f89d354/02ad58c, round-2 mutant kills 481e0db. Atchim re-applied every earlier surviving mutant, and all are killed.
+## DEBT-44 independence
+The auditing instance issued **no** APPROVE, REQUEST CHANGES or review verdict on `6755fa1`,
+`6489560`, `17a34c4`, `97f3d13`, `71b1bbf`, `a06c01f` or `a5805ec`. Fresh instance, no prior
+context on the delta — which is why it ran this gate. No self-gating occurred.
 
-## Suite results
+## Delta gated
+`367065b..a5805ec -- src/idp_regression/adapter/` — 5 files, +617/−37: `normalize.py` (REG-11 D1
+union rule, D2 confidence scale, R-1/R-2 collision precedence), `version_probe.py` (new),
+`idp_client.py` (`?valueOnly=false` incl. retry paths, 10 s poll floor), `oauth.py` (new),
+`transport.py` (`post_empty_multipart`).
 
-| Scope | Passed | Failed |
+**Freshness check re-baselined against an explicit FILE LIST, not the directory** — closes
+DEBT-77, which correctly observed the directory-scoped check fires red for a non-reason the
+moment a story adds a module (`version_probe.py` did exactly that). **Scope ruling:**
+`version_probe.py` is IN scope — adapter-package code reusing the adapter's transport and token
+cache by design (ADR-0006 §A′.1 D14); excluding it would leave a new fail-open-capable module
+with no `/test` gate at all.
+
+## Mechanical floor — actual numbers at `a5805ec`, `__pycache__` cleared
+| gate | result |
+|---|---|
+| `pytest -q` | ✅ **1085 passed, 15 skipped**, 28.26 s |
+| `mypy src tests` (strict) | ✅ no issues, 94 files |
+| `ruff check src tests` | ✅ clean |
+| `pip-audit` | ✅ no known vulnerabilities |
+| `gitleaks` | **skipped: prototype profile** — not independently attested by this stamp |
+
+## Mutants verified by hand (reverted, run, restored byte-identical, `shasum`-verified)
+| # | mutation | observed |
 |---|---|---|
-| Unit + contract (default run) | 880 | 0 |
-| Full suite incl. live integration (`RUN_INTEGRATION_TESTS=1`; live IDP OAuth token + live Langfuse) | 472 | 0 (1 skip: live submit/poll needs a real IDP action id + version → S-01.6) |
+| M1 | resurrect the original REG-11 D1 fail-open (`raw.get("pages", [])`, drop the top-level container) | ✅ **40 failed** |
+| M2 | swap the two `logical_pages` blocks (invert union collision precedence) | ✅ **exactly 2 failed** — surgical, not incidental |
+| M3 | `_coerce_confidence` out-of-range raise → `return None` (the D2 fail-open) | ✅ **6 failed** across both scales |
+| M4 | drop the R3 echo binding (any 404 reads ABSENT) | ✅ **3 failed** |
 
-## AC coverage
+**REG-11's family is terminally pinned.** M1 proves a regression to the original shape is caught
+40 ways; M2 proves the precedence the union made newly observable is caught too. The arbitration
+is gone, not moved one level deeper again.
 
-| DoD / TP row | Tests | Status |
-|---|---|---|
-| 3c/3d `pages[]` walk | test_normalize.py:23; test_idp_client.py:115 | ✅ COVERED |
-| A3 / TP-12 auth fail-closed, no retry | test_idp_client.py:149; test_token_cache.py:69 | ✅ COVERED |
-| BR7 / TP-24 token cached, refresh margin | test_token_cache.py:35,52 | ✅ COVERED |
-| BR9 / TP-25 configurable allowlist, no literal | test_idp_client.py:211,361; test_module_boundary.py:28 | ✅ COVERED |
-| ADR-0004 #17 missing status → abort | test_idp_client.py:267 | ✅ COVERED |
-| ADR-0004 #5 non-2xx → hard failure | test_idp_client.py:339 | ✅ COVERED |
-| Poll timeout with last status | test_idp_client.py:249 | ✅ COVERED |
-| Submit not retried | test_idp_client.py:167 | ✅ COVERED |
-| INV-07 / TP-18 monotonic clock | test_idp_client.py:464,473,480 | ✅ COVERED |
-| Budget clamp | test_idp_client.py:373 | ✅ COVERED |
-| Merge semantics (last-wins / concat / duplicate prompt) | test_normalize.py:44,56,68 | ✅ COVERED |
-| N21 / TP-20 unsafe names incl. 129 chars | test_normalize.py:99,119,133 | ✅ COVERED |
-| Size caps | test_normalize.py:211,308,316 | ✅ COVERED |
-| Confidence NaN/out-of-range → None | test_normalize.py:357 | ✅ COVERED |
-| Three-state absent/null/empty | test_normalize.py:378,384,393 | ✅ COVERED |
-| Malformed body / missing status → typed error | test_normalize.py:406,411 | ✅ COVERED |
-| CT-01 key parity + real `classify()` | test_normalize_contract.py:107,121 | ✅ COVERED |
-| `extract` signature (ADR-0002 amendment) | test_normalize_contract.py:68 | ✅ COVERED |
-| N23/N5 redaction + sanitized logs | test_transport.py:124,154,261; test_idp_client.py:495,524 | ✅ COVERED |
-| N1 timing metric; integration | test_idp_client.py:138; test_integration_idp.py:36,53 | ✅ COVERED (live submit/poll skipped) |
-| N23: CR/LF token not leaked | test_idp_client.py:757; test_transport.py:124 | ✅ COVERED |
-| N23: `redact` covers form-encoded + escaped-quote values | test_transport.py:178-204 | ✅ COVERED |
-| NUL byte in path → typed error, path not echoed | test_transport.py:289 | ✅ COVERED |
-| BR7: `expires_in` fail-closed | test_idp_client.py:346,362 | ✅ COVERED |
-| BR7: two `extract()` calls → one token fetch | test_idp_client.py:149 | ✅ COVERED |
-| N21: surrogate prompt key / unsafe column name | test_normalize.py:187,148 | ✅ COVERED |
-| Status strings capped + sanitized | test_errors.py:14-47 | ✅ COVERED |
-| BR9: env default `SUCCEEDED` | test_make_idp_adapter.py:29 | ✅ COVERED |
-| Poll budget includes submit time | test_idp_client.py:589 | ✅ COVERED |
-| N1: timing equals the clock delta | test_idp_client.py:302 | ✅ COVERED |
-| Domain: extracted values never in logs/stdout/stderr | test_idp_client.py:256 | ✅ COVERED |
-| QA F-1 / REG-06: invalid timing config → `IDPConfigurationError` at construction | test_idp_client.py:590-657 | ✅ COVERED |
-| QA F-1: invalid env timing → typed error; margin 0 accepted | test_make_idp_adapter.py:59-95 | ✅ COVERED |
-| QA F-1: timing cap 3600 accepted / 3600.1 rejected (constructor + env) | test_idp_client.py:668,680,685,689; test_make_idp_adapter.py:99,108 | ✅ COVERED |
-| QA F-1: huge int → typed error (no raw OverflowError); bool rejected | test_idp_client.py:706,726 | ✅ COVERED |
-| QA F-1: NaN poll timeout can't loop forever | test_idp_client.py:696 | ✅ COVERED |
-| QA F-2 / REG-07: 3xx → typed error; the token never reaches the redirect target (two real servers); response closed | test_transport.py:400-452 | ✅ COVERED |
-| ADR-0004 #3 — the absolute poll deadline still fires after retries consumed the budget (asserts 2 calls against a 3-attempt budget, so deadline-fired is distinguished from budget-exhausted) | test_idp_client.py::test_poll_deadline_still_fires_after_retries_have_consumed_the_budget | ✅ COVERED |
-| DEBT-21 class, one level deeper — the retried GET after 401/403 carries the **refreshed** token, not the old Bearer | ::test_poll_second_get_after_401_uses_the_refreshed_token_not_the_old_one | ✅ COVERED |
-| `Retry-After` guard — rejects negative / non-finite / over-cap, accepts the cap inclusively | ::test_parse_retry_after_seconds_rejects_negative_nonfinite_and_over_cap (+ boundary companion) | ✅ COVERED |
-| `Retry-After` honoured only on 429, never on a 5xx | ::test_poll_retry_sleep_seconds_ignores_retry_after_header_on_a_non_429_status | ✅ COVERED |
-| Bounded 5xx/429 poll retry; one-refresh-then-fail-closed; `_validate_timing` hardening; no-redirect opener; `_require` whitespace rejection | test_idp_client.py / test_transport.py (earlier delta, re-mutated and killed in the re-gate) | ✅ COVERED |
+## Vacuity sampling — two findings, stamped OVER, not hidden
+**G-1 — the live capture is NOT load-bearing on the confidence scale.** The fixture-shape pin
+asserts the ENVELOPE (`"pages" not in LIVE_FIXTURE`) and nothing else. Mechanically rewriting
+`tests/fixtures/live/seed-001-clean.raw.json` to convert every `"confidenceScore": 99.0` (the real
+0–100 wire key) into legacy `"confidence": 0.99` — i.e. back into the hand-authored shape REG-11 D2
+was about — left the suite **fully green at 1085**. So half of REG-11 has no fixture-shape pin: a
+"tidy up the fixture" pass can delete the project's only evidence of the real confidence key and
+scale without one test noticing. **SR-1 violation in substance** — load-bearing for the envelope,
+decorative for the scale. Control probe: reshaping into `pages[]` correctly turned exactly one test
+RED, so the D1 half works. Fix is one line beside the existing assertion.
 
-**Deferred:**
-- DEBT-26: the platform transport redirect leak (sibling of F-2) → S-01.3 follow-up; REG-07 pending-test there.
-- DEBT-24: 5xx/429 retry (ADR-0004 #6) → S-01.4.
-- DEBT-21: mid-poll 401 refresh; the refresh must live in the adapter poll loop → S-01.4.
-- DEBT-22: CT-01 real fixture + live submit/poll → S-01.6.
-- DEBT-23: sanitize `IDPExecutionFailedError.status` → S-01.4.
-- Containment → /harden before the epic is Done.
+**G-2 — `classify_probe_response`'s EXISTS branch is unbound, and its test's parameters are
+vacuous.** Verified directly at HEAD:
+```
+classify_probe_response(400, "Invalid query parameter 'file'",
+                        action_id='totally-different-action', version='0.0.0')  -> exists
+classify_probe_response(404, "...Id: other and version 9.9.9 not found",
+                        action_id='mine', version='1.0.0')                      -> unknown
+```
+The 400 body carries no echo to bind against, so this is arguably unbindable — but the test's
+arguments give false assurance of a binding that does not exist, and nothing pins "EXISTS is
+deliberately unbound", so a later reviewer cannot tell the asymmetry is a decision. **Live
+consequence:** a wrong-org or wrong-action 400 reads as EXISTS, so the detector can report "a new
+version exists" after a silent credential/org swap. The negative-control probe mitigates it;
+mitigation is not a pin.
+
+## What this stamp does NOT cover — read before trusting a green build
+1. **No prompt-bearing live capture exists.** The whole `prompts` branch — `_merge_prompts`,
+   `_SAFE_PROMPT_PATTERN`, `duplicate_prompt`, the R-2 `allow_override` relaxation — is pinned only
+   against hand-authored fixtures. DEBT-69(a). ⛔ Do not fabricate a capture to close this.
+2. **No multi-page live capture exists.** The `pages[]` path is now the legacy branch and nothing
+   real has ever exercised it. DEBT-69(b). The old "compounding confidence" warning is **struck and
+   re-verified by mutation at HEAD** — one `_coerce_confidence`, both paths through the same loop —
+   so Wave-0's PROVISIONAL flag on that strike is **lifted**.
+3. **No live capture of the wrong-org 404.** R3's mismatch→UNKNOWN branch is pinned by synthetic
+   input only. SR-1 clause (3).
+4. **G-1 and G-2**, above.
+5. **The 10 s poll floor is unreachable in production** — `DEFAULT == MIN == 10.0` and no env var,
+   so the guard hardened in `6755fa1` is dead code on the only path that matters. DEBT-71/78.
+6. `gitleaks` skipped; live IDP submit/poll unexercised until S-01.6.
+7. ⚠️ **All four defects this module produced in two days were fail-open, and not one was found by
+   the test suite** — every one came from mutation testing or independent review, exactly as
+   `CLAUDE.md ## Rigor` warns. Green here means "the MVP's own tests pass", not "this gate can be
+   trusted to gate another team's prompt changes."
+
+## Verdict
+✅ **PASSED.** Floor clean at the expected numbers; the REG-11 D1/D2 fixes and the R-1/R-2
+precedence rules genuinely constrain (four mutants killed with tight blast radii, hand-verified);
+the union rule is terminal. G-1 and G-2 are pin/coverage gaps, not defects in shipped behaviour,
+and are named rather than absorbed.
 
 ## History
-- /test gap-fill (Atchim TDD gate) PASSED at d84bfa6fe2ffdc28ff2cdf7375569e06f1787637, before the QA S-01.2 fix round. Superseded.
-- /implement (Atchim TDD gate) PASSED at 481e0db788a94b1ff39bd96879dab5168812322d. Superseded by this /test stamp (the Risk: high rigor gate requires one).
-- /implement (Atchim REQUEST CHANGES) on 2026-09-19: ❌ INVALIDATED. Round-1 R1–R8 and round-2 test gaps, all closed. Round-1 summary: (Atchim, 2026-09-19)  ### Required 1. **Name check too loose** (`normalize.py:22,66`): `$` matches before a trailing newline, so `"total\n"` is accepted; there is also no length cap (DoD line 82). 2. **Raw exceptions escape `normalize()`:** `OverflowError` on a huge-int confidence (`:96`); `UnicodeEncodeError` on a lone surrogate (`:83`), which carries the PII value. 3. **Raw exceptions escape `extract()` through the transport** (`transport.py:108-131`): RemoteDisconnected, ConnectionResetError, IncompleteRead, UnicodeDecodeError and RecursionError. A missing file raises `FileNotFoundError` with the path in the message. 4. **A missing or null status polls to timeout** (`idp_client.py:179-192`), but ADR-0004 #17 says it must abort. `test_idp_client.py:247` pins the wrong behaviour. 5. **The poll ignores non-2xx except 401/403** (`:174-178`): a 404/400 keeps polling (ADR-0004 #5 says hard 
-- Initial stamp
+- 2026-09-22 — ✅ PASSED (superseded, stale per DEBT-46)
+- 2026-09-23 @ `a5805ec` — ✅ PASSED (this stamp)
