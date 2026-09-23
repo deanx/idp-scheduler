@@ -649,6 +649,94 @@ def test_a_response_with_a_pages_key_and_top_level_fields_merges_both_not_exclus
     assert out["fields"]["total"]["value"] == "87.48"
 
 
+# ---- R-1 (2026-09-23 REQUEST CHANGES round): the union's collision
+# precedence was emergent and unpinned. `normalize.py` appends the
+# top-level rollup AFTER `pages[]`'s entries and `_merge_fields` is
+# last-wins, so the top level silently wins any shared field name — but
+# nothing asserted that until now. Mutation-verified: swapping the two
+# `logical_pages.extend`/`.append` blocks in `normalize()` (pages-after-
+# top-level instead of pages-before) turns this test RED while the rest of
+# the suite stays green — proof the old suite exercised the union but
+# never a genuine collision.
+
+
+def test_top_level_field_wins_over_a_colliding_pages_entry() -> None:
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [{"fields": {"total": {"value": "from pages"}}}],
+        "fields": {"total": {"value": "from top level"}},
+    }
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert out["fields"]["total"]["value"] == "from top level"
+
+
+# ---- R-2 (2026-09-23 REQUEST CHANGES round): three collision policies at
+# the page/top-level seam the D1 union opened. `fields` above is last-wins
+# (top level silently wins); `tables` concatenates without dedup (a
+# genuinely shared row DOUBLES in NormalizedOutput — masked only at
+# classifier/gate.py's match_key indexing, not here); `prompts` used to
+# raise `duplicate_prompt` for ANY collision, including this one, which is
+# inconsistent with how `fields` treats the identical situation. Decision:
+# a prompt key colliding across the pages/top-level boundary now resolves
+# last-wins (top level overrides), matching `fields`; a TRUE duplicate
+# within one container (two entries in the same `pages[]` entry, or two in
+# the top-level rollup's own `prompts` list) still raises — that is a
+# genuine integrity defect, not a rollup echo.
+
+
+def test_top_level_table_row_concatenates_without_dedup_across_the_seam() -> None:
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [{"tables": {"line_items": [{"sku": {"value": "A-100"}}]}}],
+        "tables": {"line_items": [{"sku": {"value": "A-100"}}]},
+    }
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    # R-2 decision: normalize() does not dedup — it has no match_key to
+    # dedup by (that is golden-schema knowledge). The row appears twice;
+    # classifier/gate.py's match_key indexing is what collapses this in
+    # practice, not normalize().
+    assert len(out["tables"]["line_items"]) == 2
+
+
+def test_top_level_prompt_wins_over_a_colliding_pages_entry_instead_of_raising() -> None:
+    # R-2 PIN. Before the fix, this raised `duplicate_prompt` — the same
+    # page/top-level echo that `fields` already tolerates silently was
+    # treated as a fatal integrity violation for `prompts` alone.
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [
+            {
+                "prompts": [
+                    {"prompt": "vendor?", "answer": {"value": "from pages"}},
+                ]
+            }
+        ],
+        "prompts": [
+            {"prompt": "vendor?", "answer": {"value": "from top level"}},
+        ],
+    }
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert out["prompts"]["vendor?"]["answer"] == "from top level"
+
+
+def test_duplicate_prompt_within_the_top_level_rollup_itself_still_raises() -> None:
+    # The R-2 relaxation is scoped to the pages/top-level SEAM only — two
+    # entries sharing a key inside the SAME container (here, the top-level
+    # rollup's own 'prompts' list) is still a genuine defect and must
+    # still raise, exactly as two entries in the same pages[] entry does
+    # (test_duplicate_prompt_string_raises_typed_error, unchanged above).
+    raw = {
+        "status": "SUCCEEDED",
+        "prompts": [
+            {"prompt": "vendor?", "answer": {"value": "A"}},
+            {"prompt": "vendor?", "answer": {"value": "B"}},
+        ],
+    }
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "duplicate_prompt"
+
+
 def test_response_with_neither_pages_nor_top_level_container_raises_typed_error() -> None:
     # THE REGRESSION PIN (REG-11 D1). The pre-fix code did
     # `raw.get("pages", [])`, defaulting a missing key to an empty list and

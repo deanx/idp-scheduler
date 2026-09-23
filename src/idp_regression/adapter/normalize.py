@@ -138,12 +138,39 @@ def normalize(raw: object, success_statuses: set[str]) -> NormalizedOutput:
     prompts: dict[str, PromptValue] = {}
     seen_prompt_keys: set[str] = set()
 
+    # 2026-09-23 REQUEST CHANGES round (R-1/R-2). `raw` — the top-level
+    # rollup — is appended to `logical_pages` LAST (see above), and is the
+    # single `page is raw` entry in this loop. That ordering, not any
+    # special-casing inside the loop body, is what makes the top level win
+    # on every collision below:
+    #   - fields (`_merge_fields`, last-wins): processed last -> the
+    #     top-level value for a shared field name silently overwrites
+    #     whatever a `pages[]` entry set (R-1 PIN, see
+    #     `test_top_level_field_wins_over_a_colliding_pages_entry`).
+    #   - tables (`_merge_tables`, `existing.extend(rows)`): concatenated,
+    #     not deduplicated, across this same seam — a shared row that
+    #     genuinely appears in both a `pages[]` entry and the top-level
+    #     rollup is DOUBLED in `NormalizedOutput.tables`, not merged. R-2
+    #     decision: do not dedup here — `normalize()` has no `match_key`
+    #     (that is golden-schema knowledge, supplied only at classify time)
+    #     to dedup rows by, so any dedup attempt here would be a guess, not
+    #     a rule. `classifier/gate.py` indexes actual rows by normalized
+    #     `match_key` (`compare_rows`, ~line 213-226) and so pairs/collapses
+    #     the duplicate transparently — the gate's masking IS load-bearing
+    #     for this seam, and is only now written down. `NormalizedOutput`
+    #     itself, and anything reading it directly (ADR-0007's local run
+    #     artifact, Epic E's future remediation UI), still sees every row
+    #     twice.
+    #   - prompts: see `_merge_prompts`'s `allow_override` parameter below.
     for page in logical_pages:
         if not isinstance(page, dict):
             raise MalformedIDPOutputError("invalid_page", "each page must be a mapping")
+        is_top_level_rollup = has_top_level_container and page is raw
         _merge_fields(page.get("fields", {}), fields)
         _merge_tables(page.get("tables", {}), tables)
-        _merge_prompts(page.get("prompts", []), prompts, seen_prompt_keys)
+        _merge_prompts(
+            page.get("prompts", []), prompts, seen_prompt_keys, allow_override=is_top_level_rollup
+        )
 
     return NormalizedOutput(status=status, fields=fields, tables=tables, prompts=prompts)
 
@@ -299,9 +326,30 @@ def _merge_prompts(
     raw_prompts: object,
     into: dict[str, PromptValue],
     seen_keys: set[str],
+    allow_override: bool = False,
 ) -> None:
+    # R-2 (2026-09-23 REQUEST CHANGES round): `duplicate_prompt` was a
+    # page-vs-page integrity rule ("two entries in this action's real
+    # `pages[]` output claim the same prompt key" — always a defect)
+    # reapplied wholesale to the page-vs-top-level seam the D1 union rule
+    # opened, where the SAME key legitimately appearing in a `pages[]`
+    # entry and in the top-level rollup is not two independent answers —
+    # it is the same answer reported at two levels of the one wire shape
+    # (the rollup echoing what the pages already say), exactly as `fields`
+    # already treats it (last-wins, no raise). Decision: keep
+    # `duplicate_prompt` FATAL for a true within-container duplicate (two
+    # entries in the SAME `prompts` list, tracked by `seen_in_this_list`
+    # below — that is still always a defect, page-vs-page or within the
+    # rollup itself) but let the caller mark ONE container's pass as the
+    # rollup (`allow_override=True`, only ever the top-level page, see
+    # `normalize()`) so a key already seen in an earlier `pages[]` entry is
+    # overwritten, last-wins, instead of raising. A `pages[]`-vs-`pages[]`
+    # collision (`allow_override=False` on both) still raises exactly as
+    # before — this only de-fangs the specific page/top-level seam R-2 is
+    # about, nothing else.
     if not isinstance(raw_prompts, list):
         raise MalformedIDPOutputError("invalid_page", "page 'prompts' must be a list")
+    seen_in_this_list: set[str] = set()
     for raw_entry in raw_prompts:
         if not isinstance(raw_entry, dict):
             raise MalformedIDPOutputError("invalid_page", "each prompt entry must be a mapping")
@@ -310,7 +358,15 @@ def _merge_prompts(
             raise MalformedIDPOutputError(
                 "unsafe_prompt_key", "a prompt key failed the verbatim safe-charset check"
             )
-        if prompt_key in seen_keys:
+        if prompt_key in seen_in_this_list:
+            # A duplicate WITHIN one container (same page, or the rollup
+            # itself) is always a genuine defect, regardless of
+            # `allow_override`.
+            raise MalformedIDPOutputError(
+                "duplicate_prompt", "two prompt entries share the same prompt key"
+            )
+        seen_in_this_list.add(prompt_key)
+        if prompt_key in seen_keys and not allow_override:
             raise MalformedIDPOutputError(
                 "duplicate_prompt", "two prompt entries share the same prompt key"
             )
