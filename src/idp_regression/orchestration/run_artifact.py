@@ -55,6 +55,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 
 from idp_regression.classifier.types import VerdictMap
 from idp_regression.orchestration.log_sanitize import frame_location
@@ -66,6 +67,23 @@ logger = logging.getLogger(__name__)
 #: test_artifact_directory_is_git_ignored`). Relative to the current
 #: working directory of whoever invoked the run.
 ARTIFACT_DIR_NAME = ".idp-regression-run-artifacts"
+
+#: Same shape as `cli._VERSION_PATTERN`: `write_run_artifact`'s one
+#: production caller always passes a `uuid4().hex` (32 lowercase hex
+#: chars), but this module does not trust that -- `run_id` lands
+#: directly in a filesystem path, so containment against a hostile or
+#: malformed value is a property of the writer, not of its caller
+#: (independent-review Suggestion 1 on 318c9ff).
+_RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+#: Owner-only. `0700`/`0600` -- the artifact holds exactly the sensitive
+#: financial values `CLAUDE.md ## Domain` calls out (bill_to, currency,
+#: invoice_date, every expected/actual/confidence pair), and local disk
+#: is only a narrower disclosure surface than the platform (ADR-0007) if
+#: it is actually private to the invoking user, not merely off the
+#: platform.
+_DIR_MODE = 0o700
+_FILE_MODE = 0o600
 
 
 def artifact_path(run_id: str) -> str:
@@ -90,11 +108,32 @@ def write_run_artifact(run_id: str, verdict_maps: dict[str, VerdictMap]) -> None
     Best-effort: see the module docstring's "Failure posture". Never
     raises, never returns a value a caller could branch on — the whole
     point is that nothing about `run_eval`'s outcome can depend on this.
+
+    Fail-closed on `run_id`: rejected outright (logged, no write) unless
+    it matches `_RUN_ID_PATTERN` — the one shape the real caller
+    (`run_naming.generate_run_id`) ever produces. This stays inside the
+    same best-effort contract as every other failure here: never raises,
+    never changes `run_eval`'s exit code (INV-08, CT-04).
+
+    Writes owner-only (`0700` dir / `0600` file), tightening a
+    pre-existing world-readable directory on every call — `os.makedirs`
+    does not chmod an already-existing directory, so an install created
+    before this fix would otherwise stay wrong forever. Opens with
+    `O_NOFOLLOW` so a pre-planted symlink at the target path is refused
+    rather than followed (closed defensively; `run_id` is an
+    unpredictable uuid4 today, so this leg is not reachable in practice).
     """
+    if not _RUN_ID_PATTERN.match(run_id):
+        logger.warning(
+            "run_eval: run artifact write skipped: run_id failed containment validation"
+        )
+        return
     path = artifact_path(run_id)
     try:
-        os.makedirs(ARTIFACT_DIR_NAME, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
+        os.makedirs(ARTIFACT_DIR_NAME, mode=_DIR_MODE, exist_ok=True)
+        os.chmod(ARTIFACT_DIR_NAME, _DIR_MODE)  # makedirs ignores mode for an existing dir
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, _FILE_MODE)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump({run_id: verdict_maps}, fh, indent=2, sort_keys=True)
     except Exception as exc:  # noqa: BLE001 - best-effort by design, must never raise
         logger.warning(

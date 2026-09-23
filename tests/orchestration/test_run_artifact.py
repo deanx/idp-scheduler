@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import stat
 import subprocess
 from pathlib import Path
 
@@ -154,3 +155,104 @@ def test_gitignore_names_the_artifact_directory() -> None:
     gitignore_text = (repo_root / ".gitignore").read_text(encoding="utf-8")
 
     assert run_artifact.ARTIFACT_DIR_NAME in gitignore_text
+
+
+# --- Required review finding: world-readable artifact (independent review
+# of 318c9ff) -- the directory and file must be private to the owner. ---
+
+
+def test_write_run_artifact_creates_the_directory_owner_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A freshly-created artifact directory must be `0700`, not the
+    default-umask `0755` `os.makedirs` would otherwise produce."""
+    monkeypatch.chdir(tmp_path)
+
+    run_artifact.write_run_artifact("run-a", _SAMPLE_VERDICT_MAPS)
+
+    mode = os.stat(run_artifact.ARTIFACT_DIR_NAME).st_mode
+    assert stat.S_IMODE(mode) & 0o077 == 0, oct(stat.S_IMODE(mode))
+
+
+def test_write_run_artifact_writes_the_file_owner_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The JSON file itself must be `0600`, not the default-umask `0644`
+    `open(path, "w")` would otherwise produce -- this is the Required
+    finding: `bill_to`, `currency`, `invoice_date` and every expected/
+    actual/confidence pair for the run were world-readable."""
+    monkeypatch.chdir(tmp_path)
+    run_id = "0123456789abcdef0123456789abcdef"
+
+    run_artifact.write_run_artifact(run_id, _SAMPLE_VERDICT_MAPS)
+
+    mode = os.stat(run_artifact.artifact_path(run_id)).st_mode
+    assert stat.S_IMODE(mode) & 0o077 == 0, oct(stat.S_IMODE(mode))
+
+
+def test_write_run_artifact_tightens_a_pre_existing_world_readable_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`os.makedirs(..., exist_ok=True)` does NOT chmod an already-existing
+    directory -- reproduced live against this working tree's own
+    `.idp-regression-run-artifacts` (`0755`) before this fix. An existing
+    install must be tightened on the next write, not left wrong forever."""
+    monkeypatch.chdir(tmp_path)
+    os.makedirs(run_artifact.ARTIFACT_DIR_NAME, mode=0o755)
+    os.chmod(run_artifact.ARTIFACT_DIR_NAME, 0o755)
+    assert stat.S_IMODE(os.stat(run_artifact.ARTIFACT_DIR_NAME).st_mode) == 0o755
+
+    run_artifact.write_run_artifact("run-a", _SAMPLE_VERDICT_MAPS)
+
+    mode = stat.S_IMODE(os.stat(run_artifact.ARTIFACT_DIR_NAME).st_mode)
+    assert mode & 0o077 == 0, oct(mode)
+
+
+def test_write_run_artifact_never_raises_on_an_open_or_dump_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The previous failure-injection test only covered `os.makedirs`;
+    nothing exercised a failure once the directory step succeeds -- this
+    pins the `open`/`json.dump` leg too (review Suggestion 2)."""
+    monkeypatch.chdir(tmp_path)
+
+    def _boom(*args: object, **kwargs: object) -> int:
+        raise OSError("[Errno 13] Permission denied")
+
+    monkeypatch.setattr(os, "open", _boom)
+
+    with caplog.at_level(logging.WARNING):
+        run_artifact.write_run_artifact("run-a", _SAMPLE_VERDICT_MAPS)  # must not raise
+
+    assert not (tmp_path / run_artifact.artifact_path("run-a")).exists()
+    assert "OSError" in caplog.text
+
+
+def test_write_run_artifact_rejects_a_run_id_with_a_path_separator(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Suggestion 1: `write_run_artifact` must not trust `run_id` to stay
+    inside `ARTIFACT_DIR_NAME` just because its one production caller
+    passes a `uuid4().hex`. A fail-closed guard makes containment a
+    property of the writer, not of its caller."""
+    monkeypatch.chdir(tmp_path)
+
+    with caplog.at_level(logging.WARNING):
+        run_artifact.write_run_artifact("../escape", _SAMPLE_VERDICT_MAPS)  # must not raise
+
+    assert not (tmp_path.parent / "escape.json").exists()
+    assert not (tmp_path / run_artifact.ARTIFACT_DIR_NAME).exists()
+    assert "run_id" in caplog.text.lower()
+
+
+def test_write_run_artifact_accepts_a_well_formed_uuid4_hex_run_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The guard must not be so tight it rejects the one shape the real
+    caller (`run_naming.generate_run_id`) ever produces."""
+    monkeypatch.chdir(tmp_path)
+    run_id = "0123456789abcdef0123456789abcdef"
+
+    run_artifact.write_run_artifact(run_id, _SAMPLE_VERDICT_MAPS)
+
+    assert Path(run_artifact.artifact_path(run_id)).exists()
