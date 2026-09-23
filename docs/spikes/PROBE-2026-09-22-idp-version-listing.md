@@ -96,3 +96,29 @@ Granting Manage Actions to a *user* and re-probing would reveal what that privat
 
 ### Also relevant — business-group scope of the credential
 [IDP Security Best Practices](https://docs.mulesoft.com/idp/security-best-practices): *"Native IDP access is controlled at the Anypoint Platform Business Group level, which means any connected app within that organizational unit can invoke any document action or version."* This explains why submit succeeds against `ef1232be…` (the business group owning the action) while 404ing against the parent `e10ae12a…`, and it is a **containment fact worth carrying into HARDEN/NFR work**: the credential is not scoped to one action — it can invoke **any** action or version in that business group.
+
+---
+
+## Addendum 3 — a **zero-quota version-existence check** exists (2026-09-23)
+
+⚠️ **This materially changes ADR-0006 Decision A's option set and is the reason it is being re-opened.** User decision 2026-09-23: *"we need to poll for changes."*
+
+Probing `POST …/versions/{v}/executions` with a **deliberately empty multipart body** (no document bytes, so nothing can be processed) discriminates version existence:
+
+| version | response | meaning |
+|---|---|---|
+| `1.0.0` (real) | **400** `Invalid query parameter 'file'` | routing succeeded → **the version EXISTS**; rejected at payload validation |
+| `9.9.9` | **404** `Document Action Id: 078ca317… and version 9.9.9 not found` | **does not exist** |
+| `1.0.1`, `2.0.0` | 404, same shape | do not exist |
+| `latest` / `LATEST` | **404** … `version latest not found` | **no floating tag** — answers T-01.6.6 **q2: NO** |
+
+**Why this matters.** It uses only the **documented** `POST …/executions` endpoint — no console API, no new scope, no extraction quota. It is strictly cheaper than ADR-0006's option 1 (which spent a real extraction per tick) and strictly safer than option 3 (the undocumented console API).
+
+### What it does NOT give us, stated plainly
+It is an **existence check, not an enumeration.** There is still no way to ask *"what versions exist?"* — only *"does version X exist?"*. A detector must therefore **guess candidates**, which carries a **false-negative** risk: if `1.0.0` jumps straight to `1.5.7`, a next-patch/next-minor/next-major probe misses it **silently**, which is the failure mode this product exists to prevent. Any design must state its candidate strategy and what happens when the true version is outside the probed grid.
+
+Two further unknowns:
+1. **The version string may not be semver at all.** Our only live sample is `1.0.0`; whether IDP constrains the format or the publisher types free text is unverified. A non-numeric scheme defeats grid probing entirely.
+2. **The 400-vs-404 discrimination is undocumented behaviour.** It rests on documented endpoints, which is why it is safer than the console API — but the *distinction* is an implementation detail that could change without notice. It needs a pinned contract test and re-verification on any IDP platform change (SR-1 applies).
+
+**Cost of a tick:** one HTTP round trip per candidate version, zero documents, zero extractions.
