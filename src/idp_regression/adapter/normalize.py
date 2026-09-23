@@ -63,7 +63,8 @@ def normalize(raw: object, success_statuses: set[str]) -> NormalizedOutput:
             "status_not_success", "raw IDP response 'status' is not in success_statuses"
         )
 
-    # ADR-0002 A11 (REG-11 fix) + 2026-09-22 REQUEST CHANGES round (R-1).
+    # ADR-0002 A11 (REG-11 fix, third-occurrence D1 terminal rule 2026-09-23)
+    # + 2026-09-22 REQUEST CHANGES round (R-1) + D2 (2026-09-23).
     # The real MuleSoft Anypoint IDP execution body carries `fields`/
     # `tables` at the TOP LEVEL and has no `pages` key at all — confirmed
     # 2026-09-22 by the first live extraction ever run (seed-001-clean.pdf).
@@ -72,46 +73,64 @@ def normalize(raw: object, success_statuses: set[str]) -> NormalizedOutput:
     # genuine multi-page document may yet use it — unverified) rather than
     # removed outright.
     #
-    # Precedence is CONTENT-based, not presence-based. (R-1: the original
-    # A11 fix keyed precedence on `"pages" in raw` — so a present-but-EMPTY
-    # `pages: []` outranked a populated top-level `fields`/`tables`
-    # container and silently discarded it, reopening the exact fail-open
-    # class this amendment exists to close, through its own new rule.)
-    #   - a NON-EMPTY `pages` list wins outright, regardless of any
-    #     top-level container sitting beside it;
-    #   - an empty or absent `pages` falls through to the top-level
-    #     `fields`/`tables` container;
-    #   - neither a non-empty `pages` nor a top-level container is present
-    #     -> raises `missing_envelope`, never a silent empty success.
+    # D1 terminal rule: normalize() UNIONS every recognised container that
+    # is PRESENT — it never picks one envelope to the exclusion of another.
+    # Two prior rounds tried to fix "barren beats real" by testing content
+    # SUFFICIENCY one level deeper each time (`pages` absent -> `[]`
+    # default; then `pages: []` outranking a populated top level; then
+    # `pages: [{}]` outranking it) — each round moved the emptiness test in
+    # without making it terminal, because the underlying model was still
+    # "one envelope wins". A union has no such model: every recognised
+    # container present contributes whatever it actually holds (zero
+    # entries for an empty one, real entries for a populated one) to the
+    # SAME merge loop that already combines multiple `pages[]` entries.
+    # There is no "one level deeper" left, because presence is tested
+    # exactly once, at the top, and nothing about how empty or nested a
+    # container's content is changes whether it is included — only whether
+    # it contributes anything once included.
+    #   - a non-empty `pages` list contributes its entries;
+    #   - a present top-level `fields`/`tables`/`prompts` container
+    #     contributes the raw body itself as one more logical page (any
+    #     other top-level key — `documentName`, `id`, `status` — is simply
+    #     ignored by `_merge_*`, which only reads the keys it recognises);
+    #   - neither is present -> raises `missing_envelope`, never a silent
+    #     empty success.
     # A non-list `pages` value always raises `invalid_pages` outright and
     # never falls through, even when a top-level container is present —
     # that would hide a genuinely corrupt response shape.
     #
-    # Empty-extraction decision (R-1, recorded in ADR-0002 A11): a
-    # top-level container (or a `pages` entry) that is PRESENT but
-    # genuinely EMPTY is accepted and returns an empty NormalizedOutput —
-    # "IDP looked and found nothing" is a legitimate result. Only the
-    # ABSENCE of every recognisable container raises `missing_envelope`.
+    # D2: `prompts` is a recognised top-level envelope container too, on
+    # equal footing with `fields`/`tables` — an action can plausibly return
+    # only prompt answers (`NormalizedOutput.prompts` is first-class) and
+    # must not be rejected as `missing_envelope` for lacking `fields`/
+    # `tables` it was never going to have. ⚠️ This makes the envelope check
+    # consistent with the declared type; it is NOT a wire-contract
+    # verification of the `prompts` shape (SR-1) — that shape stays
+    # unverified against a live IDP response (DEBT-69).
+    #
+    # Empty-extraction decision (R-1, recorded in ADR-0002 A11, preserved
+    # unchanged by the union rule): a recognised container that is PRESENT
+    # but genuinely EMPTY still counts as present and contributes zero
+    # entries — "IDP looked and found nothing" is a legitimate result, not
+    # a malformed one. Only the ABSENCE of every recognisable container
+    # raises `missing_envelope`.
     pages_key_present = "pages" in raw
     raw_pages = raw.get("pages")
     if pages_key_present and not isinstance(raw_pages, list):
         raise MalformedIDPOutputError("invalid_pages", "raw IDP response 'pages' must be a list")
-    has_top_level_container = "fields" in raw or "tables" in raw
+    has_top_level_container = "fields" in raw or "tables" in raw or "prompts" in raw
 
-    logical_pages: list[object]
+    logical_pages: list[object] = []
     if pages_key_present and raw_pages:
-        logical_pages = raw_pages
-    elif has_top_level_container:
-        # Treat the top-level body itself as the single logical page: it
-        # already carries `fields`/`tables`/(optionally) `prompts` at the
-        # keys `_merge_*` reads, and any other top-level key (`documentName`,
-        # `id`, `status`) is simply ignored by those readers.
-        logical_pages = [raw]
-    else:
+        logical_pages.extend(raw_pages)
+    if has_top_level_container:
+        logical_pages.append(raw)
+
+    if not logical_pages:
         raise MalformedIDPOutputError(
             "missing_envelope",
             "raw IDP response has no non-empty 'pages' list and no "
-            "top-level 'fields'/'tables' container",
+            "top-level 'fields'/'tables'/'prompts' container",
         )
 
     fields: dict[str, FieldValue] = {}

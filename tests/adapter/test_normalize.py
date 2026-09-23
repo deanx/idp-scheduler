@@ -629,16 +629,23 @@ def test_top_level_tables_only_with_no_fields_key_is_parsed() -> None:
     assert out["tables"]["line_items"][0]["sku"]["value"] == "A-100"
 
 
-def test_a_response_with_a_pages_key_ignores_any_top_level_fields_or_tables() -> None:
-    # 'pages' present wins over any (unexpected) top-level container —
-    # documented precedence, not exercised by the live API today.
+def test_a_response_with_a_pages_key_and_top_level_fields_merges_both_not_exclusive() -> None:
+    # D1 terminal rule (2026-09-23): normalize() UNIONS every recognised
+    # container present — it never picks one envelope to the exclusion of
+    # another. A non-empty 'pages' list no longer suppresses a top-level
+    # container beside it (that exclusivity was itself the REG-11 D1 defect
+    # family, one level deeper each round — see the D1 terminal-rule note
+    # in test_barren_or_junk_pages_never_discards_a_populated_top_level_container
+    # below). Renamed from '..._ignores_any_top_level_fields_or_tables',
+    # whose old assertion (decoy must NOT appear) is the exact behavior this
+    # fix removes.
     raw = {
         "status": "SUCCEEDED",
-        "fields": {"decoy": {"value": "should not appear"}},
+        "fields": {"decoy": {"value": "should also appear"}},
         "pages": [{"fields": {"total": {"value": "87.48"}}}],
     }
     out = normalize(raw, success_statuses={"SUCCEEDED"})
-    assert "decoy" not in out["fields"]
+    assert out["fields"]["decoy"]["value"] == "should also appear"
     assert out["fields"]["total"]["value"] == "87.48"
 
 
@@ -716,6 +723,71 @@ def test_pages_list_containing_only_an_empty_page_still_wins_over_nothing_else()
     raw = {"status": "SUCCEEDED", "pages": [{}]}
     out = normalize(raw, success_statuses={"SUCCEEDED"})
     assert out["fields"] == {}
+
+
+# ---- D1 terminal rule (2026-09-23): "barren" is a PRESENCE question, not a
+# CONTENT-sufficiency question. `normalize()` no longer chooses one envelope
+# over another at all — it UNIONS every recognised container that is
+# present (each `pages[]` entry, plus the top-level body itself when it
+# carries `fields`/`tables`/`prompts`). An empty container simply
+# contributes zero entries to the merge; a non-empty one contributes its
+# real entries; nothing is ever silently discarded in favor of the other.
+# This is the third occurrence of the REG-11 D1 defect class (`pages`
+# absent -> `[]` default; then `pages: []` outranking a populated top
+# level; then `pages: [{}]` outranking it) — each prior fix moved the
+# emptiness test one level of nesting in without making it terminal. A
+# UNION rule has no "level" left to dig into: presence is checked exactly
+# once, at the top, exactly as it already is for entries WITHIN `pages[]`;
+# there is no deeper barren shape a fourth variant could hide behind.
+@pytest.mark.parametrize(
+    "pages_value",
+    [
+        [],
+        [{}],
+        [{}, {}],
+        [{"fields": {"zzz": {"value": "junk", "confidence": None}}}],
+    ],
+    ids=[
+        "empty_pages_list",
+        "single_empty_page",
+        "two_empty_pages",
+        "junk_field_beside_populated_top_level",
+    ],
+)
+def test_barren_or_junk_pages_never_discards_a_populated_top_level_container(
+    pages_value: object,
+) -> None:
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": pages_value,
+        "fields": {"total": {"value": "87.48", "confidenceScore": 99.0}},
+        "tables": {"line_items": [{"sku": {"value": "A-100", "confidenceScore": 99.0}}]},
+    }
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert out["fields"]["total"]["value"] == "87.48"
+    assert out["tables"]["line_items"][0]["sku"]["value"] == "A-100"
+
+
+# ---- D2 (2026-09-23): `prompts` is a recognised top-level envelope
+# container too, alongside `fields`/`tables`. Before this fix a
+# prompts-only response (no `fields`, no `tables`) raised
+# `missing_envelope` outright, though `NormalizedOutput` carries `prompts`
+# as a first-class member and an IDP action can plausibly return only
+# prompt answers. ⚠️ This test makes the envelope check CONSISTENT WITH THE
+# DECLARED TYPE — it is explicitly NOT a wire-contract verification (SR-1,
+# docs/state/REGRESSIONS.md): the `prompts` shape itself remains
+# unverified against a live IDP response (DEBT-69).
+def test_top_level_prompts_only_is_a_recognised_envelope_not_missing() -> None:
+    raw = {
+        "status": "SUCCEEDED",
+        "prompts": [
+            {"prompt": "invoice_number", "answer": {"value": "INV-1", "confidence": None}}
+        ],
+    }
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert out["fields"] == {}
+    assert out["tables"] == {}
+    assert out["prompts"]["invoice_number"]["answer"] == "INV-1"
 
 
 def test_non_list_pages_raises_even_with_a_populated_top_level_container_present() -> None:
