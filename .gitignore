@@ -27,3 +27,13 @@ wheels/
 # full CT-02 verdict map (expected/actual/confidence/verdict); the
 # platform stays value-free (DEBT-18 option B unchanged). Never commit.
 .idp-regression-run-artifacts/
+
+# Golden-set seed data (CLAUDE.md ## Domain: treat golden-set contents as
+# sensitive). The golden's authoritative home is its Langfuse dataset
+# items, not a copy in git history -- and this repo is publicly readable.
+# The files stay on disk where the CLI and scripts expect them
+# (scripts/provision_golden_dataset.py reads id_seeds/golden_set.json);
+# they are simply never committed. Today's three seeds are synthetic, but
+# the rule exists so a golden derived from a real customer document can
+# never land here by habit. See id_seeds/README.md.
+id_seeds/
