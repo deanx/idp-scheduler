@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd template for the local, POC/MVP path (user decision
+  2026-09-23: run everything local rather than on GitHub Actions).
+
+  `launchd`, not `cron` -- this is user-level scheduling on macOS
+  (Darwin), and `launchd` is the platform-native mechanism: it survives
+  logout/login and reboot the same way a LaunchAgent always does, gives
+  a real exit-status/throttling contract (`StartInterval` will not
+  double-fire a job that is still running), and is what Apple documents
+  as `cron`'s macOS replacement. `cron` still runs here, but nothing
+  supervises it, and a stray `cron` daemon is generally the first thing
+  removed by any of the usual "clean up my Mac" tooling.
+
+  This file is a TEMPLATE, not something loaded by this task -- every
+  `__PLACEHOLDER__` below must be substituted before `launchctl load`,
+  and loading it is explicitly the user's own step (see the one-liner
+  below), never this agent's.
+
+  Placeholders to replace:
+    __REPO_ROOT__  -- absolute path to this checkout, e.g.
+                       /Users/alex/dev-local/innovation-solved/idp-regression-tests/langfuse-opik-spike/idp-regression-sdd-package
+                       (must be an ABSOLUTE path -- launchd has no shell
+                       and does not expand `~` or `$HOME`)
+
+  What this job runs: `scripts/run_eval_scheduled.sh`, which already
+  handles the dated log file, the overlap lock, and failure visibility
+  (see that script's own header comment) -- this plist's own
+  StandardOutPath/StandardErrorPath below are a SEPARATE, launchd-level
+  log for the rare case the script itself fails to even start (e.g. a
+  bad path in this file); the script's per-run log under
+  `logs/scheduled-runs/` is where the actual `run_eval` output lands.
+
+  Schedule: `StartCalendarInterval` below fires once a day at 06:00
+  local time -- an arbitrary, easy-to-reason-about default for a POC.
+  Change the Hour/Minute values (or replace the whole key with a
+  `StartInterval` in seconds for "every N seconds") to whatever cadence
+  the golden set's size and IDP quota budget can afford; nothing in
+  `run_eval_scheduled.sh` assumes a particular cadence.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.idp-regression.scheduled-run</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>__REPO_ROOT__/scripts/run_eval_scheduled.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO_ROOT__</string>
+
+    <!-- Once a day at 06:00 local time. Add more <dict> entries inside
+         an outer <array> instead of this single <dict> for multiple
+         times per day. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>6</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- Do NOT run immediately the moment this job is loaded -- the
+         first run should happen at the next scheduled time, not
+         surprise whoever runs `launchctl load` mid-afternoon. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- launchd-level log (script start/crash only -- see header
+         comment above for where the real per-run log lives). -->
+    <key>StandardOutPath</key>
+    <string>__REPO_ROOT__/logs/launchd/scheduled-run.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>__REPO_ROOT__/logs/launchd/scheduled-run.stderr.log</string>
+</dict>
+</plist>

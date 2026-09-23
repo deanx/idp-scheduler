@@ -1,5 +1,15 @@
 name: regression-run
 
+# ⚠️ 2026-09-23 user decision: "I want to run everything local. This is
+# just a POC/MVP!" -- architecture step 1's ACTIVE path is now a local
+# `launchd` job (`scripts/run_eval_scheduled.sh` +
+# `scripts/com.idp-regression.scheduled-run.plist.template`), not this
+# workflow. This file is RETAINED, not deleted, for when a
+# runner-reachable, hosted Langfuse and a repo-secrets story exist
+# (today's Langfuse is `localhost:3000` and there is no document-fetch
+# step a GitHub-hosted runner could use) -- see CLAUDE.md ## Commands
+# for the local path.
+#
 # Architecture step 1 (Epic D): "run the regression headlessly" -- ADR-0006
 # Decision B: an EXTERNAL scheduler/CI invokes the one-shot `run_eval` CLI.
 # This is deliberately NOT a self-triggering daemon -- ADR-0004 A8/A9 require

@@ -37,3 +37,16 @@ wheels/
 # the rule exists so a golden derived from a real customer document can
 # never land here by habit. See id_seeds/README.md.
 id_seeds/
+
+# Scheduled-run artifacts (scripts/run_eval_scheduled.sh + the launchd
+# template) -- per-run dated logs and failure markers, none of which are
+# source. Matched by extension, not by ignoring the `logs/` directory
+# itself, so the `.gitkeep` files that keep it present for a fresh
+# clone stay tracked.
+logs/**/*.log
+logs/**/*.marker
+
+# The overlap-prevention lock file scripts/run_eval_scheduled.sh creates
+# next to the repo root (an empty file `lockf` holds an advisory lock
+# on -- never real content, never to be committed).
+.idp-regression-scheduled-run.lock
