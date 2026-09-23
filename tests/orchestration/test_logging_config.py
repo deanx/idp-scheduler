@@ -29,6 +29,7 @@ import logging
 import subprocess
 import sys
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -247,4 +248,75 @@ def test_cli_logger_name_is_stable_under_python_dash_m_invocation() -> None:
         "not '__main__' -- otherwise this line never reached the handler "
         "configure_logging() installs, and only appeared here by the "
         "unrelated logging.lastResort fallback"
+    )
+
+
+def test_check_versions_module_logger_name_is_not___main__() -> None:
+    """Cheap unit-level pin, alongside the subprocess test below: a plain
+    `import` keeps `__name__` correct (which is why the `-m` bug survives
+    unit tests and needs the subprocess reproduction), but the logger
+    object's OWN name is hardcoded now and must never regress back to
+    `logging.getLogger(__name__)`."""
+    from idp_regression.orchestration import check_versions
+
+    assert check_versions.logger.name == "idp_regression.orchestration.check_versions"
+
+
+def test_watch_module_logger_name_is_not___main__() -> None:
+    from idp_regression.orchestration import watch
+
+    assert watch.logger.name == "idp_regression.orchestration.watch"
+
+
+def test_check_versions_logger_name_is_stable_under_python_dash_m_invocation(
+    tmp_path: Path,
+) -> None:
+    """Mirrors `test_cli_logger_name_is_stable_under_python_dash_m_invocation`
+    above -- the identical `__main__`-orphaning bug, fixed the same way, in
+    `check_versions.py`. Live-reproduced 2026-09-23: `python -m
+    idp_regression.orchestration.check_versions` produced
+    `INFO:__main__:...` instead of the configured format. Triggered via the
+    state-file-inside-repo refusal so the subprocess never needs IDP
+    credentials or network access."""
+    repo_root = Path(__file__).resolve().parents[2]
+    inside_repo_state_file = repo_root / "docs" / "state" / "check-versions-state.json"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "idp_regression.orchestration.check_versions",
+            "--org",
+            "org1",
+            "--action",
+            "action1",
+            "--dataset",
+            "ds1",
+            "--state-file",
+            str(inside_repo_state_file),
+            "--max-probes-per-tick",
+            "20",
+            "--max-probes-per-sweep",
+            "20",
+            "--patch-lookahead",
+            "3",
+            "--minor-lookahead",
+            "3",
+            "--major-lookahead",
+            "1",
+            "--sweep-every-n-ticks",
+            "0",
+            "--max-indeterminate-ticks",
+            "3",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 1
+    assert "must be OUTSIDE the repository" in result.stderr
+    assert "idp_regression.orchestration.check_versions" in result.stderr, (
+        "the logger name in the output must be the package-qualified name, "
+        "not '__main__'"
     )

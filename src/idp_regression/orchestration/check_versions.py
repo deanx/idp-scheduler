@@ -41,8 +41,22 @@ from idp_regression.adapter.version_probe import (
     sweep_candidates,
     walk_candidates,
 )
+from idp_regression.orchestration.cli import configure_logging
 
-logger = logging.getLogger(__name__)
+#: NOT `logging.getLogger(__name__)` -- the identical bug fixed in
+#: `cli.py` 2026-09-23 (`318c9ff`): under `python -m
+#: idp_regression.orchestration.check_versions`, `runpy` imports this
+#: module as `__main__`, so `__name__` at module level would be
+#: `"__main__"`, orphaning this logger from the `idp_regression` package
+#: hierarchy `configure_logging()` attaches its handler to -- every line
+#: this module logs (including every `check_tick` event) would fall
+#: through to `logging.lastResort`, i.e. nowhere, only when run the
+#: documented way. Live-reproduced 2026-09-23: output was
+#: `INFO:__main__:...` instead of the configured
+#: `2026-09-23 10:58:00 INFO idp_regression...: ...` format. Pinned by
+#: `tests/orchestration/test_logging_config.py`
+#: `test_check_versions_logger_name_is_stable_under_python_dash_m_invocation`.
+logger = logging.getLogger("idp_regression.orchestration.check_versions")
 
 #: Bumped whenever the state-file schema changes shape. An unrecognised
 #: version is a fail-closed halt, never a silent reset (a silent reset
@@ -518,7 +532,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    logging.basicConfig(level=logging.INFO)
+    # Item 1 fix (2026-09-23, this module's own instance of the bug fixed
+    # in cli.py this morning): `logging.basicConfig(level=logging.INFO)`
+    # attaches a handler to the ROOT logger, which this module's own
+    # `"__main__"`-orphaned logger (now fixed above) never reached anyway
+    # under `-m`. `configure_logging()` is the one shared, idempotent
+    # setup routine -- same handler, same format, same stderr target as
+    # `cli.py` and `watch.py`.
+    configure_logging()
 
     try:
         _reject_state_file_inside_repo(args.state_file)
