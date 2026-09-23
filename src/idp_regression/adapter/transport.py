@@ -206,6 +206,31 @@ def post_multipart_file(
     return status, resp_body
 
 
+def post_empty_multipart(
+    url: str,
+    timeout_seconds: float,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, Any]:
+    """A POST with a syntactically valid but semantically EMPTY multipart
+    body (zero parts — just the closing boundary line, no ``file`` part).
+
+    Used by the version-existence probe (ADR-0006 §A'.1/Addendum 3): the
+    IDP host still routes the request (there IS a version segment in the
+    URL path), so a 400 ``Invalid query parameter 'file'`` means the
+    version exists and a 404 means it does not — no document bytes are
+    ever transmitted, so this spends zero extraction quota. Routed
+    through the shared ``_send`` (D14) — the same no-redirect opener
+    ``post_multipart_file``/``get_json`` use, never a second transport."""
+    boundary = uuid.uuid4().hex
+    body = f"--{boundary}--\r\n".encode()
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    for key, value in (headers or {}).items():
+        req.add_header(key, value)
+    status, resp_body, _response_headers = _send(req, timeout_seconds)
+    return status, resp_body
+
+
 def _log_and_raise_transport_error(req: urllib.request.Request, detail: str) -> NoReturn:
     message = redact(f"{req.get_method()} {req.full_url} failed: {detail}")
     logger.error(
