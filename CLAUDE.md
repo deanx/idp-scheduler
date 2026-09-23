@@ -107,11 +107,14 @@ Everything runs from the project venv; dependencies are uv-managed (`uv add`, `u
 | Types + lint | `.venv/bin/mypy src tests` (strict) · `.venv/bin/ruff check src tests` |
 | Dependency CVEs | `.venv/bin/pip-audit` |
 | Secret-scan hook | `./scripts/install-git-hooks.sh` — once per clone; sets `core.hooksPath=.githooks` (not versionable) |
-| CLI | `.venv/bin/python -m idp_regression.orchestration.cli --version <v> --run <name> [--action <id>]` |
+| CLI | `.venv/bin/python -m idp_regression.orchestration.cli --org <id> --action <id> --version <v> --dataset <name> --run <name> [--max-documents-per-run <n>]` |
+| CLI (local convenience wrapper) | `./scripts/run_eval_local.sh` — composes `--org`/`--action`/`--version`/`--dataset` from `IDP_ORG_ID` / `IDP_ACTION_ID` / `IDP_TEST_ACTION_VERSION` / `GOLDEN_DATASET_NAME` in `.env`; generates `--run` from a timestamp. Nothing under `src/` reads these vars (ADR-0004 A8/A9, statically pinned) — the wrapper only composes a command line. |
 
+- **`--org` / `--action` / `--version` / `--dataset` are all required, no environment fallback (ADR-0004 A8/A9, 2026-09-22)** — every value that defines *what a run measured* must be visible in the invocation itself (and, for CI, in the reviewed workflow file), never resolved from ambient `.env`. `--max-documents-per-run` is the one optional flag (MVP override of A10; defaults to a guard-rail ceiling, not a real IDP quota).
 - **Integration tests are opt-in** (`RUN_INTEGRATION_TESTS=1`) and need the local Langfuse at `LANGFUSE_HOST` plus IDP credentials from `.env`. Live IDP *submit/poll* stays skipped until a real action id + published version exist (S-01.6); **do not submit documents to the live IDP casually** — it costs org quota and processes real files.
 - **After mutation testing, run `PYTHONDONTWRITEBYTECODE=1` and delete `__pycache__`.** A stale `.pyc` from a same-second revert once made three passing tests fail, and the source looked correct.
 - `pytest-timeout` is set to 120 s so a regression in poll/retry budget math cannot hang the suite.
+- **Headless regression run (Epic D step 1, ADR-0006 Decision B)** — `.github/workflows/regression-run.yml` invokes the same one-shot CLI from an external scheduler (`workflow_dispatch` + `schedule`), never a self-triggering daemon. See the workflow file's header comment for the trigger/secrets/gate reasoning.
 
 ## Architecture
 

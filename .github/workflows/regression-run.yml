@@ -1,0 +1,239 @@
+name: regression-run
+
+# Architecture step 1 (Epic D): "run the regression headlessly" -- ADR-0006
+# Decision B: an EXTERNAL scheduler/CI invokes the one-shot `run_eval` CLI.
+# This is deliberately NOT a self-triggering daemon -- ADR-0004 A8/A9 require
+# every parameter that defines *what a run measured* (`--org`, `--action`,
+# `--version`, `--dataset`) to be visible in a reviewed file, not resolved
+# from ambient runner state. This workflow IS that external invoker.
+#
+# Separate from quality-gate.yml on purpose: that workflow runs the unit
+# test suite (mypy/ruff/pytest/pip-audit) on every PR and push to main. This
+# workflow runs an actual regression against live IDP + Langfuse and never
+# fires on `pull_request` -- see "Triggers and secrets" below.
+#
+# ── Triggers and secrets (be conservative) ──────────────────────────────
+# Two triggers only: `workflow_dispatch` and `schedule`.
+#
+#   - `workflow_dispatch` is the floor this step must satisfy: a human (or
+#     an external CI system with repo write access) invokes it with
+#     explicit inputs. GitHub only lets principals with write access to
+#     THIS repo dispatch a workflow, so the invoker is always trusted --
+#     the same trust boundary `secrets.*` already assumes.
+#   - `schedule` (cron) runs the workflow file as committed on the
+#     default branch, in the repo's own security context. No external
+#     input reaches it.
+#   - Deliberately NO `pull_request` (or `pull_request_target`) trigger.
+#     A regression run needs live IDP OAuth + Langfuse credentials, and a
+#     `pull_request` from a fork must never be able to reach
+#     `secrets.*` -- forked-repo PR runs get a read-only token and no
+#     secrets by GitHub's own default, and `pull_request_target` (which
+#     WOULD get secrets) runs the BASE ref's workflow against an
+#     attacker-controlled HEAD checkout, which is the classic secret-
+#     exfiltration hole. Neither risk is worth taking for a step whose
+#     whole point is "external scheduler/CI", not "gate every PR" -- PR
+#     gating, if ever wanted, belongs to quality-gate.yml (no
+#     credentials) or a future decision, not this workflow.
+#
+# `permissions: contents: read` (matches quality-gate.yml/secrets-gate.yml)
+# -- this workflow does not need to write anything back to the repo.
+#
+# ── Where the run parameters live (the A8-vs-schedule tension) ─────────
+# A8's whole argument is that `--org/--action/--version/--dataset` must be
+# visible in a REVIEWED FILE, not ambient config. That reads naturally for
+# `workflow_dispatch` (a human types the inputs at invocation, and the
+# dispatch record itself -- inputs included -- is visible in the Actions
+# run log, same as a PR diff is visible in review). It does NOT read
+# naturally for `schedule`: a cron trigger has no human typing a version
+# at 3am, and "ambient GitHub Actions repository variable, editable
+# outside the PR review flow" is exactly the ambient-config shape A8 was
+# written to close.
+#
+# Resolution: for `schedule`, the four run-identity values are literal
+# strings in the `env:` block below, in THIS workflow file, not
+# `vars.*`/`secrets.*` and not read from `.env`. Changing what a nightly
+# regression measures is therefore a diff in a version-controlled,
+# PR-reviewed file -- identical in spirit to a human typing `--version`
+# on the command line, just decided in advance by whoever reviews the
+# change to this file instead of by whoever happens to be awake at
+# 03:00 UTC. `workflow_dispatch` inputs still win when the trigger is
+# manual; the scheduled defaults are read only on `schedule`.
+on:
+  workflow_dispatch:
+    inputs:
+      org:
+        description: "IDP org id under test (required -- ADR-0004 A9, no env fallback)"
+        required: true
+        type: string
+      action:
+        description: "IDP action id under test, UUID (required -- ADR-0004 A8)"
+        required: true
+        type: string
+      version:
+        description: "Action version under test (required -- ADR-0004 A8)"
+        required: true
+        type: string
+      dataset:
+        description: "Golden dataset name (required -- ADR-0004 A8)"
+        required: true
+        type: string
+      run_name:
+        description: "Run name (optional -- a timestamped name is generated if left blank)"
+        required: false
+        type: string
+        default: ""
+      max_documents_per_run:
+        description: "Guard-rail ceiling, NOT the org's real IDP quota (ADR-0004 A10 MVP override; optional)"
+        required: false
+        type: string
+        default: ""
+  # `schedule` (cron) is deliberately NOT enabled yet -- left as a
+  # commented template rather than a live trigger, so merging this
+  # workflow cannot make it fire against a live org/action/version
+  # nightly without a human first replacing the SCHEDULED_* placeholders
+  # below in a reviewed follow-up PR (this task's constraint is "wiring,
+  # not a live run"). To enable it: uncomment the two lines below AND
+  # replace every `REPLACE_ME_*` / nil-UUID placeholder in the `env:`
+  # block with real, reviewed values in the same PR.
+  #
+  # schedule:
+  #   - cron: "0 2 * * *"
+
+permissions:
+  contents: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  # Scheduled-run defaults (see "Where the run parameters live" above).
+  # ⚠️ PLACEHOLDERS -- deliberately invalid so an accidental scheduled
+  # fire fails fast at CLI validation (exit 1/2, pre-network) instead of
+  # silently regressing against the wrong target. Replace with real,
+  # reviewed values in a follow-up PR before enabling the `schedule`
+  # trigger above.
+  SCHEDULED_ORG: "REPLACE_ME_ORG_ID"
+  SCHEDULED_ACTION: "00000000-0000-0000-0000-000000000000"
+  SCHEDULED_VERSION: "REPLACE_ME_VERSION"
+  SCHEDULED_DATASET: "REPLACE_ME_DATASET"
+
+jobs:
+  regression:
+    name: run_eval (headless regression)
+    runs-on: ubuntu-latest
+    # No `continue-on-error`: a non-zero `run_eval` exit fails this job.
+    # See "What a red run means" below for what that failure does (and
+    # does not) tell a reader.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: install from the lock file only (no re-resolution)
+        run: uv sync --locked --all-extras --dev
+
+      - name: Resolve run parameters
+        id: params
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ORG="${{ inputs.org }}"
+            ACTION="${{ inputs.action }}"
+            VERSION="${{ inputs.version }}"
+            DATASET="${{ inputs.dataset }}"
+            RUN_NAME="${{ inputs.run_name }}"
+            MAX_DOCS="${{ inputs.max_documents_per_run }}"
+          else
+            ORG="${SCHEDULED_ORG}"
+            ACTION="${SCHEDULED_ACTION}"
+            VERSION="${SCHEDULED_VERSION}"
+            DATASET="${SCHEDULED_DATASET}"
+            RUN_NAME=""
+            MAX_DOCS=""
+          fi
+
+          if [ -z "${RUN_NAME}" ]; then
+            RUN_NAME="ci-${{ github.event_name }}-$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_RUN_ID}"
+          fi
+
+          {
+            echo "org=${ORG}"
+            echo "action=${ACTION}"
+            echo "version=${VERSION}"
+            echo "dataset=${DATASET}"
+            echo "run_name=${RUN_NAME}"
+            echo "max_docs=${MAX_DOCS}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: run_eval
+        env:
+          # IDP OAuth credentials (adapter/) -- GitHub secrets only,
+          # never committed, never echoed by this workflow. `run_eval`'s
+          # own contract (INV-02, `adapter/errors.py`) is that no raw
+          # exception, token or extracted value ever reaches a log line;
+          # verified by reading cli.py/facade.py before wiring this job
+          # (see the workflow-authoring report for the exact call sites)
+          # -- every catch-all here logs only `type(exc).__name__` plus a
+          # traceback frame location, run through `sanitize_for_log`
+          # where the value could be attacker- or IDP-controlled text.
+          IDP_CLIENT_ID: ${{ secrets.IDP_CLIENT_ID }}
+          IDP_CLIENT_SECRET: ${{ secrets.IDP_CLIENT_SECRET }}
+          IDP_REGION: ${{ secrets.IDP_REGION }}
+          IDP_SUBMIT_TIMEOUT_SECONDS: ${{ secrets.IDP_SUBMIT_TIMEOUT_SECONDS }}
+          IDP_EXECUTION_TIMEOUT_SECONDS: ${{ secrets.IDP_EXECUTION_TIMEOUT_SECONDS }}
+          IDP_TERMINAL_STATUSES: ${{ secrets.IDP_TERMINAL_STATUSES }}
+          IDP_SUCCESS_STATUSES: ${{ secrets.IDP_SUCCESS_STATUSES }}
+          # ⚠️ Open gap, not solved by this wiring change (see report):
+          # `IDP_DOCUMENT_DIR` must resolve to a runner-local directory
+          # containing the actual document files the golden set
+          # references. No fixture-fetch step is added here -- doing so
+          # safely (without putting document bytes in a public log or a
+          # world-readable artifact) is a separate design decision.
+          IDP_DOCUMENT_DIR: ${{ secrets.IDP_DOCUMENT_DIR }}
+          # Evaluation-platform (Langfuse) credentials (platform/) --
+          # GitHub secrets only.
+          PLATFORM: langfuse
+          LANGFUSE_HOST: ${{ secrets.LANGFUSE_HOST }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+        run: |
+          MAX_DOCS_FLAG=()
+          if [ -n "${{ steps.params.outputs.max_docs }}" ]; then
+            MAX_DOCS_FLAG=(--max-documents-per-run "${{ steps.params.outputs.max_docs }}")
+          fi
+
+          .venv/bin/python -m idp_regression.orchestration.cli \
+            --org "${{ steps.params.outputs.org }}" \
+            --action "${{ steps.params.outputs.action }}" \
+            --version "${{ steps.params.outputs.version }}" \
+            --dataset "${{ steps.params.outputs.dataset }}" \
+            --run "${{ steps.params.outputs.run_name }}" \
+            "${MAX_DOCS_FLAG[@]}"
+
+# ── What a red run means (CT-04) ────────────────────────────────────────
+# `run_eval` returns 0 iff the regression gate passed. EVERY other outcome
+# -- a failing gate verdict, an aborted run (quota ceiling, IDP timeout,
+# malformed golden item, `.env`/credential failure) -- returns a non-zero
+# exit code, and CT-04 makes those cases DELIBERATELY indistinguishable by
+# exit code alone. A red `regression` job here means "go read this run's
+# logs and, if the run reached the platform, its Langfuse trace" -- NOT
+# "the extraction prompt regressed". This workflow does not attempt to
+# recover that distinction (no separate "aborted" vs "failed" exit code
+# exists to key off), and does not gate branch protection on this job --
+# it is not attached to any required-status-check list, so a red run
+# blocks nothing merge-wise; it is a signal for the reader, not (yet) an
+# automated gate on other work. Wiring it into branch protection is a
+# later decision once a real scheduled target replaces the placeholders
+# above.
+#
+# ── What this workflow does NOT do yet (by design, per this task's own
+# constraints) ───────────────────────────────────────────────────────────
+# - Does not run against live services: the `schedule` cron line is left
+#   commented out and the scheduled env values are invalid placeholders,
+#   so nothing here can fire a live run before a human replaces them in a
+#   reviewed follow-up PR.
+# - Does not add or reference any real credential value -- every
+#   `secrets.*` name above must be created in the repo's Settings before
+#   `workflow_dispatch` can succeed; until then, `workflow_dispatch` will
+#   fail fast on missing/blank credentials (the same `.strip()` /
+#   required-env-var guards `facade.py` already has), not silently no-op.
+# - Does not fetch the document fixtures `IDP_DOCUMENT_DIR` must contain
+#   on the runner (see the inline comment above `IDP_DOCUMENT_DIR:`).
