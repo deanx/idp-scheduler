@@ -12,10 +12,13 @@ wheels/
 .DS_Store
 
 # Secrets / env — never commit real credentials (BR6, INV-02)
-.env
-.env.local
-.env.*.local
-# .env.example stays committable (template only, no real values)
+.env*
+!.env.example
+# HARDEN M5 (2026-09-23): the rule was `.env`, `.env.local`, `.env.*.local`,
+# which left `.env.bak`, `.env.backup`, `.env.production` and friends
+# COMMITTABLE -- verified with `git check-ignore`. On a publicly readable
+# repo one `cp .env .env.bak` is a credential disclosure. `.env*` + an
+# explicit un-ignore for the template closes the family.
 
 # Editor swap / backup files (QA-S-01.3 hygiene)
 *.swp
@@ -43,8 +46,8 @@ id_seeds/
 # source. Matched by extension, not by ignoring the `logs/` directory
 # itself, so the `.gitkeep` files that keep it present for a fresh
 # clone stay tracked.
-logs/**/*.log
-logs/**/*.marker
+logs/
+!logs/**/.gitkeep
 
 # The overlap-prevention lock file scripts/run_eval_scheduled.sh creates
 # next to the repo root (an empty file `lockf` holds an advisory lock
