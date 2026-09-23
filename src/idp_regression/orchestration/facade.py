@@ -59,7 +59,7 @@ from idp_regression.adapter.errors import (
 from idp_regression.adapter.idp_client import MuleSoftIDPAdapter, make_idp_adapter
 from idp_regression.adapter.transport import sanitize_for_log
 from idp_regression.classifier.gate import classify, overall_gate
-from idp_regression.classifier.types import MalformedActualError, MalformedGoldenError
+from idp_regression.classifier.types import MalformedActualError, MalformedGoldenError, VerdictMap
 from idp_regression.orchestration.bootstrap import (
     MissingCredentialError,
     validate_platform_credentials,
@@ -75,6 +75,7 @@ from idp_regression.orchestration.prerun import (
     check_schema_drift,
     validate_golden_set,
 )
+from idp_regression.orchestration.run_artifact import write_run_artifact
 from idp_regression.orchestration.run_naming import compose_experiment_name, generate_run_id
 from idp_regression.platform import make_platform
 from idp_regression.platform.errors import (
@@ -573,6 +574,16 @@ def run_eval(
     # processed, and the loop's own `except` blocks below are the only
     # path out of it.
     records: list[DocumentRecord] = []
+    # ADR-0007 Option E (2026-09-23): the full CT-02 verdict map per
+    # document, accumulated here purely so it can be handed to
+    # `write_run_artifact` below -- it is NEVER passed to
+    # `build_score_inputs`/`record_run` (those already have `verdicts`
+    # locally, unchanged) and never reaches the platform. Collected
+    # incrementally (not only on success) so an aborted run still leaves
+    # an artifact for whatever documents were classified before the
+    # abort -- exactly the run a human is most likely to want "what did
+    # it extract instead" for.
+    verdict_maps: dict[str, VerdictMap] = {}
     any_gate_failed = False
     passed_count = 0
     failed_count = 0
@@ -654,6 +665,8 @@ def run_eval(
             except MalformedActualError as exc:
                 raise _abort("malformed_actual", document_id, str(exc)) from None
 
+            verdict_maps[document_id] = verdicts
+
             if gate == "FAIL":
                 any_gate_failed = True
                 failed_count += 1
@@ -702,6 +715,10 @@ def run_eval(
             # ADR-0005 #9 step 4: "any other platform error -> hard_failure".
             raise _abort("hard_failure", None, str(exc)) from None
     except RunAborted as exc:
+        # ADR-0007 Option E: best-effort, whatever was classified before
+        # the abort -- never affects the exit code below (INV-08/CT-04),
+        # see `write_run_artifact`'s own docstring for the failure posture.
+        write_run_artifact(run_id, verdict_maps)
         logger.error("run_eval: %s: %s", exc.reason, sanitize_for_log(str(exc)))
         _log_run_end("aborted", 1, pass_count=passed_count, fail_count=failed_count)
         return 1
@@ -726,6 +743,10 @@ def run_eval(
             golden_version=golden_version,
             golden_dataset_name=dataset_name,
         )
+        # ADR-0007 Option E: same best-effort shape as the marker above --
+        # whatever was classified before the unexpected error, never
+        # touching the exit code (INV-08/CT-04).
+        write_run_artifact(run_id, verdict_maps)
         logger.error(
             "run_eval: unexpected error: %s at %s",
             type(exc).__name__,
@@ -733,6 +754,14 @@ def run_eval(
         )
         _log_run_end("aborted", 1, pass_count=passed_count, fail_count=failed_count)
         return 1
+
+    # ADR-0007 Option E: the full run's verdict maps, written once every
+    # document succeeded and BEFORE the success marker below -- same
+    # ordering rationale as `record_run` itself (ADR-0005 #9 step 4/5):
+    # best-effort, never able to turn this otherwise-passing run into a
+    # failure (INV-08/CT-04 -- the exit code a few lines down never reads
+    # anything this call did or didn't do).
+    write_run_artifact(run_id, verdict_maps)
 
     # ADR-0005 #9 step 5: mark_run_status("complete", ...), best-effort --
     # INV-08 holds trivially, the exit code below never reads this marker

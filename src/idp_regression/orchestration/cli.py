@@ -77,6 +77,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import re
 import sys
 import uuid
@@ -87,9 +88,97 @@ from idp_regression.orchestration.dotenv_support import load_dotenv
 from idp_regression.orchestration.facade import DEFAULT_MAX_DOCUMENTS_PER_RUN, run_eval
 from idp_regression.orchestration.log_sanitize import frame_location
 
-logger = logging.getLogger(__name__)
+#: ⚠️ NOT `logging.getLogger(__name__)` -- item 1's own gate fix
+#: (2026-09-23, live-reproduced by running the DOCUMENTED entry point,
+#: `python -m idp_regression.orchestration.cli`): under `-m`, Python's
+#: `runpy` imports this module as `__main__`, so `__name__` at module
+#: level would be `"__main__"`, not `"idp_regression.orchestration.cli"`
+#: -- orphaned from the `idp_regression` package hierarchy
+#: `configure_logging()` attaches its handler to below, so this module's
+#: own log lines (including its own `run_eval: ...` messages) would fall
+#: through to `logging.lastResort` again, ONLY when run the documented
+#: way. Every other module in this codebase (`facade.py`, etc.) is safe
+#: with `__name__` because nothing ever runs THEM as `__main__` -- this
+#: is the one module where that assumption doesn't hold.
+logger = logging.getLogger("idp_regression.orchestration.cli")
 
 _VERSION_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+#: Item 1 (2026-09-23): NO handler was ever configured anywhere in this
+#: codebase -- every `logger.info`/`logger.error` call landed on
+#: `logging.lastResort`, i.e. nowhere, in a real invocation (two live
+#: end-to-end runs today produced zero log output). `docs/qa/NFR-01.md`
+#: marks `Observability: REQUIRED`, and `CLAUDE.md ## Rigor` states this
+#: marker is NOT waived by the `prototype` profile.
+_LOG_LEVEL_VAR = "IDP_REGRESSION_LOG_LEVEL"
+_DEFAULT_LOG_LEVEL = "INFO"
+#: The PACKAGE logger, never the root logger -- `run_eval` (`facade.py`)
+#: is a public function other callers may import and invoke directly,
+#: bypassing this CLI entirely, and a library must not hijack its host's
+#: root logger. Attaching here (not `logging.getLogger(__name__)`, which
+#: would be this MODULE's own logger only) means every logger under
+#: `idp_regression.*` -- `facade`, `prerun`, the adapter, the platform --
+#: reaches the same handler via ordinary propagation, since nothing here
+#: sets `propagate = False` on any of them.
+_PACKAGE_LOGGER_NAME = "idp_regression"
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+#: Attribute name used to tag handlers this function installs, so a
+#: second call replaces them instead of accumulating duplicates (a
+#: library re-entered, or a test harness invoking `main()` repeatedly in
+#: one process) -- see `configure_logging()`.
+_MANAGED_HANDLER_ATTR = "_idp_regression_managed"
+
+
+def _resolve_log_level() -> int:
+    """`IDP_REGRESSION_LOG_LEVEL` adjusts WHERE the logs go (the floor),
+    never WHAT is logged -- every `sanitize_for_log`/redaction boundary
+    upstream of a `logger.*` call is untouched by this; an unrecognised
+    value falls back to the default rather than raising, since a typo'd
+    env var must not crash the CLI's own observability setup."""
+    raw = (os.environ.get(_LOG_LEVEL_VAR) or "").strip().upper() or _DEFAULT_LOG_LEVEL
+    level = logging.getLevelName(raw)
+    return level if isinstance(level, int) else logging.getLevelName(_DEFAULT_LOG_LEVEL)
+
+
+def configure_logging() -> None:
+    """Attach ONE `StreamHandler(sys.stderr)` to the `idp_regression`
+    package logger (never the root logger, see `_PACKAGE_LOGGER_NAME`'s
+    comment above) and set its level from `IDP_REGRESSION_LOG_LEVEL`
+    (default `INFO`).
+
+    **stderr, not stdout** -- deliberate, so a future `--json` machine-
+    readable stdout contract stays clean of interleaved log lines.
+
+    **Format** includes the timestamp, level and logger name -- these
+    lines are read in a CI log days later, by someone who was not in the
+    room; `run_eval: <event>` alone (today's shape) does not say when it
+    happened or how severe it was.
+
+    **Idempotent, not merely additive**: a handler this function
+    previously installed is removed before a new one is added (tagged via
+    `_MANAGED_HANDLER_ATTR`), so calling this twice in one process (a
+    library re-entered, or a test invoking `main()` repeatedly) does not
+    double-emit every line, and correctly re-binds to whatever
+    `sys.stderr` currently is (relevant under `capsys`).
+
+    Does **not** set `propagate = False` on the package logger -- doing
+    so would silently stop `pytest`'s own `caplog` (which attaches at the
+    root logger) from seeing anything logged under `idp_regression.*`,
+    breaking hundreds of existing tests that assert on `caplog.text`.
+    Leaving propagation on means a line is seen at most twice in a test
+    process (once by this handler, once by `caplog`'s), never zero times
+    in production (root has no handler of its own by default, so nothing
+    is duplicated there)."""
+    package_logger = logging.getLogger(_PACKAGE_LOGGER_NAME)
+    for existing in list(package_logger.handlers):
+        if getattr(existing, _MANAGED_HANDLER_ATTR, False):
+            package_logger.removeHandler(existing)
+
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+    setattr(handler, _MANAGED_HANDLER_ATTR, True)
+    package_logger.addHandler(handler)
+    package_logger.setLevel(_resolve_log_level())
 
 
 def _is_valid_action_id(candidate: str) -> bool:
@@ -153,6 +242,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # Item 1 (2026-09-23): configured FIRST, before `load_dotenv()` --
+    # otherwise a `.env`-loading failure (the very next lines) would
+    # itself log invisibly, same bug as everything else that follows.
+    configure_logging()
+
     # ⚠️ Fixed 2026-09-21 (Atchim gate, live-reproduced): `load_dotenv()`
     # used to sit BEFORE this function's own try/except (which only wraps
     # the `run_eval(...)` call below) -- an `OSError` from an unreadable

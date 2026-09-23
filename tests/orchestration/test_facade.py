@@ -2252,3 +2252,107 @@ def test_run_eval_still_propagates_asyncio_cancelled_error_is_not_the_goal(
             "idp-regression-golden",
             "org-t",
         )
+
+
+# --- ADR-0007 Option E: the local run artifact -------------------------
+
+
+def test_run_eval_writes_the_full_verdict_map_to_the_local_run_artifact_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+) -> None:
+    """Persists what `classify()` already computed and `facade.py`
+    otherwise discards -- no new extraction, no new fetch (ADR-0007)."""
+    from idp_regression.orchestration import run_artifact
+
+    dataset = _well_formed_dataset()
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(dataset))
+    monkeypatch.setattr(facade, "generate_run_id", lambda: "artifact-run-id-1")
+    _stub_make_idp_adapter_success(monkeypatch)
+
+    exit_code = run_eval(
+        "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden", "org-t"
+    )
+
+    assert exit_code == 0
+    written = json.loads(
+        Path(run_artifact.artifact_path("artifact-run-id-1")).read_text(encoding="utf-8")
+    )
+    assert written["artifact-run-id-1"]["doc-1"]["total"] == {
+        "verdict": "match",
+        "expected": "1250.00",
+        "actual": "1250.00",
+        "confidence": 0.99,
+        "critical": True,
+        "type": "number",
+    }
+
+
+def test_run_eval_writes_a_partial_local_run_artifact_on_an_abort(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+) -> None:
+    """The whole run aborts on the second document (INV-06), but the
+    artifact still carries the first document's verdict map -- exactly
+    the run a human is most likely to want "what did it extract instead"
+    for."""
+    from idp_regression.adapter.errors import IDPAuthenticationError
+    from idp_regression.orchestration import run_artifact
+
+    dataset = _two_item_dataset()
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(dataset))
+    monkeypatch.setattr(facade, "generate_run_id", lambda: "artifact-run-id-2")
+
+    path1, actual1 = _matching_actual_for("/documents", "doc-1")
+    fake_idp = _FakeIDPAdapter({path1: actual1})
+
+    def _extract(document_path: str, action_id: str, version: str) -> object:
+        fake_idp.calls.append((document_path, action_id, version))
+        if document_path == path1:
+            return actual1
+        raise IDPAuthenticationError("token rejected")
+
+    fake_idp.extract = _extract  # type: ignore[method-assign]
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda org_id: fake_idp)
+
+    exit_code = run_eval(
+        "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden", "org-t"
+    )
+
+    assert exit_code != 0
+    written = json.loads(
+        Path(run_artifact.artifact_path("artifact-run-id-2")).read_text(encoding="utf-8")
+    )
+    assert list(written["artifact-run-id-2"].keys()) == ["doc-1"]
+
+
+def test_run_eval_exit_code_is_unaffected_by_a_run_artifact_write_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+) -> None:
+    """Binding obligation (ADR-0007): artifact writing must not be able
+    to fail a run that otherwise passed -- the gate is the contract
+    (INV-08, CT-04). Goes through the REAL `write_run_artifact` (its own
+    internal best-effort try/except is the thing under test here, not a
+    test double standing in for it)."""
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "makedirs", _boom)
+
+    dataset = _well_formed_dataset()
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(dataset))
+    _stub_make_idp_adapter_success(monkeypatch)
+
+    exit_code = run_eval(
+        "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden", "org-t"
+    )
+
+    assert exit_code == 0

@@ -22,3 +22,8 @@ wheels/
 *.swo
 .*.sw[a-p]
 *~
+
+# Local per-run artifact (ADR-0007 Option E, 2026-09-23) -- carries the
+# full CT-02 verdict map (expected/actual/confidence/verdict); the
+# platform stays value-free (DEBT-18 option B unchanged). Never commit.
+.idp-regression-run-artifacts/
