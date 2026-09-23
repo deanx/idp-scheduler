@@ -5,6 +5,8 @@ I/O and the CLI wiring get their own thin tests further down."""
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -347,3 +349,44 @@ def test_state_file_inside_the_repo_is_rejected(tmp_path: Path) -> None:
 
 def test_state_file_outside_the_repo_is_accepted(tmp_path: Path) -> None:
     _reject_state_file_inside_repo(tmp_path / "state.json")  # must not raise
+
+
+
+def test_run_eval_command_is_literally_runnable() -> None:
+    """The detection banner's "ready to paste" command must actually run.
+
+    Phase 1's entire product is that line: on a hit the watcher prints a
+    command a human pastes. It previously emitted ``idp-regression --org ...``,
+    which is NOT an installed console script -- ``pyproject.toml`` declares no
+    ``[project.scripts]`` and ``.venv/bin`` holds no ``idp-*`` entry point --
+    so the one line the feature exists to produce would have given the reader
+    "command not found".
+
+    This pin RUNS the emitted module with ``--help`` rather than asserting on
+    the text, so it fails if the entry point is renamed, moved or made
+    non-runnable, not merely if the wording changes.
+    """
+    responses = _controls_ok("1.0.0")
+    responses["1.0.1"] = ProbeResult.EXISTS
+    result = check_once(probe=FakeProbe(responses), **_base_kwargs())
+
+    assert result.outcome == OUTCOME_NEW_VERSION_DETECTED
+    assert result.run_eval_commands, "a detected version must yield a command"
+
+    tokens = result.run_eval_commands[0].split()
+    assert tokens[1] == "-m", f"expected a `-m module` invocation, got: {tokens[:3]}"
+    module = tokens[2]
+
+    completed = subprocess.run(
+        [sys.executable, "-m", module, "--help"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=Path(__file__).resolve().parents[2],
+    )
+    assert completed.returncode == 0, (
+        f"the pasted command's module is not runnable: {module}\n"
+        f"stderr: {completed.stderr[:400]}"
+    )
+    for flag in ("--org", "--action", "--version", "--dataset", "--run"):
+        assert flag in completed.stdout, f"{module} --help does not offer {flag}"

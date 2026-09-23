@@ -437,8 +437,17 @@ def check_once(
         }
     )
 
+    # The command must be literally paste-able. `idp-regression` is NOT an
+    # installed console script -- `pyproject.toml` declares no
+    # `[project.scripts]`, and `.venv/bin/` contains no `idp-*` entry point --
+    # so emitting it would hand the reader a "command not found". The module
+    # invocation below is the one `CLAUDE.md ## Commands` documents and the
+    # one both live runs on 2026-09-23 actually used. Pinned by
+    # `test_run_eval_command_is_literally_runnable`; if a console script is
+    # ever added, change this string and that test together.
     run_eval_commands = [
-        f"idp-regression --org {org_id} --action {action_id} --version {version} "
+        f".venv/bin/python -m idp_regression.orchestration.cli "
+        f"--org {org_id} --action {action_id} --version {version} "
         f"--dataset {dataset_name} --run auto-detected-{version}"
         for version in new_versions
     ]
