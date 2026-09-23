@@ -49,6 +49,7 @@ from idp_regression.adapter.transport import sanitize_for_log
 from idp_regression.adapter.version_probe import (
     IDPVersionProbe,
     MuleSoftVersionProbe,
+    ProbeResult,
     parse_semver,
 )
 from idp_regression.orchestration.check_versions import (
@@ -66,7 +67,7 @@ from idp_regression.orchestration.check_versions import (
     TickState,
     _reject_state_file_inside_repo,
     check_once,
-    load_state,
+    load_state_from_file,
     open_state_file_locked,
     save_state_atomic,
 )
@@ -97,6 +98,18 @@ _HALT_OUTCOMES = frozenset(
     {OUTCOME_ANCHOR_VANISHED, OUTCOME_DISCRIMINATOR_INVALID, OUTCOME_DETECTOR_DEGRADED}
 )
 
+#: "Cheap one" (2026-09-23 re-review): a positive-control response of
+#: `ProbeResult.UNKNOWN` (a 429, a 5xx, a malformed response -- see
+#: `classify_probe_response`) halts as `anchor_vanished` exactly like a
+#: genuine `ProbeResult.ABSENT` (the exit code and the halt itself are
+#: correct either way -- neither is safe to keep walking on), but the
+#: human-facing diagnosis is not the same claim: ABSENT means the anchor
+#: version itself is gone; UNKNOWN means the probe couldn't get a clean
+#: answer at all, i.e. the API was unreachable/ambiguous, not that
+#: anything vanished. Distinguished here, read from `event["positive_control"]`.
+_ANCHOR_VANISHED_PHRASE = "ANCHOR VANISHED -- stopping"
+_ANCHOR_UNREACHABLE_PHRASE = "ANCHOR CHECK UNREACHABLE (ambiguous response) -- stopping"
+
 _OUTCOME_PHRASES = {
     OUTCOME_NO_NEW_VERSIONS: "no new versions",
     OUTCOME_NEW_VERSION_DETECTED: "NEW VERSION DETECTED",
@@ -104,11 +117,17 @@ _OUTCOME_PHRASES = {
     OUTCOME_INDETERMINATE: "ambiguous result (retrying)",
     OUTCOME_DETECTOR_DEGRADED: "DETECTOR DEGRADED -- stopping",
     OUTCOME_DISCRIMINATOR_INVALID: "DISCRIMINATOR BROKEN -- stopping",
-    OUTCOME_ANCHOR_VANISHED: "ANCHOR VANISHED -- stopping",
+    OUTCOME_ANCHOR_VANISHED: _ANCHOR_VANISHED_PHRASE,
     OUTCOME_SKIPPED_LOCKED: "skipped (already running)",
 }
 
 _RUN_VERSION_PATTERN = re.compile(r"--version (\S+)")
+
+
+def _anchor_vanished_phrase(event: dict[str, Any]) -> str:
+    if event.get("positive_control") == str(ProbeResult.UNKNOWN):
+        return _ANCHOR_UNREACHABLE_PHRASE
+    return _ANCHOR_VANISHED_PHRASE
 
 
 def _short(value: str, *, head: int = 8) -> str:
@@ -148,7 +167,11 @@ def _startup_banner(
 def _human_tick_line(iteration: int, event: dict[str, Any], *, clock: Callable[[], float]) -> str:
     outcome = str(event.get("outcome"))
     probed = len(event.get("probed") or [])
-    phrase = _OUTCOME_PHRASES.get(outcome, outcome)
+    phrase = (
+        _anchor_vanished_phrase(event)
+        if outcome == OUTCOME_ANCHOR_VANISHED
+        else _OUTCOME_PHRASES.get(outcome, outcome)
+    )
     controls_failed = outcome in (OUTCOME_ANCHOR_VANISHED, OUTCOME_DISCRIMINATOR_INVALID)
     controls = "FAILED" if controls_failed else "ok"
     return (
@@ -174,10 +197,10 @@ def _print_detection_block(result: TickResult) -> None:
     print()
 
 
-def _print_halt_block(outcome: str, message: str) -> None:
+def _print_halt_block(phrase: str, message: str) -> None:
     print()
     print("=" * 70)
-    print(f"  WATCHER STOPPED: {_OUTCOME_PHRASES.get(outcome, outcome)}")
+    print(f"  WATCHER STOPPED: {phrase}")
     print(f"  {message}")
     print("  A human must look. See the log for full detail.")
     print("=" * 70)
@@ -341,7 +364,7 @@ def run_watch_loop(
                     exc.outcome,
                     sanitize_for_log(str(exc)),
                 )
-                _print_halt_block(exc.outcome, str(exc))
+                _print_halt_block(_OUTCOME_PHRASES.get(exc.outcome, exc.outcome), str(exc))
                 exit_code = 1
                 break
             except Exception as exc:  # noqa: BLE001 - a tick failing must not kill the loop
@@ -386,7 +409,12 @@ def run_watch_loop(
 
             if result.outcome in _HALT_OUTCOMES:
                 logger.error("watch: halting -- outcome=%s", result.outcome)
-                _print_halt_block(result.outcome, f"see tick {iteration}'s log line above")
+                halt_phrase = (
+                    _anchor_vanished_phrase(result.event)
+                    if result.outcome == OUTCOME_ANCHOR_VANISHED
+                    else _OUTCOME_PHRASES.get(result.outcome, result.outcome)
+                )
+                _print_halt_block(halt_phrase, f"see tick {iteration}'s log line above")
                 exit_code = 1
                 break
 
@@ -536,6 +564,13 @@ def main(argv: list[str] | None = None) -> int:
     # is now taken once, here, and held for the ENTIRE foreground loop's
     # lifetime (the same `flock` semantics `check_versions.main()` uses
     # for its one tick) -- released only when the loop actually ends.
+    # RQ-1 fix (2026-09-23 re-review, PIN): the lock above is taken on a
+    # SIDECAR path (`<state_file>.lock`), not `state_file` itself --
+    # `save_state_atomic`'s `os.replace()` retargets `state_file` to a
+    # brand-new inode on every save, which would silently orphan a lock
+    # held on the data file's own (now unreferenced) inode from tick 2
+    # onward, running the rest of a potentially days-long loop
+    # completely unlocked. See `open_state_file_locked`'s docstring.
     try:
         fd = open_state_file_locked(args.state_file)
     except StateFileLocked:
@@ -552,8 +587,14 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         try:
-            with os.fdopen(fd, "r+", encoding="utf-8", closefd=False) as fh:
-                state = load_state(fh)
+            # RQ-1 fix (2026-09-23 re-review): `fd` above is now the
+            # SIDECAR lock's fd (`open_state_file_locked` locks
+            # `<state_file>.lock`, never the data file itself, since
+            # `save_state_atomic`'s `os.replace()` would silently orphan
+            # a lock taken on the data file's own inode after the first
+            # tick's save). Read the data file itself through
+            # `load_state_from_file`, independent of the lock.
+            state = load_state_from_file(args.state_file)
         except CheckVersionsRefused as exc:
             logger.error("watch: %s", sanitize_for_log(str(exc)))
             print(f"error: {exc}", file=sys.stderr)

@@ -64,6 +64,20 @@ logger = logging.getLogger("idp_regression.orchestration.check_versions")
 #: would re-walk from nothing and could re-notify every known version).
 SCHEMA_VERSION = 1
 
+#: RQ (2026-09-23 re-review, "cheap ones"): `pending_unknowns` had no cap
+#: or ageing -- a persistently-ambiguous endpoint could park the walk
+#: behind re-probing an ever-growing list forever, emitting
+#: `ceiling_reached` every tick without ever making progress. This is a
+#: hard cap, not true LRU ageing (the state's `to_json()` always
+#: `sorted()`s the list for a stable diff, which already discards
+#: insertion order -- true ageing would need a separate
+#: candidate->first-seen-tick map, a schema change out of scope for this
+#: pass). Capping at a sorted-alphabetical prefix is an arbitrary but
+#: deterministic and bounded policy: it stops unbounded growth and is
+#: visible in the event (`pending_unknowns_capped`), which is what this
+#: pass commits to.
+MAX_PENDING_UNKNOWNS = 500
+
 #: The full outcome vocabulary (ADR-0006 §A'.9).
 OUTCOME_NO_NEW_VERSIONS = "no_new_versions"
 OUTCOME_NEW_VERSION_DETECTED = "new_version_detected"
@@ -150,6 +164,25 @@ class WalkOutcome:
     probes_used: int
 
 
+def _probe_with_rate_limit_check(
+    probe: IDPVersionProbe, org_id: str, action_id: str, candidate: str
+) -> tuple[ProbeResult, bool]:
+    """Probes one candidate and reports whether THIS response was itself
+    a 429. ADR-0006 §A'.4 is unqualified: "429 -> UNKNOWN, abandon the
+    remaining probes for this tick and back off" — a 429 always
+    classifies to `ProbeResult.UNKNOWN` (`classify_probe_response`), but
+    `ProbeResult` alone cannot distinguish "429, abandon everything
+    downstream" from any other UNKNOWN. Shared by all three probe loops
+    (`_resolve_unknowns`, the walk's own grid, and the sweep) so the rule
+    is enforced once, not three times with three chances to miss an edge
+    — RQ-3 (2026-09-23 re-review): C2's fix only wired this into the
+    walk -> sweep edge; `_resolve_unknowns` and the sweep loop itself
+    still kept probing past a 429 before this fix."""
+    result = probe.probe(org_id, action_id, candidate)
+    rate_limited = getattr(probe, "last_status_code", None) == 429
+    return result, rate_limited
+
+
 def _resolve_unknowns(
     probe: IDPVersionProbe,
     org_id: str,
@@ -157,27 +190,37 @@ def _resolve_unknowns(
     pending: list[str],
     *,
     probes_remaining: int,
-) -> tuple[list[str], list[str], list[str], int]:
+) -> tuple[list[str], list[str], list[str], int, bool]:
     """Re-probe every pending UNKNOWN before the walk advances past it
     (§A'.4) — an ambiguous answer is a *pending* answer, not a resolved
-    one. Returns (probed, hits, still_unknown, probes_used)."""
+    one. Returns (probed, hits, still_unknown, probes_used, rate_limited).
+    A 429 abandons the REST of this pass's pending candidates (they are
+    appended to `still_unknown` unprobed, exactly like a budget-exhausted
+    candidate) and is reported back so the caller can skip the walk's own
+    grid entirely this tick (§A'.4's "abandon the remaining probes for
+    this tick" — RQ-3)."""
     probed: list[str] = []
     hits: list[str] = []
     still_unknown: list[str] = []
     probes_used = 0
+    rate_limited = False
     for candidate in pending:
-        if probes_used >= probes_remaining:
+        if rate_limited or probes_used >= probes_remaining:
             still_unknown.append(candidate)
             continue
         probes_used += 1
         probed.append(candidate)
-        result = probe.probe(org_id, action_id, candidate)
+        result, hit_rate_limited = _probe_with_rate_limit_check(
+            probe, org_id, action_id, candidate
+        )
         if result is ProbeResult.EXISTS:
             hits.append(candidate)
         elif result is ProbeResult.UNKNOWN:
             still_unknown.append(candidate)
         # ABSENT: resolved, dropped — it is confirmed not to exist.
-    return probed, hits, still_unknown, probes_used
+        if hit_rate_limited:
+            rate_limited = True
+    return probed, hits, still_unknown, probes_used, rate_limited
 
 
 def _run_walk(
@@ -206,11 +249,13 @@ def _run_walk(
         resolved_hits,
         still_unknown,
         used,
+        resolve_rate_limited,
     ) = _resolve_unknowns(probe, org_id, action_id, pending_unknowns, probes_remaining=max_probes)
     probed.extend(resolved_probed)
     hits.extend(resolved_hits)
     unknowns.extend(still_unknown)
     probes_used += used
+    rate_limited = resolve_rate_limited
     for candidate in resolved_hits:
         parsed_candidate = parse_semver(candidate)
         parsed_anchor = parse_semver(current_anchor)
@@ -219,7 +264,13 @@ def _run_walk(
         ):
             current_anchor = candidate
 
-    while True:
+    # RQ-3 (2026-09-23 re-review): a 429 while resolving pending unknowns
+    # must abandon the REST of this tick's probes, including the walk's
+    # own grid -- not just the remaining pending items. Before this fix
+    # only the grid-loop -> sweep edge honoured "abandon the rest of the
+    # tick"; a 429 on the FIRST pending unknown still let the walk run
+    # its full grid.
+    while not rate_limited:
         if probes_used >= max_probes:
             # Budget was already exhausted by the PREVIOUS pass's hit
             # (a re-anchor consumed the last probe) -- this pass, which
@@ -245,7 +296,9 @@ def _run_walk(
                 break
             probes_used += 1
             probed.append(candidate)
-            result = probe.probe(org_id, action_id, candidate)
+            result, hit_rate_limited = _probe_with_rate_limit_check(
+                probe, org_id, action_id, candidate
+            )
             if result is ProbeResult.EXISTS:
                 hits.append(candidate)
                 current_anchor = candidate
@@ -253,7 +306,7 @@ def _run_walk(
                 break  # re-anchor: restart the walk from the new anchor
             if result is ProbeResult.UNKNOWN:
                 unknowns.append(candidate)
-                if getattr(probe, "last_status_code", None) == 429:
+                if hit_rate_limited:
                     rate_limited = True
                     break
         if rate_limited:
@@ -376,10 +429,18 @@ def check_once(
     # actually issued -- charging it for a `continue`d already-known
     # candidate silently shrank effective coverage as `known_versions`
     # grew.
+    # RQ-3 (2026-09-23 re-review): a 429 mid-sweep must abandon the rest
+    # of the SWEEP's own remaining probes too, via the same
+    # `_probe_with_rate_limit_check` helper the walk and
+    # `_resolve_unknowns` now use -- before this fix the sweep loop never
+    # inspected `last_status_code` at all and would keep issuing up to
+    # `max_probes_per_sweep - 1` more probes at an endpoint that had just
+    # rate-limited this tick.
     sweep_missed: list[str] = []
     sweep_probed: list[str] = []
     sweep_unknowns: list[str] = []
     sweep_truncated = False
+    sweep_rate_limited = False
     ran_sweep = (
         sweep_every_n_ticks > 0
         and tick_count % sweep_every_n_ticks == 0
@@ -400,14 +461,37 @@ def check_once(
                 break
             sweep_probes_used += 1
             sweep_probed.append(candidate)
-            result = probe.probe(org_id, action_id, candidate)
+            result, hit_rate_limited = _probe_with_rate_limit_check(
+                probe, org_id, action_id, candidate
+            )
             if result is ProbeResult.EXISTS:
                 sweep_missed.append(candidate)
             elif result is ProbeResult.UNKNOWN:
                 sweep_unknowns.append(candidate)
             # ABSENT: resolved, dropped -- confirmed not to exist.
+            if hit_rate_limited:
+                sweep_rate_limited = True
+                break
+
+    # Tick-level rate_limited signal (RQ-3): true if EITHER the walk (and
+    # its unknowns-resolution pass) or the sweep hit a 429 this tick --
+    # the single value the event records, so a human reading the tick
+    # log sees one honest answer regardless of which of the three loops
+    # tripped it.
+    tick_rate_limited = walk.rate_limited or sweep_rate_limited
 
     all_unknowns = sorted(set(walk.unknowns) | set(sweep_unknowns))
+    pending_unknowns_capped = len(all_unknowns) > MAX_PENDING_UNKNOWNS
+    if pending_unknowns_capped:
+        logger.warning(
+            "check_tick: pending_unknowns exceeds cap (%d > %d) -- capping "
+            "to the first %d alphabetically; the rest are re-probed via "
+            "the walk/sweep as they naturally recur",
+            len(all_unknowns),
+            MAX_PENDING_UNKNOWNS,
+            MAX_PENDING_UNKNOWNS,
+        )
+        all_unknowns = all_unknowns[:MAX_PENDING_UNKNOWNS]
 
     new_known = known | set(walk.hits) | set(sweep_missed)
     new_versions = sorted(set(walk.hits) | set(sweep_missed))
@@ -460,7 +544,9 @@ def check_once(
             "absent_count": len(walk.probed) - len(walk.hits) - len(walk.unknowns),
             "unknowns": walk.unknowns,
             "ceiling_reached": walk.ceiling_reached,
-            "rate_limited": walk.rate_limited,
+            "rate_limited": tick_rate_limited,
+            "sweep_rate_limited": sweep_rate_limited,
+            "pending_unknowns_capped": pending_unknowns_capped,
             "probe_count": walk.probes_used,
             "total_probe_count": walk.probes_used + len(sweep_probed),
             "ticks_since_last_detection": ticks_since_last_detection,
@@ -519,10 +605,33 @@ class StateFileLocked(Exception):
         super().__init__(f"state file {state_file} is locked by another instance")
 
 
+def _lock_path_for(state_file: Path) -> Path:
+    """The sidecar lock path for `state_file` -- `<state_file>.lock`,
+    never the data file itself and never passed to `os.replace()`
+    (RQ-1, 2026-09-23 re-review)."""
+    return state_file.with_name(state_file.name + ".lock")
+
+
 def open_state_file_locked(state_file: Path) -> int:
     """Opens (creating if absent) and takes a non-blocking exclusive
-    `flock` on `state_file`, returning the raw fd. Raises
-    `StateFileLocked` (fd already closed) if another process holds it.
+    `flock` on a SIDECAR path (`<state_file>.lock`) -- deliberately NOT
+    `state_file` itself. Raises `StateFileLocked` (fd already closed) if
+    another process holds it.
+
+    RQ-1 (2026-09-23 re-review, PIN): `flock` locks the INODE a path
+    resolves to at open() time. `save_state_atomic()` does
+    `os.replace(tmp, path)`, which retargets `path` to a BRAND-NEW inode
+    -- the fd this function's caller is holding stays locked on the OLD,
+    now-unreferenced inode. A lock taken directly on `state_file` is
+    therefore silently orphaned by the very first `save_state_atomic()`
+    call: `watch.py`'s `run_watch_loop` saves every tick, so from tick 2
+    onward the watcher would run completely unlocked for the rest of a
+    potentially days-long loop, while both the code comment and the
+    operator-facing "refusing to start" message kept asserting a
+    guarantee that no longer held. The sidecar path is never the target
+    of an `os.replace()`, so the SAME fd (and the SAME inode) stays
+    locked for as long as it is held open, regardless of how many times
+    the data file underneath it is atomically replaced.
 
     Shared by `check_versions.main()` (one tick, lock held for that one
     tick) and `watch.main()` (lock held for the WHOLE foreground loop's
@@ -531,14 +640,35 @@ def open_state_file_locked(state_file: Path) -> int:
     `check-versions`, could interleave writes and lose `known_versions`,
     which with `--auto-run` is a re-detection and a duplicate real-quota
     run). The caller owns the fd and must eventually
-    `fcntl.flock(fd, fcntl.LOCK_UN)` then `os.close(fd)`."""
-    fd = os.open(str(state_file), os.O_RDWR | os.O_CREAT, 0o600)
+    `fcntl.flock(fd, fcntl.LOCK_UN)` then `os.close(fd)`. A process
+    killed while holding the lock releases it for free -- `flock` is
+    kernel-released on process death regardless of which path it was
+    taken on, so a stale lock from a killed watcher never wedges the
+    next run."""
+    lock_path = _lock_path_for(state_file)
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         os.close(fd)
         raise StateFileLocked(str(state_file)) from None
     return fd
+
+
+def load_state_from_file(state_file: Path) -> TickState:
+    """Opens (creating if absent) and reads `state_file`'s current
+    content, independent of the lock. RQ-1 split locking (the sidecar,
+    `open_state_file_locked`) from reading the data file itself -- the
+    lock no longer needs to be held on the same fd/inode the data is
+    read from, since `save_state_atomic()` replaces that inode on every
+    save regardless. Locking remains entirely the caller's
+    responsibility; this only reads."""
+    fd = os.open(str(state_file), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        with os.fdopen(fd, "r+", encoding="utf-8", closefd=False) as fh:
+            return load_state(fh)
+    finally:
+        os.close(fd)
 
 
 def _reject_state_file_inside_repo(state_file: Path) -> None:
@@ -649,8 +779,11 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         try:
-            with os.fdopen(fd, "r+", encoding="utf-8", closefd=False) as fh:
-                state = load_state(fh)
+            # RQ-1 fix (2026-09-23 re-review): `fd` above is now the
+            # SIDECAR lock's fd, not the data file's -- read the data
+            # file itself through `load_state_from_file`, independent of
+            # the lock.
+            state = load_state_from_file(args.state_file)
 
             # R4 fix: a missing/renamed credential env var used to escape
             # as a raw `KeyError` traceback instead of a fail-closed

@@ -28,6 +28,7 @@ from idp_regression.orchestration.check_versions import (
     CheckVersionsRefused,
     StateFileLocked,
     TickState,
+    _lock_path_for,
     _reject_state_file_inside_repo,
     check_once,
     load_state,
@@ -209,6 +210,37 @@ def test_ceiling_reached_and_no_new_versions_never_share_a_value() -> None:
 # -- UNKNOWN never terminates a walk as ABSENT (D6) --------------------------
 
 
+def test_pending_unknowns_is_capped_rather_than_growing_unbounded() -> None:
+    """"Cheap one" (2026-09-23 re-review): `pending_unknowns` had no cap
+    or ageing -- a persistently-ambiguous endpoint could park the walk
+    behind an ever-growing re-probe list forever. This is a hard cap
+    (`MAX_PENDING_UNKNOWNS`), not true LRU ageing (see the constant's
+    docstring for why ageing is out of scope) -- it just proves growth is
+    bounded and visible on the event."""
+    from idp_regression.orchestration.check_versions import MAX_PENDING_UNKNOWNS
+
+    many_pending = [f"9.{i}.0" for i in range(MAX_PENDING_UNKNOWNS + 50)]
+    state = TickState(known_versions=["1.0.0"], pending_unknowns=many_pending)
+    # Every pending candidate stays UNKNOWN (never resolved) so the tick's
+    # `all_unknowns` set stays at/above the cap.
+    probe = FakeProbe(_controls_ok("1.0.0"), default=ProbeResult.UNKNOWN)
+
+    result = check_once(
+        probe=probe,
+        **_base_kwargs(
+            state=state,
+            known_version=None,
+            max_probes_per_tick=len(many_pending) + 10,
+            patch_lookahead=0,
+            minor_lookahead=0,
+            major_lookahead=0,
+        ),
+    )
+
+    assert len(result.new_state.pending_unknowns) <= MAX_PENDING_UNKNOWNS
+    assert result.event["pending_unknowns_capped"] is True
+
+
 def test_an_unknown_candidate_never_becomes_absent_and_is_recorded() -> None:
     class UnknownOnceProbe:
         last_status_code = None
@@ -248,6 +280,38 @@ def test_a_pending_unknown_is_re_probed_next_tick_before_the_walk_advances() -> 
     assert "1.0.1" in probe.calls
     assert "1.0.1" in result.new_state.known_versions
     assert "1.0.1" not in result.new_state.pending_unknowns
+
+
+def test_a_429_on_the_first_pending_unknown_abandons_the_rest_of_the_tick_rq3() -> None:
+    """RQ-3 (2026-09-23 re-review): `_resolve_unknowns` never inspected
+    `last_status_code` at all before this fix -- a 429 on the FIRST
+    pending unknown re-probed the REST of the pending list, then fell
+    through into the walk's full grid, directly violating ADR-0006
+    §A'.4's unqualified "abandon the remaining probes for this tick"."""
+    state = TickState(known_versions=["1.0.0"], pending_unknowns=["1.0.1", "1.0.2"])
+    # 2 control probes succeed; every call from the 3rd onward is a
+    # 429/UNKNOWN -- so the FIRST pending-unknown probe is already
+    # rate-limited.
+    probe = FakeProbe({**_controls_ok("1.0.0")}, rate_limit_after=2)
+
+    result = check_once(
+        probe=probe,
+        **_base_kwargs(
+            state=state,
+            known_version=None,
+            max_probes_per_tick=10,
+            patch_lookahead=3,
+            minor_lookahead=0,
+            major_lookahead=0,
+        ),
+    )
+
+    # Only the first pending unknown was actually probed -- the second
+    # pending item, and the walk's entire grid, must be abandoned.
+    assert probe.calls[2:] == ["1.0.1"]
+    assert result.event["probed"] == ["1.0.1"]
+    assert result.event["rate_limited"] is True
+    assert "1.0.2" in result.new_state.pending_unknowns
 
 
 # -- indeterminate counter -> detector_degraded (D13) ------------------------
@@ -482,6 +546,45 @@ def test_sweep_is_skipped_entirely_when_the_walk_rate_limited_c2() -> None:
     assert result.event["sweep_probe_count"] == 0
 
 
+def test_a_429_mid_sweep_abandons_the_rest_of_the_sweep_rq3() -> None:
+    """RQ-3 (2026-09-23 re-review): C2's fix only wired the 429 check
+    into the walk -> sweep edge (a walk that rate-limited skips the
+    sweep entirely). The sweep loop itself never inspected
+    `last_status_code` at all -- a 429 on the FIRST sweep probe still let
+    it fire up to `max_probes_per_sweep - 1` MORE probes at an endpoint
+    that had just rate-limited this tick."""
+    anchor = "1.0.0"
+    responses = _controls_ok(anchor)
+    for p in (1, 2, 3):
+        responses[f"1.0.{p}"] = ProbeResult.ABSENT
+    # 2 controls + the walk's own 3 probes (patch_lookahead=3) = 5 calls,
+    # all confirmed ABSENT -- the walk itself never rate-limits. The
+    # sweep's very FIRST real probe is call #6, already past
+    # `rate_limit_after=5`.
+    probe = FakeProbe(responses, rate_limit_after=5, default=ProbeResult.ABSENT)
+
+    result = check_once(
+        probe=probe,
+        **_base_kwargs(
+            max_probes_per_tick=10,
+            patch_lookahead=3,
+            minor_lookahead=0,
+            major_lookahead=0,
+            sweep_every_n_ticks=1,
+            max_probes_per_sweep=50,
+        ),
+    )
+
+    assert result.event["sweep_ran"] is True
+    # sweep_candidates("1.0.0", ...) yields "1.0.0" first (skipped,
+    # already known, charges nothing) then "1.0.1" -- the first REAL
+    # sweep probe, which is already rate-limited. Nothing past it (of
+    # the remaining ~10 sweep candidates within budget) is probed.
+    assert result.event["sweep_probed"] == ["1.0.1"]
+    assert result.event["sweep_rate_limited"] is True
+    assert result.event["rate_limited"] is True
+
+
 def test_sweep_truncation_is_a_visible_signal_r1() -> None:
     """R1 fix: the sweep's truncation used to raise no ceiling signal at
     all -- a sweep covering 4 of 273 candidates was indistinguishable
@@ -579,11 +682,36 @@ def test_a_sweep_found_missed_version_is_still_a_new_version_detected() -> None:
 
 def test_open_state_file_locked_raises_when_already_locked(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
-    fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
+    # RQ-1 (2026-09-23 re-review): the lock lives on the SIDECAR path
+    # (`<state_file>.lock`), never on the data file itself -- locking
+    # `path` directly here must NOT be what blocks a second
+    # `open_state_file_locked(path)`; only a lock on `_lock_path_for(path)`
+    # does.
+    lock_path = _lock_path_for(path)
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     try:
         with pytest.raises(StateFileLocked):
             open_state_file_locked(path)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def test_open_state_file_locked_does_not_conflict_with_a_lock_on_the_data_file_itself(
+    tmp_path: Path,
+) -> None:
+    """The inverse of the test above, and the exact property RQ-1 fixes:
+    the data file's own inode is no longer what the lock guards, so a
+    (pointless, but conceivable) external lock taken on `path` itself
+    must NOT block `open_state_file_locked(path)`."""
+    path = tmp_path / "state.json"
+    fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        lock_fd = open_state_file_locked(path)  # must not raise
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
@@ -598,7 +726,9 @@ def test_main_reports_skipped_locked_and_never_touches_credentials_when_locked(
     monkeypatch.setattr("idp_regression.orchestration.check_versions.load_dotenv", lambda: None)
     state_path = tmp_path / "state.json"
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(state_path), os.O_RDWR | os.O_CREAT, 0o600)
+    # RQ-1: lock the SIDECAR path -- that's what `open_state_file_locked`
+    # actually locks now, not `state_path` itself.
+    fd = os.open(str(_lock_path_for(state_path)), os.O_RDWR | os.O_CREAT, 0o600)
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     try:
         exit_code = main(

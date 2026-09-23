@@ -20,7 +20,12 @@ from typing import Any
 import pytest
 
 from idp_regression.adapter.version_probe import NEGATIVE_CONTROL_VERSION, ProbeResult
-from idp_regression.orchestration.check_versions import TickState
+from idp_regression.orchestration.check_versions import (
+    StateFileLocked,
+    TickState,
+    _lock_path_for,
+    open_state_file_locked,
+)
 from idp_regression.orchestration.watch import DEFAULT_INTERVAL_SECONDS, main, run_watch_loop
 
 
@@ -205,6 +210,30 @@ def test_anchor_vanished_halts_the_loop_loudly_and_returns_nonzero(
     assert len(sleep_fn.calls) == 0  # halted before ever sleeping
 
 
+def test_an_unreachable_positive_control_is_not_misreported_as_anchor_vanished(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """"Cheap one" (2026-09-23 re-review): a positive control that comes
+    back UNKNOWN (a 429, a 5xx, a malformed response) halts as
+    `anchor_vanished` exactly like a genuine ABSENT -- the exit code and
+    the halt are correct either way, since neither is safe to keep
+    walking on -- but the human-facing diagnosis is a different claim.
+    ABSENT means the anchor version itself is gone; UNKNOWN means the API
+    could not be reached cleanly at all. This must not print "ANCHOR
+    VANISHED" for the UNKNOWN case."""
+    probe = FakeProbe({"1.0.0": ProbeResult.UNKNOWN, NEGATIVE_CONTROL_VERSION: ProbeResult.ABSENT})
+    sleep_fn = _stop_after(5)
+
+    exit_code = run_watch_loop(probe=probe, sleep_fn=sleep_fn, **_base_kwargs())
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "WATCHER STOPPED" in out
+    assert "UNREACHABLE" in out
+    assert "ANCHOR VANISHED" not in out
+    assert len(sleep_fn.calls) == 0  # halted before ever sleeping
+
+
 # -- --auto-run: opt-in, bounded, spends quota --------------------------------
 
 
@@ -362,6 +391,51 @@ def test_startup_banner_shows_the_highest_version_numerically_not_lexicographica
     assert "anchor=1.10.0" in banner
 
 
+# -- RQ-1/RQ-2 (2026-09-23 re-review, PIN): the lock must survive a save ----
+
+
+def test_lock_survives_a_state_file_save_mid_loop(tmp_path: Path) -> None:
+    """RQ-2: the two existing R2 tests pass for the wrong reason -- one
+    locks BEFORE `main()` runs (before any save), the other only asserts
+    release after a halt. Neither exercises the claimed property ("held
+    for the entire foreground loop's lifetime").
+
+    `flock` locks the INODE a path resolves to at open() time.
+    `save_state_atomic()`'s `os.replace(tmp, path)` retargets `path` to a
+    BRAND-NEW inode -- a lock taken directly on the data file's own
+    inode is silently orphaned by the very first save. `run_watch_loop`
+    saves every tick, so from tick 2 onward a watcher holding such a lock
+    would run the rest of a potentially days-long loop completely
+    unlocked (RQ-1).
+
+    This test acquires the lock exactly as `watch.main()` does, runs
+    >=1 tick (so `save_state_atomic` actually fires), and THEN attempts a
+    second lock on the same path while the first is still held -- proving
+    the lock still blocks a second instance after a save, not just before
+    one. Before the RQ-1 fix this test is RED (the second lock wrongly
+    succeeds, because `save_state_atomic`'s `os.replace()` already moved
+    the locked inode out from under the first fd)."""
+    state_path = tmp_path / "state.json"
+    probe = FakeProbe(_controls_ok("1.0.0"))
+
+    fd = open_state_file_locked(state_path)
+    try:
+        exit_code = run_watch_loop(
+            probe=probe,
+            sleep_fn=_stop_after(1),
+            state_file=state_path,
+            **_base_kwargs(),
+        )
+        assert exit_code == 0
+        assert state_path.exists(), "save_state_atomic must have fired at least once"
+
+        with pytest.raises(StateFileLocked):
+            open_state_file_locked(state_path)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 # -- R2: the state-file lock is held for the WHOLE loop's lifetime ----------
 
 
@@ -370,7 +444,10 @@ def test_watch_main_refuses_to_start_when_the_state_file_is_already_locked(
 ) -> None:
     state_path = tmp_path / "state.json"
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(state_path), os.O_RDWR | os.O_CREAT, 0o600)
+    # RQ-1: lock the SIDECAR path -- what `open_state_file_locked` (and
+    # therefore `watch.main()`) actually locks now, not `state_path`
+    # itself.
+    fd = os.open(str(_lock_path_for(state_path)), os.O_RDWR | os.O_CREAT, 0o600)
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     try:
         exit_code = main(
@@ -422,8 +499,11 @@ def test_watch_main_releases_the_lock_after_a_halt_outcome(
     assert exit_code == 1  # anchor_vanished halt, before any sleep
 
     # A fresh lock attempt must succeed -- proves main()'s `finally`
-    # actually released it rather than leaking the fd.
-    fd = os.open(str(state_path), os.O_RDWR | os.O_CREAT, 0o600)
+    # actually released it rather than leaking the fd. RQ-1: the lock
+    # lives on the SIDECAR path, so THAT is what must be provably
+    # unlocked, not `state_path` itself (which was never what
+    # `open_state_file_locked` locks after the RQ-1 fix).
+    fd = os.open(str(_lock_path_for(state_path)), os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # must not raise
     finally:
