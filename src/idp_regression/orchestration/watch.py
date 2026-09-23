@@ -34,6 +34,7 @@ extraction quota, unlike the watcher itself.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import logging
 import os
@@ -45,7 +46,11 @@ from pathlib import Path
 from typing import Any
 
 from idp_regression.adapter.transport import sanitize_for_log
-from idp_regression.adapter.version_probe import IDPVersionProbe, MuleSoftVersionProbe
+from idp_regression.adapter.version_probe import (
+    IDPVersionProbe,
+    MuleSoftVersionProbe,
+    parse_semver,
+)
 from idp_regression.orchestration.check_versions import (
     OUTCOME_ANCHOR_VANISHED,
     OUTCOME_CEILING_REACHED,
@@ -56,14 +61,17 @@ from idp_regression.orchestration.check_versions import (
     OUTCOME_NO_NEW_VERSIONS,
     OUTCOME_SKIPPED_LOCKED,
     CheckVersionsRefused,
+    StateFileLocked,
     TickResult,
     TickState,
     _reject_state_file_inside_repo,
     check_once,
     load_state,
+    open_state_file_locked,
     save_state_atomic,
 )
 from idp_regression.orchestration.cli import configure_logging
+from idp_regression.orchestration.dotenv_support import load_dotenv
 from idp_regression.orchestration.facade import DEFAULT_MAX_DOCUMENTS_PER_RUN, run_eval
 from idp_regression.orchestration.log_sanitize import frame_location
 
@@ -288,7 +296,14 @@ def run_watch_loop(
             action_id=action_id,
             dataset_name=dataset_name,
             anchor=(
-                max(state.known_versions, default=None)
+                # Suggestion fix (2026-09-23): plain `max()` over the
+                # version strings is LEXICOGRAPHIC, so "1.9.0" would
+                # display over "1.10.0" -- wrong even though this is
+                # display-only, because it is the one line the sponsor
+                # watching live actually reads. `parse_semver` as the
+                # sort key makes it numeric, matching how the walk/sweep
+                # themselves compare versions.
+                max(state.known_versions, key=lambda v: parse_semver(v) or (-1, -1, -1))
                 if state.known_versions
                 else known_version
             ),
@@ -466,6 +481,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     configure_logging()
+
+    # R4 fix (2026-09-23, reviewer REQUEST CHANGES): this entry point
+    # never called `load_dotenv()` at all -- `cli.py`/`facade.py` do
+    # (INV-05) -- so the documented `python -m ...` invocation only
+    # worked if the operator had pre-sourced `.env` by hand.
+    try:
+        load_dotenv()
+    except Exception as exc:  # noqa: BLE001 - never let a .env load raise raw
+        logger.error("watch: unexpected error loading .env: %s", type(exc).__name__)
+        return 1
+
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -480,74 +506,118 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("watch: --max-runs-per-tick has no effect without --auto-run")
         print("error: --max-runs-per-tick has no effect without --auto-run", file=sys.stderr)
         return 1
+    # Suggestion fix (2026-09-23): 0 or negative used to be accepted
+    # while the banner below announces "--auto-run ENABLED" -- a lie to
+    # the operator, since a tick would then auto-run nothing at all.
+    if args.auto_run and args.max_runs_per_tick is not None and args.max_runs_per_tick < 1:
+        logger.error(
+            "watch: --max-runs-per-tick must be >= 1 (got %d)", args.max_runs_per_tick
+        )
+        print(
+            f"error: --max-runs-per-tick must be >= 1 (got {args.max_runs_per_tick})",
+            file=sys.stderr,
+        )
+        return 1
 
     try:
         _reject_state_file_inside_repo(args.state_file)
-
         args.state_file.parent.mkdir(parents=True, exist_ok=True)
-        if args.state_file.exists() and args.state_file.stat().st_size > 0:
-            with open(args.state_file, encoding="utf-8") as fh:
-                state = load_state(fh)
-        else:
-            state = TickState()
     except CheckVersionsRefused as exc:
         logger.error("watch: %s", sanitize_for_log(str(exc)))
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    if args.auto_run:
-        logger.warning(
-            "watch: --auto-run is ENABLED -- unlike the watcher itself, this "
-            "SPENDS REAL IDP EXTRACTION QUOTA (max %d run(s)/tick).",
-            args.max_runs_per_tick,
+    # R2 fix (2026-09-23, reviewer REQUEST CHANGES): this used to just
+    # `open()` the state file -- no lock at all -- then
+    # `save_state_atomic` every tick for the process's whole life. Two
+    # watchers, or a watcher plus a scheduled `check-versions`, could
+    # interleave and lose `known_versions`; with `--auto-run` a lost
+    # entry is a re-detection AND a duplicate real-quota run. The lock
+    # is now taken once, here, and held for the ENTIRE foreground loop's
+    # lifetime (the same `flock` semantics `check_versions.main()` uses
+    # for its one tick) -- released only when the loop actually ends.
+    try:
+        fd = open_state_file_locked(args.state_file)
+    except StateFileLocked:
+        logger.error(
+            "watch: %s is locked by another running instance -- refusing to start",
+            args.state_file,
         )
         print(
-            f"*** --auto-run ENABLED: up to {args.max_runs_per_tick} run_eval "
-            "invocation(s) per tick -- spends real IDP extraction quota. ***"
+            f"error: {args.state_file} is locked by another running `watch` "
+            "(or `check-versions`) instance -- refusing to start",
+            file=sys.stderr,
         )
+        return 0
 
     try:
-        client_id = os.environ["IDP_CLIENT_ID"].strip()
-        client_secret = os.environ["IDP_CLIENT_SECRET"].strip()
-        region = os.environ["IDP_REGION"].strip()
-    except KeyError as exc:
-        logger.error("watch: missing required environment variable %s", exc)
-        print(f"error: missing required environment variable {exc}", file=sys.stderr)
-        return 1
+        try:
+            with os.fdopen(fd, "r+", encoding="utf-8", closefd=False) as fh:
+                state = load_state(fh)
+        except CheckVersionsRefused as exc:
+            logger.error("watch: %s", sanitize_for_log(str(exc)))
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
 
-    probe = MuleSoftVersionProbe(client_id, client_secret, region)
+        if args.auto_run:
+            logger.warning(
+                "watch: --auto-run is ENABLED -- unlike the watcher itself, this "
+                "SPENDS REAL IDP EXTRACTION QUOTA (max %d run(s)/tick).",
+                args.max_runs_per_tick,
+            )
+            print(
+                f"*** --auto-run ENABLED: up to {args.max_runs_per_tick} run_eval "
+                "invocation(s) per tick -- spends real IDP extraction quota. ***"
+            )
 
-    try:
-        return run_watch_loop(
-            probe=probe,
-            org_id=args.org,
-            action_id=args.action,
-            dataset_name=args.dataset,
-            state=state,
-            known_version=args.known_version,
-            max_probes_per_tick=args.max_probes_per_tick,
-            patch_lookahead=args.patch_lookahead,
-            minor_lookahead=args.minor_lookahead,
-            major_lookahead=args.major_lookahead,
-            sweep_every_n_ticks=args.sweep_every_n_ticks,
-            max_probes_per_sweep=args.max_probes_per_sweep,
-            max_indeterminate_ticks=args.max_indeterminate_ticks,
-            interval_seconds=args.interval_seconds,
-            state_file=args.state_file,
-            auto_run=args.auto_run,
-            max_runs_per_tick=args.max_runs_per_tick or 0,
-            max_documents_per_run=args.max_documents_per_run,
-            json_events=args.json_events,
-        )
-    except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 - defense in depth
-        if isinstance(exc, KeyboardInterrupt):
-            print("\nWatcher stopped (Ctrl-C).")
-            return 0
-        logger.error(
-            "watch: unexpected error: %s at %s", type(exc).__name__, frame_location(exc)
-        )
-        print("error: unexpected error -- see log", file=sys.stderr)
-        return 1
+        # R4 fix: a missing/renamed credential env var is already
+        # guarded here (this is the site the review called "gets this
+        # right") -- kept as-is, now just inside the lock's scope.
+        try:
+            client_id = os.environ["IDP_CLIENT_ID"].strip()
+            client_secret = os.environ["IDP_CLIENT_SECRET"].strip()
+            region = os.environ["IDP_REGION"].strip()
+        except KeyError as exc:
+            logger.error("watch: missing required environment variable %s", exc)
+            print(f"error: missing required environment variable {exc}", file=sys.stderr)
+            return 1
+
+        probe = MuleSoftVersionProbe(client_id, client_secret, region)
+
+        try:
+            return run_watch_loop(
+                probe=probe,
+                org_id=args.org,
+                action_id=args.action,
+                dataset_name=args.dataset,
+                state=state,
+                known_version=args.known_version,
+                max_probes_per_tick=args.max_probes_per_tick,
+                patch_lookahead=args.patch_lookahead,
+                minor_lookahead=args.minor_lookahead,
+                major_lookahead=args.major_lookahead,
+                sweep_every_n_ticks=args.sweep_every_n_ticks,
+                max_probes_per_sweep=args.max_probes_per_sweep,
+                max_indeterminate_ticks=args.max_indeterminate_ticks,
+                interval_seconds=args.interval_seconds,
+                state_file=args.state_file,
+                auto_run=args.auto_run,
+                max_runs_per_tick=args.max_runs_per_tick or 0,
+                max_documents_per_run=args.max_documents_per_run,
+                json_events=args.json_events,
+            )
+        except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 - defense in depth
+            if isinstance(exc, KeyboardInterrupt):
+                print("\nWatcher stopped (Ctrl-C).")
+                return 0
+            logger.error(
+                "watch: unexpected error: %s at %s", type(exc).__name__, frame_location(exc)
+            )
+            print("error: unexpected error -- see log", file=sys.stderr)
+            return 1
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 if __name__ == "__main__":  # pragma: no cover - thin process entry

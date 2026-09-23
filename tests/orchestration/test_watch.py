@@ -9,7 +9,9 @@ exact printed lines, not just on outcome/state."""
 
 from __future__ import annotations
 
+import fcntl
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -339,6 +341,139 @@ def test_main_rejects_a_state_file_inside_the_repo(capsys: pytest.CaptureFixture
 
 def test_default_interval_is_five_minutes() -> None:
     assert DEFAULT_INTERVAL_SECONDS == 300
+
+
+def test_startup_banner_shows_the_highest_version_numerically_not_lexicographically(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Suggestion fix (2026-09-23): plain `max()` over version strings is
+    lexicographic -- "1.9.0" would beat "1.10.0". This is display-only,
+    but it is the one line a non-engineer sponsor is actually watching."""
+    probe = FakeProbe(_controls_ok("1.10.0"))
+    state = TickState(known_versions=["1.2.0", "1.10.0", "1.9.0"])
+
+    run_watch_loop(
+        probe=probe,
+        sleep_fn=_stop_after(1),
+        **{**_base_kwargs(), "state": state, "known_version": None},
+    )
+
+    banner = capsys.readouterr().out.splitlines()[0]
+    assert "anchor=1.10.0" in banner
+
+
+# -- R2: the state-file lock is held for the WHOLE loop's lifetime ----------
+
+
+def test_watch_main_refuses_to_start_when_the_state_file_is_already_locked(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    state_path = tmp_path / "state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(state_path), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        exit_code = main(
+            [
+                "--org", "org1",
+                "--action", "12345678-1234-1234-1234-123456789012",
+                "--dataset", "ds1",
+                "--state-file", str(state_path),
+            ]
+        )
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    assert exit_code == 0
+    err = capsys.readouterr().err
+    assert "locked by another running" in err
+
+
+def test_watch_main_releases_the_lock_after_a_halt_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2: the lock is now held for the loop's whole lifetime, so it is
+    just as important that it is actually RELEASED once the loop ends
+    -- otherwise every watch invocation after the first would falsely
+    report `skipped_locked` forever."""
+    monkeypatch.setenv("IDP_CLIENT_ID", "id")
+    monkeypatch.setenv("IDP_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("IDP_REGION", "us")
+    monkeypatch.setattr("idp_regression.orchestration.watch.load_dotenv", lambda: None)
+    monkeypatch.setattr(
+        "idp_regression.orchestration.watch.MuleSoftVersionProbe",
+        lambda *a, **k: FakeProbe(
+            {"1.0.0": ProbeResult.ABSENT, NEGATIVE_CONTROL_VERSION: ProbeResult.ABSENT}
+        ),
+    )
+    state_path = tmp_path / "state.json"
+
+    exit_code = main(
+        [
+            "--org", "org1",
+            "--action", "12345678-1234-1234-1234-123456789012",
+            "--dataset", "ds1",
+            "--state-file", str(state_path),
+            "--known-version", "1.0.0",
+        ]
+    )
+
+    assert exit_code == 1  # anchor_vanished halt, before any sleep
+
+    # A fresh lock attempt must succeed -- proves main()'s `finally`
+    # actually released it rather than leaking the fd.
+    fd = os.open(str(state_path), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # must not raise
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+# -- R4: `.env` loading, consistent with cli.py / facade.py -----------------
+
+
+def test_watch_main_a_load_dotenv_failure_is_a_controlled_exit_not_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _raise() -> None:
+        raise OSError("simulated unreadable .env")
+
+    monkeypatch.setattr("idp_regression.orchestration.watch.load_dotenv", _raise)
+    state_path = tmp_path / "state.json"
+
+    exit_code = main(
+        [
+            "--org", "org1",
+            "--action", "12345678-1234-1234-1234-123456789012",
+            "--dataset", "ds1",
+            "--state-file", str(state_path),
+        ]
+    )
+
+    assert exit_code == 1
+
+
+# -- Suggestion: --max-runs-per-tick must be >= 1 ----------------------------
+
+
+@pytest.mark.parametrize("bad_value", ["0", "-1"])
+def test_main_rejects_a_non_positive_max_runs_per_tick(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], bad_value: str
+) -> None:
+    exit_code = main(
+        [
+            "--org", "org1",
+            "--action", "12345678-1234-1234-1234-123456789012",
+            "--dataset", "ds1",
+            "--state-file", str(tmp_path / "state.json"),
+            "--auto-run",
+            "--max-runs-per-tick", bad_value,
+        ]
+    )
+    assert exit_code == 1
+    assert "--max-runs-per-tick must be >= 1" in capsys.readouterr().err
 
 
 def test_watch_logger_name_is_stable_under_python_dash_m_invocation(tmp_path: Path) -> None:

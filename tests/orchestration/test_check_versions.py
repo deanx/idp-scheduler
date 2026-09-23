@@ -4,7 +4,9 @@ I/O and the CLI wiring get their own thin tests further down."""
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -24,10 +26,13 @@ from idp_regression.orchestration.check_versions import (
     OUTCOME_REFUSED_UNINITIALISED,
     OUTCOME_REFUSED_UNPARSEABLE_VERSION_SCHEME,
     CheckVersionsRefused,
+    StateFileLocked,
     TickState,
     _reject_state_file_inside_repo,
     check_once,
     load_state,
+    main,
+    open_state_file_locked,
     save_state_atomic,
 )
 
@@ -37,10 +42,16 @@ class FakeProbe:
     version string to a ProbeResult; any version not in the map is
     ABSENT by default (a real vendor would 404 an un-probed version)."""
 
-    def __init__(self, responses: dict[str, ProbeResult], rate_limit_after: int | None = None):
+    def __init__(
+        self,
+        responses: dict[str, ProbeResult],
+        rate_limit_after: int | None = None,
+        default: ProbeResult = ProbeResult.ABSENT,
+    ):
         self.responses = responses
         self.calls: list[str] = []
         self.rate_limit_after = rate_limit_after
+        self.default = default
         self.last_status_code: int | None = None
 
     def probe(self, org_id: str, action_id: str, version: str) -> ProbeResult:
@@ -49,7 +60,7 @@ class FakeProbe:
             self.last_status_code = 429
             return ProbeResult.UNKNOWN
         self.last_status_code = 200
-        return self.responses.get(version, ProbeResult.ABSENT)
+        return self.responses.get(version, self.default)
 
 
 def _base_kwargs(**overrides: object) -> dict[str, Any]:
@@ -390,3 +401,286 @@ def test_run_eval_command_is_literally_runnable() -> None:
     )
     for flag in ("--org", "--action", "--version", "--dataset", "--run"):
         assert flag in completed.stdout, f"{module} --help does not offer {flag}"
+
+
+# -- The periodic sweep (§A'.2) -- driver-level tests (C1 / C2 / R1) ---------
+#
+# Before this pass, the sweep path had NO driver-level tests at all -- only
+# `sweep_candidates` (the pure generator) was exercised, which is how C1 and
+# R1 survived 53 new tests. Every test below drives `check_once` end to end
+# with `sweep_every_n_ticks=1` so the sweep actually runs.
+
+
+def test_sweep_unknowns_fold_into_the_ticks_unknowns_c1_regression_pin() -> None:
+    """C1 REGRESSION PIN (reviewer, 2026-09-23, REQUEST CHANGES on 97f3d13 /
+    49939b2). Before the fix, the sweep loop tested `result` only against
+    `ProbeResult.EXISTS`, so UNKNOWN and ABSENT were indistinguishable --
+    reproduced live with a fake probe (anchor EXISTS, negative control
+    ABSENT, the walk's own candidates confirmed ABSENT, every SWEEP probe
+    UNKNOWN): the tick reported `no_new_versions`, exit 0, with 41 of 50
+    probes UNKNOWN and the sweep's own probes entirely absent from the
+    event.
+
+    A tick whose sweep returns only UNKNOWN must NEVER produce
+    `no_new_versions`."""
+    anchor = "1.0.0"
+    responses = _controls_ok(anchor)
+    # The walk's own three candidates are confirmed ABSENT -- the walk
+    # alone, with no sweep, would legitimately report no_new_versions.
+    for p in (1, 2, 3):
+        responses[f"1.0.{p}"] = ProbeResult.ABSENT
+    # Everything else (every sweep candidate) is UNKNOWN.
+    probe = FakeProbe(responses, default=ProbeResult.UNKNOWN)
+
+    result = check_once(
+        probe=probe,
+        **_base_kwargs(
+            max_probes_per_tick=10,
+            patch_lookahead=3,
+            minor_lookahead=0,
+            major_lookahead=0,
+            sweep_every_n_ticks=1,
+            max_probes_per_sweep=50,
+        ),
+    )
+
+    assert result.outcome != OUTCOME_NO_NEW_VERSIONS, (
+        "an all-UNKNOWN sweep must never be read as no_new_versions (C1)"
+    )
+    assert result.outcome == OUTCOME_INDETERMINATE
+    assert result.event["sweep_ran"] is True
+    assert len(result.event["sweep_unknowns"]) > 0
+    # every sweep UNKNOWN must be re-probed next tick, exactly like a walk
+    # UNKNOWN already was before this fix
+    assert set(result.event["sweep_unknowns"]) <= set(result.new_state.pending_unknowns)
+
+
+def test_sweep_is_skipped_entirely_when_the_walk_rate_limited_c2() -> None:
+    """C2 fix: `walk.rate_limited` was declared, set by `_run_walk`, and
+    returned on `WalkOutcome` -- but read nowhere. ADR-0006 §A'.4 says a
+    429 means UNKNOWN and *abandon the tick's remaining probes*; letting
+    the sweep fire anyway issues up to `--max-probes-per-sweep` MORE
+    probes at the endpoint that just rate-limited this tick."""
+    # 2 control probes succeed, everything after is a 429/UNKNOWN.
+    probe = FakeProbe({**_controls_ok("1.0.0")}, rate_limit_after=2)
+
+    result = check_once(
+        probe=probe,
+        **_base_kwargs(
+            max_probes_per_tick=10,
+            patch_lookahead=3,
+            minor_lookahead=0,
+            major_lookahead=0,
+            sweep_every_n_ticks=1,
+            max_probes_per_sweep=50,
+        ),
+    )
+
+    assert result.event["rate_limited"] is True
+    assert result.event["sweep_ran"] is False
+    assert result.event["sweep_probed"] == []
+    assert result.event["sweep_probe_count"] == 0
+
+
+def test_sweep_truncation_is_a_visible_signal_r1() -> None:
+    """R1 fix: the sweep's truncation used to raise no ceiling signal at
+    all -- a sweep covering 4 of 273 candidates was indistinguishable
+    from one covering all of them. `sweep_truncated` must be set, and a
+    truncated sweep must never let the tick land on `no_new_versions`."""
+    anchor = "1.0.0"
+    responses = _controls_ok(anchor)
+    for p in (1, 2, 3):
+        responses[f"1.0.{p}"] = ProbeResult.ABSENT
+    probe = FakeProbe(responses, default=ProbeResult.ABSENT)
+
+    result = check_once(
+        probe=probe,
+        **_base_kwargs(
+            max_probes_per_tick=10,
+            patch_lookahead=3,
+            minor_lookahead=0,
+            major_lookahead=0,
+            sweep_every_n_ticks=1,
+            max_probes_per_sweep=2,  # deliberately tiny -- forces truncation
+        ),
+    )
+
+    assert result.event["sweep_ran"] is True
+    assert result.event["sweep_truncated"] is True
+    assert result.outcome == OUTCOME_CEILING_REACHED
+    assert result.outcome != OUTCOME_NO_NEW_VERSIONS
+
+
+def test_sweep_budget_is_charged_only_for_probes_actually_issued_r1() -> None:
+    """R1 fix (the second bug in the same paragraph): the budget counter
+    used to increment BEFORE the `continue` that skips an already-known
+    candidate -- so effective sweep coverage silently shrank as
+    `known_versions` grew. The anchor itself ("1.0.0") is always a sweep
+    candidate and always already `known`; it must not consume any of the
+    2-probe budget below."""
+    anchor = "1.0.0"
+    responses = _controls_ok(anchor)
+    for p in (1, 2, 3):
+        responses[f"1.0.{p}"] = ProbeResult.ABSENT
+    probe = FakeProbe(responses, default=ProbeResult.ABSENT)
+
+    result = check_once(
+        probe=probe,
+        **_base_kwargs(
+            max_probes_per_tick=10,
+            patch_lookahead=3,
+            minor_lookahead=0,
+            major_lookahead=0,
+            sweep_every_n_ticks=1,
+            max_probes_per_sweep=2,
+        ),
+    )
+
+    # sweep_candidates("1.0.0", minor_ceiling=0, patch_ceiling=12, ...)
+    # yields "1.0.0" first (skipped, already `known`, charges nothing),
+    # then "1.0.1", "1.0.2" (2 real probes -- budget exhausted), then
+    # truncates before "1.0.3".
+    assert result.event["sweep_probed"] == ["1.0.1", "1.0.2"]
+    assert result.event["sweep_probe_count"] == 2
+    assert result.event["total_probe_count"] == result.event["probe_count"] + 2
+
+
+def test_a_sweep_found_missed_version_is_still_a_new_version_detected() -> None:
+    """The sweep's whole reason to exist: a version more than
+    `--minor-lookahead` minors ahead, whose own `.0` was never published
+    (so the walk's minor axis can't reach it), is still found."""
+    anchor = "1.0.0"
+    responses = _controls_ok(anchor)
+    responses["1.5.0"] = ProbeResult.EXISTS
+    probe = FakeProbe(responses, default=ProbeResult.ABSENT)
+
+    result = check_once(
+        probe=probe,
+        **_base_kwargs(
+            max_probes_per_tick=10,
+            patch_lookahead=0,
+            minor_lookahead=2,
+            major_lookahead=0,
+            sweep_every_n_ticks=1,
+            max_probes_per_sweep=50,
+        ),
+    )
+    # walk's own minor-axis lookahead (2 -> "1.1.0", "1.2.0") cannot reach
+    # "1.5.0"; the sweep's ceiling (minor_lookahead * 4 = 8, i.e. up to
+    # "1.8.0") does -- this is the sweep's whole reason to exist.
+
+    assert result.outcome == OUTCOME_NEW_VERSION_DETECTED
+    assert "1.5.0" in result.new_state.known_versions
+    assert result.event["sweep_found_missed_version"] == ["1.5.0"]
+
+
+# -- R2: the state-file lock (single-tick, shared by watch.main()) ----------
+
+
+def test_open_state_file_locked_raises_when_already_locked(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        with pytest.raises(StateFileLocked):
+            open_state_file_locked(path)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def test_main_reports_skipped_locked_and_never_touches_credentials_when_locked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("IDP_CLIENT_ID", raising=False)
+    monkeypatch.delenv("IDP_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("IDP_REGION", raising=False)
+    monkeypatch.setattr("idp_regression.orchestration.check_versions.load_dotenv", lambda: None)
+    state_path = tmp_path / "state.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(state_path), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        exit_code = main(
+            [
+                "--org", "org1",
+                "--action", "action1",
+                "--dataset", "ds1",
+                "--state-file", str(state_path),
+                "--max-probes-per-tick", "5",
+                "--max-probes-per-sweep", "5",
+                "--patch-lookahead", "3",
+                "--minor-lookahead", "0",
+                "--major-lookahead", "0",
+                "--sweep-every-n-ticks", "0",
+                "--max-indeterminate-ticks", "3",
+                "--known-version", "1.0.0",
+            ]
+        )
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    # skipped_locked is returned BEFORE any credential is read -- proven by
+    # not raising despite every IDP_* var being unset above.
+    assert exit_code == 0
+
+
+# -- R4: a missing credential is a controlled failure, not a raw traceback --
+
+
+def test_main_missing_credential_env_var_is_a_controlled_failure_not_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("IDP_CLIENT_ID", raising=False)
+    monkeypatch.delenv("IDP_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("IDP_REGION", raising=False)
+    # Isolate this test from whatever real `.env` the checkout has.
+    monkeypatch.setattr("idp_regression.orchestration.check_versions.load_dotenv", lambda: None)
+    state_path = tmp_path / "state.json"
+
+    exit_code = main(
+        [
+            "--org", "org1",
+            "--action", "action1",
+            "--dataset", "ds1",
+            "--state-file", str(state_path),
+            "--max-probes-per-tick", "5",
+            "--max-probes-per-sweep", "5",
+            "--patch-lookahead", "3",
+            "--minor-lookahead", "0",
+            "--major-lookahead", "0",
+            "--sweep-every-n-ticks", "0",
+            "--max-indeterminate-ticks", "3",
+            "--known-version", "1.0.0",
+        ]
+    )
+
+    assert exit_code == 1  # controlled -- no raised KeyError escaped main()
+
+
+def test_main_a_load_dotenv_failure_is_a_controlled_exit_not_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _raise() -> None:
+        raise OSError("simulated unreadable .env")
+
+    monkeypatch.setattr("idp_regression.orchestration.check_versions.load_dotenv", _raise)
+    state_path = tmp_path / "state.json"
+
+    exit_code = main(
+        [
+            "--org", "org1",
+            "--action", "action1",
+            "--dataset", "ds1",
+            "--state-file", str(state_path),
+            "--max-probes-per-tick", "5",
+            "--max-probes-per-sweep", "5",
+            "--patch-lookahead", "3",
+            "--minor-lookahead", "0",
+            "--major-lookahead", "0",
+            "--sweep-every-n-ticks", "0",
+            "--max-indeterminate-ticks", "3",
+        ]
+    )
+
+    assert exit_code == 1

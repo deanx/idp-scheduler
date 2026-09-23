@@ -29,11 +29,28 @@ def test_probe_exists_on_the_pinned_400_detail(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_probe_absent_on_the_pinned_404_detail(monkeypatch: pytest.MonkeyPatch) -> None:
+    # R3 fix (2026-09-23): a 404 ABSENT verdict now additionally requires
+    # the echoed action id/version to match what THIS probe call sent --
+    # so the fixture's detail must echo the same "action"/"9.9.9" the
+    # call below actually probes.
     p = _probe(
         monkeypatch,
-        (404, {"detail": "Document Action Id: abc and version 9.9.9 not found"}),
+        (404, {"detail": "Document Action Id: action and version 9.9.9 not found"}),
     )
     assert p.probe("org", "action", "9.9.9") is ProbeResult.ABSENT
+
+
+def test_probe_unknown_when_the_404_echoes_a_different_action_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R3 regression pin: the wrong-org/wrong-action case (A9) -- a 404
+    matching the pinned SHAPE but naming an action id this probe call did
+    NOT send must classify UNKNOWN, never ABSENT."""
+    p = _probe(
+        monkeypatch,
+        (404, {"detail": "Document Action Id: some-other-action and version 9.9.9 not found"}),
+    )
+    assert p.probe("org", "action", "9.9.9") is ProbeResult.UNKNOWN
 
 
 def test_probe_unknown_on_401(monkeypatch: pytest.MonkeyPatch) -> None:

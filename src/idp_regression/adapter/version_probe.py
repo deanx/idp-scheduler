@@ -63,20 +63,50 @@ class ProbeResult(StrEnum):
 # (org ef1232be-0e85-43e7-a7b2-927d32eb6d38, action
 # 078ca317-d3a2-4979-8386-7daf4453ea3e), zero extraction quota spent.
 _EXISTS_DETAIL = "Invalid query parameter 'file'"
-_ABSENT_DETAIL_PATTERN = re.compile(r"^Document Action Id: .+ and version .+ not found$")
+
+# R3 fix (2026-09-23, reviewer REQUEST CHANGES): named capture groups so
+# the echoed action id / version can be BOUND to the ones this probe
+# actually sent, not merely shape-matched. Un-bound, this pattern reads
+# a 404 naming a DIFFERENT action/version (the A9 wrong-org/wrong-action
+# case) as ABSENT — ADR-0006 §A'.4's own table assigns that case to
+# UNKNOWN ("could be a wrong action_id/org_id"). Mitigated, not caused,
+# by the positive control usually halting first — but "usually" is not
+# the same as "always": a positive control against a live version could
+# still land on a mid-flight org/credential swap that this classifier
+# alone would otherwise misread. **SR-1 clause (3):** there is no live
+# capture of the wrong-org 404 shape — the mismatch branch below is
+# unverified against a live response and is recorded as such in
+# docs/adr/0006, not backed by an invented fixture.
+_ABSENT_DETAIL_PATTERN = re.compile(
+    r"^Document Action Id: (?P<action_id>\S+) and version (?P<version>\S+) not found$"
+)
 
 
-def classify_probe_response(status_code: int, detail: object) -> ProbeResult:
+def classify_probe_response(
+    status_code: int, detail: object, *, action_id: str, version: str
+) -> ProbeResult:
     """Pure. Discriminates on the response DETAIL, never the status code
     alone (ADR-0006 §A'.4) — a 400/404 with any other detail, a 401/403,
     a 429, a 5xx, or anything malformed all fall through to the default
     branch, ``UNKNOWN``. **This default branch is the whole safety
     argument (D6): an ambiguous response read as ``ABSENT`` is the
-    fail-open this design exists to prevent.**"""
+    fail-open this design exists to prevent.**
+
+    ``action_id``/``version`` are the ones THIS probe call sent — a 404
+    ABSENT verdict additionally requires the response body to echo back
+    those same values (R3): a 404 naming a different action or version
+    is a wrong-org/wrong-action signal, not a confirmed absence, and
+    classifies as ``UNKNOWN``."""
     if status_code == 400 and detail == _EXISTS_DETAIL:
         return ProbeResult.EXISTS
-    if status_code == 404 and isinstance(detail, str) and _ABSENT_DETAIL_PATTERN.match(detail):
-        return ProbeResult.ABSENT
+    if status_code == 404 and isinstance(detail, str):
+        match = _ABSENT_DETAIL_PATTERN.match(detail)
+        if (
+            match is not None
+            and match.group("action_id") == action_id
+            and match.group("version") == version
+        ):
+            return ProbeResult.ABSENT
     return ProbeResult.UNKNOWN
 
 
@@ -143,7 +173,7 @@ class MuleSoftVersionProbe:
                 status,
             )
         detail = body.get("detail") if isinstance(body, dict) else None
-        return classify_probe_response(status, detail)
+        return classify_probe_response(status, detail, action_id=action_id, version=version)
 
 
 # -- Candidate generation (ADR-0006 §A'.2) -----------------------------------

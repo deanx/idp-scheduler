@@ -42,6 +42,7 @@ from idp_regression.adapter.version_probe import (
     walk_candidates,
 )
 from idp_regression.orchestration.cli import configure_logging
+from idp_regression.orchestration.dotenv_support import load_dotenv
 
 #: NOT `logging.getLogger(__name__)` -- the identical bug fixed in
 #: `cli.py` 2026-09-23 (`318c9ff`): under `python -m
@@ -357,24 +358,56 @@ def check_once(
         major_lookahead=major_lookahead,
     )
 
+    # -- Periodic wide sweep (§A'.2) -- the systematic recovery from the
+    # walk's named blind spot. C1 fix (2026-09-23, reviewer PIN): every
+    # UNKNOWN this loop sees MUST fold into the tick's unknowns, exactly
+    # like the walk's own UNKNOWNs -- a sweep that came back ambiguous is
+    # not evidence of "no new version", it is evidence of nothing, and
+    # reading it as the former is the exact fail-open D6 exists to
+    # prevent (`classify_probe_response`'s UNKNOWN default branch is
+    # pointless if a caller two frames up silently drops the value).
+    # C2 fix: a 429 during the walk means "abandon the rest of this
+    # tick's probes" (§A'.4) -- the sweep is more of this tick's probes,
+    # so it must not run when the walk already rate-limited.
+    # R1 fix: the sweep's own candidates/probes/truncation are now
+    # tracked separately (`sweep_probed`, `sweep_unknowns`,
+    # `sweep_truncated`) so a partial sweep is never indistinguishable
+    # from a complete one, and the budget is charged only for probes
+    # actually issued -- charging it for a `continue`d already-known
+    # candidate silently shrank effective coverage as `known_versions`
+    # grew.
     sweep_missed: list[str] = []
-    ran_sweep = sweep_every_n_ticks > 0 and tick_count % sweep_every_n_ticks == 0
+    sweep_probed: list[str] = []
+    sweep_unknowns: list[str] = []
+    sweep_truncated = False
+    ran_sweep = (
+        sweep_every_n_ticks > 0
+        and tick_count % sweep_every_n_ticks == 0
+        and not walk.rate_limited
+    )
     if ran_sweep:
-        sweep_probed = 0
+        sweep_probes_used = 0
         for candidate in sweep_candidates(
             walk.final_anchor,
             sweep_minor_ceiling=minor_lookahead * 4,
             sweep_major_ceiling=major_lookahead * 4,
             sweep_patch_ceiling=patch_lookahead * 4,
         ):
-            if sweep_probed >= max_probes_per_sweep:
-                break
-            sweep_probed += 1
             if candidate in walk.hits or candidate in known:
                 continue
+            if sweep_probes_used >= max_probes_per_sweep:
+                sweep_truncated = True
+                break
+            sweep_probes_used += 1
+            sweep_probed.append(candidate)
             result = probe.probe(org_id, action_id, candidate)
             if result is ProbeResult.EXISTS:
                 sweep_missed.append(candidate)
+            elif result is ProbeResult.UNKNOWN:
+                sweep_unknowns.append(candidate)
+            # ABSENT: resolved, dropped -- confirmed not to exist.
+
+    all_unknowns = sorted(set(walk.unknowns) | set(sweep_unknowns))
 
     new_known = known | set(walk.hits) | set(sweep_missed)
     new_versions = sorted(set(walk.hits) | set(sweep_missed))
@@ -387,9 +420,9 @@ def check_once(
 
     if new_versions:
         outcome = OUTCOME_NEW_VERSION_DETECTED
-    elif walk.ceiling_reached:
+    elif walk.ceiling_reached or sweep_truncated:
         outcome = OUTCOME_CEILING_REACHED
-    elif walk.unknowns:
+    elif all_unknowns:
         outcome = OUTCOME_INDETERMINATE
     else:
         outcome = OUTCOME_NO_NEW_VERSIONS
@@ -411,7 +444,7 @@ def check_once(
     new_state = TickState(
         schema_version=SCHEMA_VERSION,
         known_versions=sorted(new_known),
-        pending_unknowns=sorted(walk.unknowns),
+        pending_unknowns=all_unknowns,
         tick_count=tick_count,
         ticks_since_last_detection=ticks_since_last_detection,
         anchor_changed_at_epoch=anchor_changed_at_epoch,
@@ -427,12 +460,18 @@ def check_once(
             "absent_count": len(walk.probed) - len(walk.hits) - len(walk.unknowns),
             "unknowns": walk.unknowns,
             "ceiling_reached": walk.ceiling_reached,
+            "rate_limited": walk.rate_limited,
             "probe_count": walk.probes_used,
+            "total_probe_count": walk.probes_used + len(sweep_probed),
             "ticks_since_last_detection": ticks_since_last_detection,
             "days_since_anchor_changed": days_since_anchor_changed,
             "positive_control": str(positive_control),
             "negative_control": str(negative_control),
             "sweep_ran": ran_sweep,
+            "sweep_probed": sweep_probed,
+            "sweep_probe_count": len(sweep_probed),
+            "sweep_unknowns": sweep_unknowns,
+            "sweep_truncated": sweep_truncated,
             "sweep_found_missed_version": sweep_missed or None,
         }
     )
@@ -469,6 +508,37 @@ def _base_event(
 
 
 # -- State-file I/O (tier 2, §A'.6) ------------------------------------------
+
+
+class StateFileLocked(Exception):
+    """Another process already holds the state file's advisory lock
+    (R2, 2026-09-23) — the caller must treat this as `skipped_locked`,
+    never retry-block, never proceed unlocked."""
+
+    def __init__(self, state_file: str) -> None:
+        super().__init__(f"state file {state_file} is locked by another instance")
+
+
+def open_state_file_locked(state_file: Path) -> int:
+    """Opens (creating if absent) and takes a non-blocking exclusive
+    `flock` on `state_file`, returning the raw fd. Raises
+    `StateFileLocked` (fd already closed) if another process holds it.
+
+    Shared by `check_versions.main()` (one tick, lock held for that one
+    tick) and `watch.main()` (lock held for the WHOLE foreground loop's
+    lifetime, R2 — the watcher used to only `open()` the file and never
+    lock it at all, so two watchers, or a watcher plus a scheduled
+    `check-versions`, could interleave writes and lose `known_versions`,
+    which with `--auto-run` is a re-detection and a duplicate real-quota
+    run). The caller owns the fd and must eventually
+    `fcntl.flock(fd, fcntl.LOCK_UN)` then `os.close(fd)`."""
+    fd = os.open(str(state_file), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        raise StateFileLocked(str(state_file)) from None
+    return fd
 
 
 def _reject_state_file_inside_repo(state_file: Path) -> None:
@@ -550,30 +620,48 @@ def main(argv: list[str] | None = None) -> int:
     # `cli.py` and `watch.py`.
     configure_logging()
 
+    # R4 fix (2026-09-23, reviewer REQUEST CHANGES): this entry point
+    # never called `load_dotenv()` at all, unlike `cli.py`/`facade.py`
+    # (INV-05) -- so the documented `python -m ...` invocation only
+    # worked if the operator had pre-sourced `.env` by hand.
+    try:
+        load_dotenv()
+    except Exception as exc:  # noqa: BLE001 - never let a .env load raise raw
+        logger.error(
+            "check-versions: unexpected error loading .env: %s", type(exc).__name__
+        )
+        return 1
+
     try:
         _reject_state_file_inside_repo(args.state_file)
 
         args.state_file.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(args.state_file), os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                _emit(
-                    {
-                        "event": "check_tick",
-                        "outcome": OUTCOME_SKIPPED_LOCKED,
-                        "org_id": args.org,
-                        "action_id": args.action,
-                    }
-                )
-                return 0
+            fd = open_state_file_locked(args.state_file)
+        except StateFileLocked:
+            _emit(
+                {
+                    "event": "check_tick",
+                    "outcome": OUTCOME_SKIPPED_LOCKED,
+                    "org_id": args.org,
+                    "action_id": args.action,
+                }
+            )
+            return 0
+        try:
             with os.fdopen(fd, "r+", encoding="utf-8", closefd=False) as fh:
                 state = load_state(fh)
 
-            client_id = os.environ["IDP_CLIENT_ID"].strip()
-            client_secret = os.environ["IDP_CLIENT_SECRET"].strip()
-            region = os.environ["IDP_REGION"].strip()
+            # R4 fix: a missing/renamed credential env var used to escape
+            # as a raw `KeyError` traceback instead of a fail-closed
+            # outcome + exit 1 (watch.py already got this right).
+            try:
+                client_id = os.environ["IDP_CLIENT_ID"].strip()
+                client_secret = os.environ["IDP_CLIENT_SECRET"].strip()
+                region = os.environ["IDP_REGION"].strip()
+            except KeyError as exc:
+                logger.error("check-versions: missing required environment variable %s", exc)
+                return 1
             idp_probe = MuleSoftVersionProbe(client_id, client_secret, region)
 
             result = check_once(

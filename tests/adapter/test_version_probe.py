@@ -23,62 +23,140 @@ with open("tests/fixtures/live/version_probe_absent.raw.json") as _fh:
 # -- classify_probe_response: table-driven over ADR-0006 §A'.4 --------------
 
 
+#: The (action_id, version) baked into the committed live captures
+#: (see the docstring above `_ABSENT_DETAIL_PATTERN` in version_probe.py).
+_LIVE_ACTION_ID = "078ca317-d3a2-4979-8386-7daf4453ea3e"
+_LIVE_VERSION = "9.9.9"
+
+
 def test_classifies_the_captured_live_exists_response_as_exists() -> None:
     # SR-1/CT-06: pinned against a captured LIVE response, not a
     # hand-authored fixture.
     result = classify_probe_response(
-        LIVE_EXISTS_CAPTURE["status"], LIVE_EXISTS_CAPTURE["detail"]
+        LIVE_EXISTS_CAPTURE["status"],
+        LIVE_EXISTS_CAPTURE["detail"],
+        action_id=_LIVE_ACTION_ID,
+        version=_LIVE_VERSION,
     )
     assert result is ProbeResult.EXISTS
 
 
 def test_classifies_the_captured_live_absent_response_as_absent() -> None:
     result = classify_probe_response(
-        LIVE_ABSENT_CAPTURE["status"], LIVE_ABSENT_CAPTURE["detail"]
+        LIVE_ABSENT_CAPTURE["status"],
+        LIVE_ABSENT_CAPTURE["detail"],
+        action_id=_LIVE_ACTION_ID,
+        version=_LIVE_VERSION,
     )
     assert result is ProbeResult.ABSENT
 
 
 def test_400_with_a_different_detail_is_unknown_not_exists() -> None:
-    assert classify_probe_response(400, "Malformed or invalid request body") is (
-        ProbeResult.UNKNOWN
+    assert (
+        classify_probe_response(
+            400,
+            "Malformed or invalid request body",
+            action_id=_LIVE_ACTION_ID,
+            version=_LIVE_VERSION,
+        )
+        is ProbeResult.UNKNOWN
     )
 
 
 def test_404_with_a_different_detail_is_unknown_not_absent() -> None:
     # The A9 wrong-org case named explicitly in the ADR: a 404 whose
     # detail doesn't match the pinned shape must never read as ABSENT.
-    assert classify_probe_response(404, "Not Found") is ProbeResult.UNKNOWN
+    assert (
+        classify_probe_response(
+            404, "Not Found", action_id=_LIVE_ACTION_ID, version=_LIVE_VERSION
+        )
+        is ProbeResult.UNKNOWN
+    )
+
+
+def test_404_naming_a_different_action_id_is_unknown_not_absent() -> None:
+    # R3 pin: the wrong-org/wrong-action case (A9) -- a 404 that matches
+    # the pinned SHAPE but echoes an action id THIS PROBE did not send
+    # must never read as ABSENT.
+    result = classify_probe_response(
+        LIVE_ABSENT_CAPTURE["status"],
+        LIVE_ABSENT_CAPTURE["detail"],
+        action_id="ffffffff-0000-0000-0000-000000000000",
+        version=_LIVE_VERSION,
+    )
+    assert result is ProbeResult.UNKNOWN
+
+
+def test_404_naming_a_different_version_is_unknown_not_absent() -> None:
+    # R3 pin, the version half of the same echo check.
+    result = classify_probe_response(
+        LIVE_ABSENT_CAPTURE["status"],
+        LIVE_ABSENT_CAPTURE["detail"],
+        action_id=_LIVE_ACTION_ID,
+        version="1.2.3",
+    )
+    assert result is ProbeResult.UNKNOWN
 
 
 def test_401_is_unknown() -> None:
-    assert classify_probe_response(401, None) is ProbeResult.UNKNOWN
+    assert (
+        classify_probe_response(401, None, action_id=_LIVE_ACTION_ID, version=_LIVE_VERSION)
+        is ProbeResult.UNKNOWN
+    )
 
 
 def test_403_is_unknown() -> None:
-    assert classify_probe_response(403, None) is ProbeResult.UNKNOWN
+    assert (
+        classify_probe_response(403, None, action_id=_LIVE_ACTION_ID, version=_LIVE_VERSION)
+        is ProbeResult.UNKNOWN
+    )
 
 
 def test_429_is_unknown() -> None:
-    assert classify_probe_response(429, None) is ProbeResult.UNKNOWN
+    assert (
+        classify_probe_response(429, None, action_id=_LIVE_ACTION_ID, version=_LIVE_VERSION)
+        is ProbeResult.UNKNOWN
+    )
 
 
 def test_5xx_is_unknown() -> None:
-    assert classify_probe_response(500, None) is ProbeResult.UNKNOWN
-    assert classify_probe_response(503, None) is ProbeResult.UNKNOWN
+    assert (
+        classify_probe_response(500, None, action_id=_LIVE_ACTION_ID, version=_LIVE_VERSION)
+        is ProbeResult.UNKNOWN
+    )
+    assert (
+        classify_probe_response(503, None, action_id=_LIVE_ACTION_ID, version=_LIVE_VERSION)
+        is ProbeResult.UNKNOWN
+    )
 
 
 def test_non_string_detail_is_unknown_never_raises() -> None:
-    assert classify_probe_response(400, None) is ProbeResult.UNKNOWN
-    assert classify_probe_response(404, 12345) is ProbeResult.UNKNOWN
-    assert classify_probe_response(404, {"nested": "object"}) is ProbeResult.UNKNOWN
+    assert (
+        classify_probe_response(400, None, action_id=_LIVE_ACTION_ID, version=_LIVE_VERSION)
+        is ProbeResult.UNKNOWN
+    )
+    assert (
+        classify_probe_response(404, 12345, action_id=_LIVE_ACTION_ID, version=_LIVE_VERSION)
+        is ProbeResult.UNKNOWN
+    )
+    assert (
+        classify_probe_response(
+            404, {"nested": "object"}, action_id=_LIVE_ACTION_ID, version=_LIVE_VERSION
+        )
+        is ProbeResult.UNKNOWN
+    )
 
 
 def test_the_default_branch_is_unknown_mutation_pin() -> None:
     """Named per D6: mutation-verified that flipping the default branch to
     ABSENT turns this test RED. A completely unrecognised status/detail
     combination must never resolve to ABSENT."""
-    assert classify_probe_response(999, "anything at all") is ProbeResult.UNKNOWN
+    assert (
+        classify_probe_response(
+            999, "anything at all", action_id=_LIVE_ACTION_ID, version=_LIVE_VERSION
+        )
+        is ProbeResult.UNKNOWN
+    )
 
 
 # -- walk_candidates: the anchored semver walk shape (§A'.2) -----------------
