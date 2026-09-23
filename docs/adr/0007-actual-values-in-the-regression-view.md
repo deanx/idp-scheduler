@@ -1,6 +1,14 @@
 # ADR-0007: Making "what did it extract instead?" answerable in the regression view
 
-**Status:** **Proposed — awaiting user decision.** Nothing here is implemented, and nothing here is a change to `## Domain`, DEBT-18 or any DoD. **DEBT-18 option B stands until the user says otherwise.**
+**Status:** ✅ **ACCEPTED 2026-09-23 — Option E (local run artifact; fingerprint deferred), by user decision.**
+
+> **The decision, and what it settles.** The user chose **Option E**: the full verdict map (expected, actual, confidence, verdict) is written to a **local, gitignored per-run artifact**, and **the platform stays value-free**. **DEBT-18 option B is UNCHANGED and remains in force** — this ADR does not amend it, and `## Domain`, ADR-0005's span allowlist, INV-01, CT-02/CT-03 and DATA-MODEL-01 §4 all stand as written. Options **B** and **C** were considered and **rejected**; they would have reversed a user decision and were additionally conditional on `/signoff` **B-1/B-2** closing first (§4).
+>
+> **Option D's fingerprint is DEFERRED, not adopted.** Option E includes it only "if and when the user wants cross-run change detection". It is **not** in scope for the first implementation: nothing goes into the `output` map as part of this decision. Re-open it together with ADR-0006's deferred per-field-confidence question — they are the same class of decision and should be put to the user once, not twice.
+>
+> **What implementation owes (for Dunga to card; no DoD is edited here).** An orchestration story: the artifact writer; the path and retention/deletion policy; a `.gitignore` rule; and an **INV-01-style leak test proving the artifact path can never enter the repo**. The §2 Option A cost analysis is binding, not advisory — in particular, **a CI-run artifact lands on the runner, not the reviewer's laptop**, and publishing it as a CI build artifact would make it readable by the whole org, which is a *worse* disclosure surface than the self-hosted Langfuse it was meant to avoid. **Publishing the artifact from CI is explicitly out of scope and must not be done casually.**
+>
+> **The honest residual, stated once.** Option E does not remove the ergonomic complaint that prompted this ADR — it answers "what did it extract instead" in a second window, correlated by hand, and it answers it only for whoever ran the regression. For the **CI gate persona** it answers nothing until someone opens the runner's artifact. That was accepted knowingly in exchange for keeping extracted financial values off a platform instance that currently runs on a published encryption key and a default database password.
 **Date:** 2026-09-22
 **Context (use case):** UC-01; ADR-0006 step 10 (Langfuse is the scoreboard / regression view), §Step 8 "two honest limits"
 **Evidence:** Langfuse OSS **4.38.0** source read at `../langfuse` (`web/package.json` = 4.38.0, commit `6e9f8eb`) — the same version running locally; `docs/spikes/SPIKE-2026-09-19-langfuse-form-mode.md`; ADR-0005 #9 + its span-attribute allowlist; `docs/qa/SIGNOFF-2026-09-22.md` B-1/B-2.
