@@ -23,8 +23,25 @@ If Langfuse is down: `docker compose -f ../langfuse/docker-compose.yml up -d`.
 
 ### 0.2 Check `.env`
 ```bash
-grep -E '^(IDP_ORG_ID|IDP_ACTION_ID|IDP_REGION|GOLDEN_DATASET_NAME|LANGFUSE_HOST)=' .env
+grep -E '^(IDP_DOCUMENT_DIR|IDP_REGION|LANGFUSE_HOST)=' .env
 ls -l .env      # must be -rw------- ; if not: chmod 600 .env
+```
+
+⚠️ **`IDP_DOCUMENT_DIR` must point at the folder holding the PDFs you are testing.** For this
+pack that is `./testpack`, not the default `./id_seeds`:
+
+```bash
+IDP_DOCUMENT_DIR=./testpack
+```
+
+Get this wrong and the run aborts with **`hard_failure … "IDP submit call failed or timed out"`** —
+a message about the network for what is really a missing file. `_resolve_document_path` performs no
+existence check, so a path that does not exist is resolved happily and dies at submit wearing the
+wrong label. Confirm before you run:
+
+```bash
+set -a; source .env; set +a
+ls "$IDP_DOCUMENT_DIR"/inv-00*.pdf | wc -l     # expect 5
 ```
 These are **wrapper conveniences, not app configuration** — nothing under `src/` reads them (see
 1.2). What matters is the value you pass as `--org`: it must be the **business group that owns the
@@ -195,10 +212,10 @@ Leave this terminal open. Drop `--known-version` — the anchor is in the state 
 
 ```bash
 .venv/bin/python -m idp_regression.orchestration.cli \
-  --org   <org-id> \
-  --action <action-id> \
+  --org   ef1232be-0e85-43e7-a7b2-927d32eb6d38 \
+  --action fb900ba5-de93-4445-9ddb-89fe175585b2 \
   --version 1.0.0 \
-  --dataset <dataset-name> \
+  --dataset idp-generator-test1 \
   --run    baseline-1.0.0
 ```
 Or, if you put those values in `.env`, the wrapper types them for you and echoes the full
