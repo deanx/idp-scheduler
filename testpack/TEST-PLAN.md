@@ -26,8 +26,13 @@ If Langfuse is down: `docker compose -f ../langfuse/docker-compose.yml up -d`.
 grep -E '^(IDP_ORG_ID|IDP_ACTION_ID|IDP_REGION|GOLDEN_DATASET_NAME|LANGFUSE_HOST)=' .env
 ls -l .env      # must be -rw------- ; if not: chmod 600 .env
 ```
-`IDP_ORG_ID` must be the **business group that owns the action** (`ef1232be-…`), not the parent
-org. Submitting to the parent returns a 404 that now names `(org, action, version)`.
+These are **wrapper conveniences, not app configuration** — nothing under `src/` reads them (see
+1.2). What matters is the value you pass as `--org`: it must be the **business group that owns the
+action** (`ef1232be-…`), not the parent org. Submitting to the parent returns a 404, and the error
+now names `(org, action, version)` so you can tell which of the three is wrong.
+
+`LANGFUSE_HOST` and the two Langfuse keys **are** genuine environment config — credentials and the
+service endpoint, which is exactly what `.env` is for.
 
 ---
 
@@ -40,7 +45,28 @@ text. The names matter: the golden set keys off them, and a field/table name col
 rejected as a malformed golden.
 
 ### 1.2 Publish it as `1.0.0`
-Publish. Note the **action id** from the console URL and put it in `.env` as `IDP_ACTION_ID`.
+Publish, and note the **action id** from the console URL. You will pass it on the command line.
+
+> **The app never reads an action id from the environment — that is deliberate** (ADR-0004 A8/A9).
+> `--org`, `--action`, `--version` and `--dataset` are **required flags with no env fallback**,
+> because a value that defines *what a run measured* must be visible in the invocation (and, in
+> CI, in a reviewed file) rather than resolved from ambient state. A static test asserts that the
+> strings `IDP_ORG_ID`, `IDP_ACTION_ID` and `GOLDEN_DATASET_NAME` appear **nowhere under `src/`**.
+>
+> So every command in this plan passes the action explicitly:
+> ```bash
+> --org <org-id> --action <action-id> --version 1.0.0 --dataset <dataset-name> --run <name>
+> ```
+>
+> **`.env` is a convenience for the local wrapper only.** `scripts/run_eval_local.sh` reads
+> `IDP_ORG_ID` / `IDP_ACTION_ID` / `IDP_TEST_ACTION_VERSION` / `GOLDEN_DATASET_NAME` to *compose*
+> that command line and echoes the full invocation before running it — the same as you typing the
+> flags. A8 explicitly blesses that: the values may live somewhere convenient, provided nothing in
+> `src/` reads them. If you prefer, skip the wrapper entirely and type the flags; the wrapper is
+> ergonomics, not configuration.
+>
+> **Putting an action id in `.env` never changes what the app does.** It only changes what the
+> wrapper types for you.
 
 ### 1.3 Confirm the app can see it — zero cost
 ```bash
@@ -140,6 +166,16 @@ Leave this terminal open. Drop `--known-version` — the anchor is in the state 
 
 ## Phase 5 — The green run (~10 min, 5 extractions)
 
+```bash
+.venv/bin/python -m idp_regression.orchestration.cli \
+  --org   <org-id> \
+  --action <action-id> \
+  --version 1.0.0 \
+  --dataset <dataset-name> \
+  --run    baseline-1.0.0
+```
+Or, if you put those values in `.env`, the wrapper types them for you and echoes the full
+invocation before running it:
 ```bash
 ./scripts/run_eval_local.sh
 ```
