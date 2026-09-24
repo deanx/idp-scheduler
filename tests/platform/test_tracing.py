@@ -539,7 +539,9 @@ def test_debt17_record_experiment_calls_are_mutually_exclusive_in_one_process() 
     thread_b.start()
     # Thread B must be BLOCKED on the lock, not inside run_experiment yet.
     thread_b.join(timeout=0.5)
-    assert thread_b.is_alive(), "thread B ran concurrently with thread A -- calls were not serialized"
+    assert thread_b.is_alive(), (
+        "thread B ran concurrently with thread A -- calls were not serialized"
+    )
 
     release.set()
     thread_a.join(timeout=5.0)

@@ -122,3 +122,69 @@ Two further unknowns:
 2. **The 400-vs-404 discrimination is undocumented behaviour.** It rests on documented endpoints, which is why it is safer than the console API — but the *distinction* is an implementation detail that could change without notice. It needs a pinned contract test and re-verification on any IDP platform change (SR-1 applies).
 
 **Cost of a tick:** one HTTP round trip per candidate version, zero documents, zero extractions.
+
+---
+
+## Addendum 4 — the Exchange route, tested and refuted; and why the management plane is closed (2026-09-24)
+
+Source: an external discovery note (`idp-exchange-api-version-discovery.md`, 2026-09-24) proposing
+Anypoint **Exchange** as the supported route to version discovery, replacing the refused IDP
+management API.
+
+### The Exchange route does not work for this org — tested, zero quota
+The note's Step 2 uses **`masterOrganizationId`**, not the `organizationId` this spike had tried.
+That is a real distinction and was worth testing. It changes nothing here:
+
+| query | result |
+|---|---|
+| `assets?masterOrganizationId=<business group>&status=published` | **200, 0 assets** |
+| `assets?masterOrganizationId=<parent org>&status=published` | **200, 0 assets** |
+| `assets?masterOrganizationId=<business group>` (no status filter) | **200, 0 assets** |
+| `assets?organizationId=<business group>` (the earlier attempt) | 200, 0 assets |
+
+Exchange itself is reachable — a keyword search returns public assets — so this is not a
+permissions failure. **The org simply lists no Exchange assets: the IDP action is not published
+there.** Steps 3–5 of the note (read `.version` off the asset, diff it against a cached value)
+have nothing to read.
+
+### The note's genuinely valuable claim — and it corrects this spike's earlier advice
+> *"Replaces the IDP Platform API (`/idp/api/v1/.../actions`) which requires **Basic auth with a
+> 'Manage Actions' user**."*
+
+⚠️ **If accurate, a connected app cannot authenticate to that endpoint at all, whatever scopes it
+holds.** That is consistent with every observation recorded above: a **403** (authenticated but
+unauthorised) rather than a 401; both orgs identical; and a requested grant producing no change.
+
+**This supersedes Addendum 2's suggestion to grant "Manage Actions" to the connected app.** That
+advice was inference from the permission family; if the endpoint is Basic-auth-only it is simply
+the wrong mechanism, and the fix would be a *user* credential — which is a materially worse thing
+to embed in an automated pipeline than a scoped connected app.
+
+**Not independently verified.** Confirming it needs a user credential to test Basic auth with,
+which this spike does not have. Recorded as the note's assertion, not as an observation. It does
+not change any decision: ADR-0006 §A′ already runs on the documented runtime endpoint at zero
+quota and depends on neither route.
+
+### Corroboration of three things already built
+The note independently states the **≥ 10 s polling interval**, **`?valueOnly=false`** for
+confidence scores, and the executions URL shape — all three already implemented and live-verified
+(ADR-0002 A9/A10, `6755fa1`).
+
+### A limit nobody had recorded — carry it into the docs
+| Limit | Value |
+|---|---|
+| **Result retention (successful)** | **24 hours** |
+| Result retention (after human review) | 7 days |
+| Result retention (incomplete) | 30 days |
+| File size (API) | 15 MB, 150 pages, 1 file per request |
+| Prompts per action | 30 (Customize Schema disabled) |
+
+**Consequence for this project:** a raw IDP execution is **not re-fetchable after 24 h**. The run
+artifact (ADR-0007) and the Langfuse scores are durable; the captured live fixture
+(`tests/fixtures/live/seed-001-clean.raw.json`) is the *only* copy of that response, and it cannot
+be regenerated from the execution id. Anyone planning to "just re-pull that execution" to close
+SR-1's remaining shapes (the `prompts` shape, multi-page) must submit a **new** document — the
+fixture is a one-way capture. This sharpens DEBT-69: the missing captures need fresh extractions,
+not archaeology.
+
+Source: [IDP Quotas and Limits](https://docs.mulesoft.com/idp/quotas-and-limits).

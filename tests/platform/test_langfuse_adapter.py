@@ -690,27 +690,27 @@ def test_make_platform_dispatches_on_platform_env(monkeypatch: pytest.MonkeyPatc
     assert isinstance(adapter, LangfuseAdapter)
 
     # -- raw-REST UrllibHttpClient (datasets/schema/scores) --
-    http_client = adapter._client  # noqa: SLF001
+    http_client = adapter._client
     # Narrow HttpClient (Protocol) -> UrllibHttpClient (the concrete
     # transport) so mypy can see _host/_auth_header — also strengthens the
     # assertion: it now verifies make_platform() wired the REAL transport,
     # not just something Protocol-shaped.
     assert isinstance(http_client, UrllibHttpClient)
-    assert http_client._host == "https://example.invalid"  # noqa: SLF001
+    assert http_client._host == "https://example.invalid"
     decoded = base64.b64decode(
-        http_client._auth_header.removeprefix("Basic ")  # noqa: SLF001
+        http_client._auth_header.removeprefix("Basic ")
     ).decode("ascii")
     assert decoded == "distinctive-pub-9f3a:distinctive-secret-NOT-A-REAL-KEY-2c71"
 
     # -- Langfuse SDK client (OTLP trace + dataset-run linkage) --
-    sdk_client = adapter._tracing_client  # noqa: SLF001
+    sdk_client = adapter._tracing_client
     # Narrow ExperimentRunner | None -> not-None (make_platform always wires
     # one); the *remaining* attr-defined errors below are the deliberate
     # part: _base_url / api._client_wrapper are Langfuse SDK privates, not
     # on the ExperimentRunner Protocol by design (CLAUDE.md ## External
     # services) -- pinning them IS the point of this test.
     assert sdk_client is not None
-    assert sdk_client._base_url == "https://example.invalid"  # type: ignore[attr-defined]  # noqa: SLF001
+    assert sdk_client._base_url == "https://example.invalid"  # type: ignore[attr-defined]
     sdk_headers = sdk_client.api._client_wrapper.get_headers()  # type: ignore[attr-defined]
     assert sdk_headers["X-Langfuse-Public-Key"] == "distinctive-pub-9f3a"
     sdk_decoded = base64.b64decode(
@@ -916,12 +916,12 @@ def test_make_platform_resolves_both_clients_to_the_same_host_when_unset_or_equa
     adapter = make_platform()
     assert isinstance(adapter, LangfuseAdapter)
 
-    http_client = adapter._client  # noqa: SLF001
-    sdk_client = adapter._tracing_client  # noqa: SLF001
+    http_client = adapter._client
+    sdk_client = adapter._tracing_client
     assert isinstance(http_client, UrllibHttpClient)
     assert sdk_client is not None
-    assert http_client._host == "https://example.invalid"  # noqa: SLF001
-    assert sdk_client._base_url == "https://example.invalid"  # type: ignore[attr-defined]  # noqa: SLF001
+    assert http_client._host == "https://example.invalid"
+    assert sdk_client._base_url == "https://example.invalid"  # type: ignore[attr-defined]
 
 
 # --- FU-01.3-D DoD (a) / DEBT-32 (REG-10 ordering pin, kills mutant M10)
@@ -1021,8 +1021,8 @@ def test_make_platform_wires_a_generous_default_record_deadline_when_unset(
     adapter = make_platform()
 
     assert isinstance(adapter, LangfuseAdapter)
-    assert adapter._record_deadline_seconds == _DEFAULT_RECORD_DEADLINE_SECONDS  # noqa: SLF001
-    assert adapter._record_deadline_seconds is not None  # noqa: SLF001
+    assert adapter._record_deadline_seconds == _DEFAULT_RECORD_DEADLINE_SECONDS
+    assert adapter._record_deadline_seconds is not None
 
 
 def test_make_platform_wires_record_deadline_seconds_from_env(
@@ -1034,7 +1034,7 @@ def test_make_platform_wires_record_deadline_seconds_from_env(
     adapter = make_platform()
 
     assert isinstance(adapter, LangfuseAdapter)
-    assert adapter._record_deadline_seconds == 42.0  # noqa: SLF001
+    assert adapter._record_deadline_seconds == 42.0
 
 
 @pytest.mark.parametrize(
@@ -1577,7 +1577,7 @@ def test_record_deadline_check_is_inclusive_at_exact_equality() -> None:
     )
 
     with pytest.raises(ScoreWriteFailedError, match="deadline"):
-        adapter._check_record_deadline(  # noqa: SLF001
+        adapter._check_record_deadline(
             deadline=100.0, document_id="doc-0", score_name="gate"
         )
 
@@ -1603,7 +1603,7 @@ def test_record_deadline_defaults_to_disabled_and_never_consults_the_clock() -> 
 
     _record_run_via(adapter)  # must not raise, must not touch the clock
 
-    assert adapter._record_deadline_seconds is None  # noqa: SLF001
+    assert adapter._record_deadline_seconds is None
 
 
 def test_record_deadline_is_computed_absolute_not_relative_to_the_configured_seconds() -> None:
@@ -1680,7 +1680,7 @@ def test_record_deadline_exceeded_between_scores_stops_further_writes() -> None:
     ]
 
     with pytest.raises(ScoreWriteFailedError, match="deadline"):
-        adapter._write_scores(  # noqa: SLF001
+        adapter._write_scores(
             trace_id="trace-1", document_id="doc-0", scores=scores, deadline=100.0
         )
 
@@ -1708,7 +1708,7 @@ def test_record_deadline_checked_between_retry_attempts() -> None:
     score = _derived_score(document_id="doc-0", name="gate", value="PASS")
 
     with pytest.raises(ScoreWriteFailedError, match="deadline"):
-        adapter._write_scores(  # noqa: SLF001
+        adapter._write_scores(
             trace_id="trace-1", document_id="doc-0", scores=[score], deadline=10.0
         )
 
