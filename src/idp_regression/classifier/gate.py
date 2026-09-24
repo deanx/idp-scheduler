@@ -98,7 +98,7 @@ def _validate_golden(golden: Golden) -> None:
 #: #8 rejected a second `jsonschema` pass because its strictness could
 #: disagree with this one). This is an additive public alias, not a copy:
 #: it `is` `_validate_golden` (see
-#: ``tests/classifier/test_gate.py::test_validate_golden_structure_is_validate_golden``),
+#: ``tests/classifier/test_validation.py::test_validate_golden_structure_is_validate_golden``),
 #: so N28 can never silently drift from N22 as this function evolves.
 validate_golden_structure = _validate_golden
 
@@ -211,6 +211,14 @@ def _classify_table(
     critical = gtable.get("critical", False)
 
     # Index actual rows by normalized match_key (BR8: position-independent).
+    # DEBT-09 (decided): a duplicate normalized match_key here is a
+    # legitimate collapse, not a reportable defect -- last-write-wins,
+    # deliberately, pinned by tests/classifier/test_tables.py::
+    # test_duplicate_actual_match_key_collapses_last_write_wins_not_raise.
+    # This is also what masks the adapter's pages[]-vs-top-level table-row
+    # doubling (ADR-0002 R-2, "tables" bullet) -- that masking is load-
+    # bearing by ADR-0002's own decision, and this is the classifier-side
+    # half of that coupling.
     a_index: dict[str, dict[str, FieldValue]] = {}
     for row in arows:
         mk_cell = row.get(key_col)

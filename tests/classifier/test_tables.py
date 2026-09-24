@@ -178,3 +178,73 @@ def test_table_verdict_carries_critical_and_type_none() -> None:
     table = _table(v, "line_items")
     assert table["critical"] is True
     assert table["type"] is None
+
+
+# --- DEBT-09: duplicate `match_key` behavior (decided, pinned) ------------
+#
+# Decision: a duplicate normalized `match_key` in the *actual* is a
+# LEGITIMATE COLLAPSE, not a reportable defect. The classifier cannot tell
+# "two invoice lines that genuinely share the same SKU" (ordinary business
+# data under DATA-MODEL-01's `match_key: "sku"` golden) apart from "the
+# adapter's pages[]-vs-top-level union seam doubled a row" (ADR-0002 R-2) --
+# both present as two actual rows with the same match_key and no other
+# signal. Raising `MalformedActualError` would false-fail ordinary
+# multi-line-same-SKU invoices, which is worse than the alternative for the
+# common case; there is no principled `duplicate_match_key` verdict to add
+# without a `match_key`-uniqueness contract that DATA-MODEL-01 does not make
+# today (adding one would repeat DEBT-05's "not a code-only fix" lesson).
+# So last-write-wins stays, explicit and pinned here rather than accidental,
+# and named from the classifier side in ADR-0002's R-2 bullet so the
+# coupling to the adapter's documented-load-bearing masking is discoverable
+# from both ends of the seam.
+def test_duplicate_actual_match_key_collapses_last_write_wins_not_raise() -> None:
+    # Two actual rows both normalize to "Widget A". No MalformedActualError,
+    # no synthetic new_line for the dropped duplicate, and the surviving
+    # row is the LAST one in list order (dict last-write-wins on a_index).
+    actual = _actual(
+        {"invoice_number": {"value": "INV-1"}, "total": {"value": "1250.00"}},
+        {
+            "line_items": [
+                _row("Widget A", "10", "50.00"),  # first duplicate: correct price
+                _row("Widget A", "10", "999.00"),  # second duplicate: wins (last)
+                _row("Widget B", "2", "20.00"),
+            ]
+        },
+    )
+    v = classify(GOLDEN, actual)
+    rows = _table(v, "line_items")["rows"]
+    up = [r for r in rows if r["column"] == "unit_price" and r["match_key"] == "Widget A"]
+    # Exactly one unit_price sub-verdict for Widget A -- the first duplicate
+    # was silently dropped, not surfaced as a second row or a new_line.
+    assert len(up) == 1
+    assert up[0]["actual"] == "999.00"
+    assert up[0]["verdict"] == "wrong_value"
+    assert not any(r["verdict"] == "new_line" for r in rows)
+
+
+def test_duplicate_golden_match_key_second_row_is_missing() -> None:
+    # Two golden rows share a match_key; only one actual row can pair with
+    # it (BR8 pairing pops the actual index), so the second golden row
+    # reports "missing" even though a same-keyed actual row existed.
+    golden: Golden = {
+        "fields": {"total": {"value": "1250.00", "type": "number", "critical": True}},
+        "tables": {
+            "line_items": {
+                "match_key": "description",
+                "critical": True,
+                "rows": [
+                    {"description": "Widget A", "qty": "10"},
+                    {"description": "Widget A", "qty": "5"},  # duplicate golden match_key
+                ],
+            }
+        },
+    }
+    actual = _actual(
+        {"total": {"value": "1250.00"}},
+        {"line_items": [{"description": {"value": "Widget A"}, "qty": {"value": "10"}}]},
+    )
+    v = classify(golden, actual)
+    rows = _table(v, "line_items")["rows"]
+    verdicts_for_widget_a = [r["verdict"] for r in rows if r["match_key"] == "Widget A"]
+    assert verdicts_for_widget_a.count("missing") == 1
+    assert overall_gate(v) == "FAIL"  # critical block, the second row's missing qty fails it
