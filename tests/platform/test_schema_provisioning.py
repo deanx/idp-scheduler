@@ -85,7 +85,11 @@ def test_provision_expand_and_contract_style_calls_both_upsert_never_delete() ->
     for method, path, body in client.calls:
         assert method == "POST"
         assert path == "/api/public/v2/datasets"
-        assert body["expectedOutputSchema"]  # never empty/null
+        # DEBT-42(1): truthy-only assertion superseded by the strictly
+        # stronger equality check (identical fix as DEBT-35's `:38`
+        # twin, three lines above there — this was the sibling that
+        # survived because DEBT-35 was carded by line number).
+        assert body["expectedOutputSchema"] == load_golden_schema()
     assert all(method != "DELETE" for method, _, _ in client.calls)
 
 

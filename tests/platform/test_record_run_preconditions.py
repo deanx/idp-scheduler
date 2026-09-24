@@ -637,7 +637,13 @@ def test_score_field_wrong_type_raises_typed_error_before_any_sdk_call(field_nam
     derivation -- `_str_fields`, the `str`-annotated fields of
     `typing.get_type_hints(ScoreInput)` -- NOT a hand-written `["id",
     "name"]` pair -- so a future `str`-annotated field on `ScoreInput`
-    auto-generates its own wrong-type-value case here, the
+    auto-generates its own wrong-type-value CASE here -- the parametrize
+    id and the `bad_score[field_name] = ...` assignment below need no
+    human edit. DEBT-42(3): this does NOT mean the case is a working
+    pin unattended -- `bad_score`'s three base keys stay hand-written,
+    and this is deliberate (Atchim's ruling: a synthesised base value
+    would be a guess about the new field's valid shape, and a test that
+    silently adapts to a schema change stops pinning anything). The
     value-side twin of `test_record_field_wrong_type_raises_typed_error_
     before_any_sdk_call` above (which does the same for `DocumentRecord`).
     Before the fix this parametrize has exactly one RED leg (`value`): no
@@ -900,8 +906,13 @@ def test_record_missing_any_required_key_raises_typed_error_before_any_sdk_call(
     """Part (3) of the structural fix: parametrized over the SOUND
     presence derivation (`_required_fields`, DEBT-49), NOT
     `DocumentRecord.__required_keys__` and NOT a hand-written list -- a
-    new required field on the TypedDict auto-generates its own case
-    here. `DocumentRecord` has no `NotRequired` field today, so
+    new required field on the TypedDict auto-generates its own CASE
+    here (the parametrize id). DEBT-42(3): the case is not a working
+    pin unattended -- `full_record` below stays a hand-written literal,
+    and `del full_record[missing_key]` fails LOUD with a bare `KeyError`
+    the moment `missing_key` names a field the literal doesn't carry
+    yet, until a human adds a real value for it. It never silently
+    synthesises one. `DocumentRecord` has no `NotRequired` field today, so
     `_required_fields(DocumentRecord) == sorted(DocumentRecord.
     __required_keys__)` and this parametrize is unchanged in practice;
     the point is that it would NOT silently start rejecting a
@@ -985,25 +996,32 @@ def test_record_not_a_dict_raises_typed_error_before_any_sdk_call() -> None:
     document_id can be named here (there is no dict to read one from,
     same stance as the missing-document_id anchor case above).
 
-    Atchim re-review R-1: the fixture must contain ALL THREE required
-    key names as substrings (not just one, as the original "item_id"
-    fixture did). With `isinstance(record, dict)` deleted, `key not in
-    record` does substring semantics -- a fixture containing only
-    "item_id" happens to make `"document_id" not in record` True, so
-    the `__required_keys__` loop raises a TYPED
-    ExperimentRecordFailedError BY ACCIDENT, via the exact trap this
-    guard exists to prevent, and the mutant is never observed. Worse:
-    `DocumentRecord.__required_keys__` is a frozenset, so which key the
-    loop happens to check first (and therefore whether it "accidentally"
-    raises) varies with `PYTHONHASHSEED` -- DEBT-34's defect class
-    (an assertion that observes nothing) reproduced inside the very
-    card whose job includes closing DEBT-34. With all three key names
-    present as substrings, `key not in record` is False for every key
-    under every hash seed, the loop always falls through, and the
-    guard's `isinstance` check is the ONLY thing standing between this
-    fixture and an untyped exception -- deterministically, every seed.
-    Also asserts the SPECIFIC message, not just that SOME typed error
-    was raised."""
+    DEBT-42(2): THE PIN is `assert "not a dict" in message` below --
+    asserting the specific message, not merely that some typed error was
+    raised, is what makes this test able to fail. The three-key fixture
+    ("item_id document_id scores") is DEFENCE-IN-DEPTH for that pin, not
+    the pin itself: with `isinstance(record, dict)` deleted, `key not in
+    record` does substring semantics on a bare string, and a fixture
+    containing only "item_id" would make `"document_id" not in record`
+    True too, so a bare `pytest.raises(ExperimentRecordFailedError)` --
+    the exact weaker form this test was strengthened FROM, and the one
+    that let a mutant live through `617dd8c` -- would raise BY ACCIDENT
+    via the trap this guard exists to prevent, never observing the
+    `isinstance` check at all. All three key names present as substrings
+    closes that accidental-pass route regardless of dict-iteration or
+    frozenset-ordering behaviour, so the message assertion is what is
+    actually exercising the guard.
+
+    Atchim re-review R-1 carried this fixture; a PREVIOUS version of this
+    docstring justified it by `PYTHONHASHSEED` nondeterminism in
+    `DocumentRecord.__required_keys__`'s frozenset iteration order --
+    superseded and struck: `_required_fields` (DEBT-49) iterates a
+    `sorted()` list, not the frozenset, so that mechanism no longer
+    exists in the source this test exercises, and the conclusion it drew
+    (intermittent failure under some seeds) was already backwards even
+    when it did -- a narrow fixture fails DETERMINISTICALLY, not
+    intermittently, once the loop order is fixed. Read this paragraph as
+    history, not as the reason for the fixture."""
     adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
     # Deliberately contains all three required key names as substrings
     # -- see the docstring above for why a partial match (e.g. just
@@ -1108,7 +1126,11 @@ def test_record_field_wrong_type_raises_typed_error_before_any_sdk_call(field_na
     `str`-annotated fields of `typing.get_type_hints(DocumentRecord)` --
     NOT a hand-written `item_id`/`document_id` pair -- so a future
     `str`-annotated field on DocumentRecord auto-generates its own
-    wrong-type-value case here, the value-side twin of
+    wrong-type-value CASE here -- not a working pin unattended (DEBT-42(3)):
+    the per-field `bad_value` below stays hand-written per field name, so a
+    genuinely new field either needs that hand-written branch added or
+    falls through to the `else` arm untouched; it is never silently
+    synthesised. The value-side twin of
     `test_record_missing_any_required_key_raises_...` above (which does
     the same for PRESENCE, over the sound `_required_fields` derivation).
     Before the fix this parametrize has exactly one RED leg
@@ -1231,8 +1253,12 @@ def test_metadata_missing_any_field_raises_typed_error_parametrized(missing_key:
     production's `_required_field_names`) -- NOT a hand-written
     `["action_id", "action_version", "golden_version"]` list -- so a
     future required field on `RunMetadata`, `str`-annotated or not,
-    auto-generates its own missing-key case here. Before the FO-1 fix
-    this parametrize is RED on all three legs with an untyped `KeyError`,
+    auto-generates its own missing-key CASE here -- not a working pin
+    unattended (DEBT-42(3)): the `full_metadata` literal built below
+    stays hand-written, and deleting a key it never had fails LOUD with
+    a bare `KeyError` until a human supplies a real value for the new
+    field. Before the FO-1 fix this parametrize is RED on all three legs
+    with an untyped `KeyError`,
     not `ExperimentRecordFailedError`. Required B (fix-round finding):
     this used to be parametrized over `_str_fields(RunMetadata)` --
     identical today because every `RunMetadata` field happens to be

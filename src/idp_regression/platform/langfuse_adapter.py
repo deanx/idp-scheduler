@@ -164,7 +164,7 @@ _RUN_METADATA_STR_FIELDS = _str_annotated_field_names(RunMetadata)
 #: ``RunMetadata`` -- computed ONCE, reused by
 #: ``_require_run_metadata_shape``'s PRESENCE loop below. Deliberately a
 #: SEPARATE derivation from ``_RUN_METADATA_STR_FIELDS`` even though both
-#: produce the same three names today (every ``RunMetadata`` field is
+#: produce the same four names today (every ``RunMetadata`` field is
 #: currently plain ``str``) -- collapsing presence onto the `str`-only
 #: derivation is exactly the mutation (MY-25) that let a hypothetical
 #: required non-`str` field (e.g. ``attempt: int``) go unchecked for
