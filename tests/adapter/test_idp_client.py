@@ -32,6 +32,7 @@ from idp_regression.adapter.idp_client import (
     MAX_RETRY_AFTER_SECONDS,
     MuleSoftIDPAdapter,
     _parse_retry_after_seconds,
+    _per_call_timeout_seconds,
 )
 
 
@@ -378,6 +379,37 @@ def test_poll_transport_error_eventually_times_out_if_never_recovers(
     monkeypatch.setattr(transport, "get_json_with_headers", always_failing_get_json)
     with pytest.raises(IDPPollTimeoutError):
         adapter.extract(str(doc), "action-1", "v1")
+
+
+def test_per_call_timeout_zero_remaining_returns_zero_not_the_unclamped_interval() -> None:
+    # DEBT-79: the old `min(poll_interval_seconds * 2, remaining) or
+    # remaining` idiom happened to be correct at `remaining == 0.0` only
+    # because `min(x, 0.0) == 0.0 == remaining` -- but that's a
+    # coincidence of the `or` reading a falsy 0.0 and falling back to a
+    # value that was ALSO 0.0. This pins the actual invariant directly on
+    # the extracted pure function: at the boundary, the per-call timeout
+    # must equal the (zero) remaining budget, never something longer.
+    assert _per_call_timeout_seconds(poll_interval_seconds=10.0, remaining=0.0) == 0.0
+
+
+def test_per_call_timeout_clamps_to_the_smaller_of_double_interval_or_remaining() -> None:
+    assert _per_call_timeout_seconds(poll_interval_seconds=10.0, remaining=100.0) == 20.0
+    assert _per_call_timeout_seconds(poll_interval_seconds=10.0, remaining=5.0) == 5.0
+
+
+def test_per_call_timeout_a_zero_clamp_is_not_silently_widened_to_remaining() -> None:
+    # DEBT-79's actual mutation kill: `remaining == 0.0` alone is an
+    # EQUIVALENT case for the old `... or remaining` idiom (0.0 or 0.0 ==
+    # 0.0 either way). The idiom is only observably wrong when the CLAMP
+    # (`poll_interval_seconds * 2`) is the one that's zero while
+    # `remaining` is NOT -- `min(0, 50) or 50` silently returns the full
+    # 50s (`or` treats the correct 0.0 clamp as "undefined" and falls
+    # through), instead of the 0s a zero-clamp actually means. Today's
+    # `MIN_POLL_INTERVAL_SECONDS` floor keeps `poll_interval_seconds` from
+    # ever reaching 0 in the constructed adapter, but this pure function
+    # must be correct on its own terms, independent of that external
+    # guard.
+    assert _per_call_timeout_seconds(poll_interval_seconds=0.0, remaining=50.0) == 0.0
 
 
 def test_poll_transport_error_retry_budget_exhaustion_raises_hard_failure(

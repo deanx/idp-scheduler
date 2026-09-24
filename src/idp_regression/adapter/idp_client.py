@@ -146,6 +146,29 @@ def _parse_retry_after_seconds(value: str | None) -> float | None:
     return seconds
 
 
+def _per_call_timeout_seconds(poll_interval_seconds: float, remaining: float) -> float:
+    """The per-GET socket timeout for one poll call: never longer than
+    ``2 * poll_interval_seconds`` (so a single slow request can't eat the
+    whole remaining budget), and never longer than what's actually left of
+    the deadline (Atchim suggestion).
+
+    DEBT-79: previously
+    ``min(poll_interval_seconds * 2, remaining) or remaining`` — an
+    ``or`` fallback that only reads as correct because at every call site
+    ``remaining`` is provably > 0 (the caller's ``now >= deadline`` guard
+    always raises before this is ever called with ``remaining <= 0``), so
+    ``min(...)`` of two positive numbers is never falsy today. But the
+    ``or`` idiom can't express "fall back only when the clamp is
+    undefined" -- it falls back on ANY falsy result, including a
+    legitimate ``0.0`` clamp a future edit could introduce, which would
+    then silently hand the GET call the full ``remaining`` (much LONGER
+    than the clamp intended) instead of correctly timing out immediately.
+    An explicit ``remaining <= 0`` check says exactly what was meant."""
+    if remaining <= 0:
+        return remaining
+    return min(poll_interval_seconds * 2, remaining)
+
+
 def _executions_base_url(region: str, org_id: str, action_id: str, version: str) -> str:
     return (
         f"https://idp-rt.{region}.anypoint.mulesoft.com/api/v1"
@@ -446,7 +469,7 @@ class MuleSoftIDPAdapter:
             # left of the budget — a poll can no longer overshoot the
             # deadline waiting on a single slow request or a final sleep
             # (Atchim suggestion).
-            per_call_timeout = min(self._poll_interval_seconds * 2, remaining) or remaining
+            per_call_timeout = _per_call_timeout_seconds(self._poll_interval_seconds, remaining)
             # Deferred-raise (see _fetch_token/_submit): never raise while
             # an IDPTransportError is the "currently handled" exception, so
             # it can't leak into __context__ even under `from None`.
@@ -615,6 +638,20 @@ def make_idp_adapter(org_id: str) -> MuleSoftIDPAdapter:
         ),
         poll_timeout_seconds=_timing_env(
             "IDP_EXECUTION_TIMEOUT_SECONDS", DEFAULT_POLL_TIMEOUT_SECONDS
+        ),
+        # DEBT-71: previously the only adapter timing knob with no env var
+        # -- an operator had no way to raise it (to spend less IDP quota,
+        # or respect a slow action) or lower it without editing source.
+        # `_validate_timing`'s own `min_value=MIN_POLL_INTERVAL_SECONDS`
+        # floor (constructor-side, unconditional) still holds regardless
+        # of where the value came from. NOTE the coupling this exposes:
+        # `per_call_timeout = min(poll_interval_seconds * 2, remaining)` in
+        # `_poll` derives the per-GET socket timeout from this SAME value
+        # -- raising the interval also raises that timeout. Not
+        # decoupled here (DEBT-79/separate row); an operator changing this
+        # env var changes both.
+        poll_interval_seconds=_timing_env(
+            "IDP_POLL_INTERVAL_SECONDS", DEFAULT_POLL_INTERVAL_SECONDS
         ),
         token_refresh_margin_seconds=_timing_env(
             "IDP_TOKEN_REFRESH_MARGIN_SECONDS", DEFAULT_TOKEN_REFRESH_MARGIN_SECONDS

@@ -23,7 +23,7 @@ from idp_regression.adapter.errors import (
     IDPExecutionFailedError,
     IDPPollTimeoutError,
 )
-from idp_regression.adapter.idp_client import make_idp_adapter
+from idp_regression.adapter.idp_client import DEFAULT_POLL_INTERVAL_SECONDS, make_idp_adapter
 from idp_regression.adapter.types import NormalizedOutput
 
 _ORG_ID = "org-1"
@@ -136,6 +136,7 @@ _TIMING_ENV_NAMES = [
     "IDP_SUBMIT_TIMEOUT_SECONDS",
     "IDP_EXECUTION_TIMEOUT_SECONDS",
     "IDP_TOKEN_REFRESH_MARGIN_SECONDS",
+    "IDP_POLL_INTERVAL_SECONDS",
 ]
 
 # (env_name, bad_value) pairs — every combination of env var and bad value
@@ -169,6 +170,41 @@ def test_zero_token_refresh_margin_env_var_is_accepted(monkeypatch: pytest.Monke
     _set_required_env(monkeypatch)
     monkeypatch.setenv("IDP_TOKEN_REFRESH_MARGIN_SECONDS", "0")
     make_idp_adapter(_ORG_ID)
+
+
+def test_poll_interval_env_var_reaches_the_constructed_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # DEBT-71: IDP_POLL_INTERVAL_SECONDS was the only adapter timing knob
+    # with no env var at all — poll_interval_seconds was a constructor
+    # parameter only, so an operator had no way to raise or lower it
+    # (e.g. to spend less IDP quota, or respect a slow action) without
+    # editing source.
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("IDP_POLL_INTERVAL_SECONDS", "15")
+    adapter = make_idp_adapter(_ORG_ID)
+    assert adapter._poll_interval_seconds == 15.0
+
+
+def test_poll_interval_env_var_default_is_unchanged_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("IDP_POLL_INTERVAL_SECONDS", raising=False)
+    adapter = make_idp_adapter(_ORG_ID)
+    assert adapter._poll_interval_seconds == DEFAULT_POLL_INTERVAL_SECONDS
+
+
+def test_poll_interval_env_var_below_the_rate_protection_floor_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # MIN_POLL_INTERVAL_SECONDS (10.0, IDP-side rate protection) must keep
+    # holding for a value that reaches the constructor via the env var, not
+    # only for a caller passing the constructor parameter directly.
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("IDP_POLL_INTERVAL_SECONDS", "9.9")
+    with pytest.raises(IDPConfigurationError):
+        make_idp_adapter(_ORG_ID)
 
 
 @pytest.mark.parametrize("env_name", _TIMING_ENV_NAMES)
