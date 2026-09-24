@@ -273,3 +273,57 @@ An independent review of the D1 terminal-rule commit judged the union itself gen
 **Reversal cost.** Low for all three — each is a local decision inside `_merge_fields`/`_merge_tables`/`_merge_prompts` / the loop that calls them; nothing downstream depends on which container a colliding key or row came from, and reverting any one decision does not require touching the other two.
 
 Reviewer: independent review that raised R-1/R-2 (2026-09-22); this correction responds to it (2026-09-23); pending Atchim re-review and the `/test` re-stamp SPEC-01's `Risk: high` marker requires (DEBT-44: not the same reviewer model that issues the eventual APPROVE).
+
+---
+
+## Correction 2026-09-24 (b) — **`pages[]` does not exist. The multi-page shape is verified.**
+
+**Evidence:** a genuinely **3-page** invoice (`testpack/inv-004-multipage.pdf`, `/Count=3`, its
+line-item table spanning the page break) was extracted live against action `1.0.0`. The response
+carries **no `pages` key at all**:
+
+```
+top-level keys: documentName, fields, id, status, tables
+tables.line_items: 14 rows — every row from every page, merged into ONE flat array
+```
+
+IDP performs the page-stitching itself and **never exposes page structure**. This is the first
+multi-page capture this project has ever had.
+
+### What this closes
+**DEBT-69(b) is CLOSED.** The multi-page wire shape is no longer an assumption. SR-1 is satisfied
+for it: the claim rests on a recorded live response, not on a fixture authored from the parser.
+
+### What this says about the code, stated plainly
+**The `pages[]` branch of `normalize()` is dead code.** It has now been contradicted by live
+evidence at 1 page and at 3 pages. Everything built on it was designed for a shape reality does not
+produce:
+
+| Built for `pages[]` | Status now |
+|---|---|
+| The **union rule** (`6489560`) — union every recognised container instead of picking one | **Still correct and still wanted.** It is what ended REG-11's three-occurrence fail-open family, and it is right regardless of whether `pages[]` ever appears. Its value never depended on the branch existing. |
+| **R-1** collision precedence (top-level wins over a `pages[]` entry) — `17a34c4` | Unreachable in practice. The pin stays (it costs nothing and guards the branch if it is kept), but it constrains a case the API cannot produce. |
+| **R-2** `duplicate_prompt` relaxed across the page/rollup seam, on the argument that a cross-seam collision is a *"rollup echo"* | ⚠️ **The premise is false.** There is no seam: there is no rollup *and* pages, only a rollup. The relaxation converted a genuine within-container integrity check into a last-wins on a boundary that does not exist. **Re-examine before it is ever relied on** — the earlier review flagged exactly this as the condition under which the relaxation would be wrong. |
+| The **table-row doubling** residual, and `gate.py`'s `match_key` masking documented as load-bearing for it | Unreachable by the same argument — doubling required both containers present. The masking pin is still worth having (it also guards genuine duplicate SKUs, DEBT-09) but its *stated justification* is now wrong. |
+
+### The decision this forces, deliberately NOT taken here
+Whether to **delete the `pages[]` branch** (removing the dead path, its collision surface, and the
+reasoning attached to it) or **keep it as a hedge** is a real call with a real trade-off, and it is
+not one to make inside a correction note:
+
+- **For deleting:** it is unexercised code on the project's most defect-prone seam; every line of it
+  is a line a future reader must reason about; and three separate pieces of design complexity hang
+  off it.
+- **For keeping:** one action, one vendor, one point in time. A different action, a different
+  document type, or a future IDP release could emit it — and re-adding a deleted branch after a
+  silent shape change is worse than carrying a dead one.
+
+**Carded for Dunga, with Soneca to rule.** Until then the branch stays, and this note is the record
+that it is unexercised rather than untested.
+
+### Also confirmed by the same capture
+- `confidenceScore` on the 0–100 scale (99.0), consistent with the single-page capture — the D2 fix
+  holds at 3 pages.
+- Cell shape `{value, confidenceScore, geometry}` unchanged across page counts.
+- A table spanning a page break arrives **as one array**, so row-order and `match_key` pairing
+  behave exactly as the single-page case. No new pairing logic is needed.
