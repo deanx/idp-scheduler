@@ -20,7 +20,12 @@ from idp_regression.platform.langfuse_adapter import (
 )
 from idp_regression.platform.scoring import field_score_name, prompt_score_name, score_id
 from idp_regression.platform.types import DocumentRecord, RunMetadata, ScoreInput
-from tests.platform._type_pins import _required_fields, _str_fields, _StrFieldProbe
+from tests.platform._type_pins import (
+    _optional_str_fields,
+    _required_fields,
+    _str_fields,
+    _StrFieldProbe,
+)
 
 _SENTINEL_SCORE_FIELD_MARKER = "SENTINEL-SCORE-FIELD-do-not-leak-6f1a4c"
 
@@ -81,8 +86,8 @@ class _RunExperimentTracingClient:
 def _adapter_with_cache(*item_ids: str) -> tuple[LangfuseAdapter, _FakeHttpClient]:
     http_client = _FakeHttpClient()
     adapter = LangfuseAdapter(client=http_client, tracing_client=_RunExperimentTracingClient())
-    adapter._item_cache = {item_id: f"ds-{item_id}" for item_id in item_ids}  # noqa: SLF001
-    adapter._cached_dataset_name = "ds"  # noqa: SLF001
+    adapter._item_cache = {item_id: f"ds-{item_id}" for item_id in item_ids}
+    adapter._cached_dataset_name = "ds"
     return adapter, http_client
 
 
@@ -234,8 +239,8 @@ def test_task_failed_raises_experiment_record_failed_and_skips_score_writes() ->
     adapter = LangfuseAdapter(
         client=http_client, tracing_client=_MissingKeyOnPurposeTracingClient()
     )
-    adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
-    adapter._cached_dataset_name = "ds"  # noqa: SLF001
+    adapter._item_cache = {"item-1": "ds-1"}
+    adapter._cached_dataset_name = "ds"
     # See `_ScoresExplodeOnSubscript`'s docstring above (DEBT-39 re-fixture).
     malformed = _task_only_failure_record()
 
@@ -257,8 +262,8 @@ def test_task_failed_output_is_the_fixed_constant() -> None:
     "task_failed"} — never the exception, never a partial dict."""
     tracing_client = _RunExperimentTracingClient()
     adapter = LangfuseAdapter(client=_FakeHttpClient(), tracing_client=tracing_client)
-    adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
-    adapter._cached_dataset_name = "ds"  # noqa: SLF001
+    adapter._item_cache = {"item-1": "ds-1"}
+    adapter._cached_dataset_name = "ds"
     # See `_ScoresExplodeOnSubscript`'s docstring above (DEBT-39 re-fixture).
     malformed = _task_only_failure_record()
 
@@ -284,8 +289,8 @@ def test_task_catch_all_catches_more_than_just_key_error() -> None:
     the records lookup itself explode with a different exception type."""
     tracing_client = _RunExperimentTracingClient()
     adapter = LangfuseAdapter(client=_FakeHttpClient(), tracing_client=tracing_client)
-    adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
-    adapter._cached_dataset_name = "ds"  # noqa: SLF001
+    adapter._item_cache = {"item-1": "ds-1"}
+    adapter._cached_dataset_name = "ds"
 
     class _ExplodesOnDictAccess(dict):  # type: ignore[type-arg]
         def __getitem__(self, key: str) -> Any:
@@ -357,8 +362,8 @@ def _adapter_with_tracing(
     http_client = _FakeHttpClient()
     tracing_client = _RunExperimentTracingClient()
     adapter = LangfuseAdapter(client=http_client, tracing_client=tracing_client)
-    adapter._item_cache = {item_id: f"ds-{item_id}" for item_id in item_ids}  # noqa: SLF001
-    adapter._cached_dataset_name = "ds"  # noqa: SLF001
+    adapter._item_cache = {item_id: f"ds-{item_id}" for item_id in item_ids}
+    adapter._cached_dataset_name = "ds"
     return adapter, http_client, tracing_client
 
 
@@ -608,6 +613,50 @@ def test_str_fields_of_score_input_is_id_name_value() -> None:
     assert _str_fields(ScoreInput) == ["id", "name", "value"]
 
 
+def test_score_required_and_str_and_optional_str_fields_are_split_module_constants() -> None:
+    """DEBT-53 (prose): pins the module-level constants the score loop
+    now reads -- `_SCORE_REQUIRED_FIELDS` (presence, ALL required
+    fields), `_SCORE_STR_FIELDS` (VALUE type, the required `str`-typed
+    subset), and `_SCORE_OPTIONAL_STR_FIELDS` (VALUE type ONLY IF
+    PRESENT, the `NotRequired[str]` subset -- empty today, since
+    `ScoreInput` carries no such field). This is the split
+    `_require_run_metadata_shape` already used, applied to `ScoreInput`
+    per this row's instruction; before the fix these three collapsed
+    into a single `_SCORE_STR_FIELDS`-only loop that combined presence
+    and type, sound only by the coincidence that every required field
+    happened to be `str`-typed."""
+    assert _langfuse_adapter_module._SCORE_REQUIRED_FIELDS == ["id", "name", "value"]
+    assert _langfuse_adapter_module._SCORE_STR_FIELDS == ["id", "name", "value"]
+    assert _langfuse_adapter_module._SCORE_OPTIONAL_STR_FIELDS == []
+
+
+def test_production_str_annotated_field_names_excludes_notrequired_str_against_the_probe() -> (
+    None
+):
+    """DEBT-53 (prose) -- THE KILLING TEST for the actual defect, not
+    just its test-side twin: pins PRODUCTION's
+    `_str_annotated_field_names`/`_optional_str_annotated_field_names`
+    (`langfuse_adapter.py`) directly against `_StrFieldProbe`, the same
+    probe the test-side `_str_fields`/`_optional_str_fields` pins above
+    already use. Every OTHER pin in this module only ever exercises the
+    production derivation against `ScoreInput`/`RunMetadata`/
+    `DocumentRecord` -- none of which carry a `NotRequired[str]` field
+    today -- so reverting production's fix (dropping `include_extras=True`
+    and the `NotRequired` origin check) is INVISIBLE to every test that
+    only exercises those three types: the bug is latent BY DEFINITION
+    until a `NotRequired[str]` field exists, and every real-world type in
+    this codebase currently lacks one. This is the one test in the
+    suite that would still catch a regression on that derivation today."""
+    assert _langfuse_adapter_module._str_annotated_field_names(_StrFieldProbe) == [
+        "field_a",
+        "field_b",
+        "field_c",
+    ]
+    assert _langfuse_adapter_module._optional_str_annotated_field_names(_StrFieldProbe) == [
+        "optional_field"
+    ]
+
+
 def test_m13_drift_pin_scoreinput_required_keys_is_unsound_today() -> None:
     """DEBT-49's M13-shape pin. `ScoreInput.__required_keys__` currently
     mis-derives `comment` (declared `NotRequired[str | None]`) as
@@ -623,11 +672,16 @@ def test_m13_drift_pin_scoreinput_required_keys_is_unsound_today() -> None:
     instead of silently changing what any code relying on
     `__required_keys__` means. (No production code in this module uses
     `__required_keys__` any more -- `_require_record_shape`'s
-    `DocumentRecord` presence loop now derives from
-    `_required_field_names`, ITS `ScoreInput` value loop and
-    `_require_run_metadata_shape`'s `RunMetadata` loop both derive from
-    `_str_annotated_field_names` -- so this pin exists purely to keep the
-    UNSOUNDNESS itself visible, not to protect a live code path.)"""
+    `DocumentRecord` presence loop derives from `_required_field_names`;
+    its `ScoreInput` value loop and `_require_run_metadata_shape`'s
+    `RunMetadata` value loop both derive from `_str_annotated_field_names`
+    for their REQUIRED `str`-obligated subset (DEBT-53 (prose): each also
+    now has a presence loop over `_required_field_names`/
+    `_RUN_METADATA_REQUIRED_FIELDS`/`_SCORE_REQUIRED_FIELDS`, and the
+    `ScoreInput` loop additionally has a third, optional-only pass over
+    `_optional_str_annotated_field_names` -- so this pin exists purely to
+    keep the UNSOUNDNESS itself visible, not to protect a live code
+    path.)"""
     assert ScoreInput.__required_keys__ != frozenset(_required_fields(ScoreInput))
 
 
@@ -1088,23 +1142,42 @@ def test_shape_validation_covers_every_record_not_just_the_first() -> None:
 
 def test_str_fields_extracts_only_str_annotated_fields_from_a_probe_type() -> None:
     """Atchim R-4 (fresh DEBT-44 instance): pins `_str_fields` ITSELF
-    against `_StrFieldProbe` -- a shape with THREE str fields (not two,
-    matching `DocumentRecord`'s own count by coincidence), a
-    `NotRequired[str]` (resolves to `str` via `get_type_hints`, so it
-    belongs in the result), an `int`, and a `list[str]` (both must be
-    excluded). Before this test, replacing `_str_fields`'s body with the
-    literal `["item_id", "document_id"]` passed the entire 496-test
-    suite (mutation (c) of the FU-01.3-G fix round, reported honestly) --
-    with only two str fields on `DocumentRecord`, "reads the type" and "a
-    hand list that happens to match today's shape" were indistinguishable
-    by any test that only ever exercised `DocumentRecord`. This probe
-    breaks that coincidence."""
+    against `_StrFieldProbe` -- a shape with THREE REQUIRED str fields
+    (not two, matching `DocumentRecord`'s own count by coincidence), a
+    `NotRequired[str]`, an `int`, and a `list[str]` (all three must be
+    excluded from this REQUIRED set). Before this test, replacing
+    `_str_fields`'s body with the literal `["item_id", "document_id"]`
+    passed the entire 496-test suite (mutation (c) of the FU-01.3-G fix
+    round, reported honestly) -- with only two str fields on
+    `DocumentRecord`, "reads the type" and "a hand list that happens to
+    match today's shape" were indistinguishable by any test that only
+    ever exercised `DocumentRecord`. This probe breaks that coincidence.
+
+    DEBT-53 (prose): `optional_field` (`NotRequired[str]`) is NOW
+    EXCLUDED here -- the fix this row prescribes. Before the fix,
+    `_str_fields` called `get_type_hints` with no `include_extras`,
+    which stripped the `NotRequired[...]` wrapper and resolved
+    `optional_field` to plain `str`, wrongly folding a legitimately
+    absent field into the REQUIRED set (measured live at HEAD `49939b2`
+    by the Wave-0 audit). See
+    `test_optional_str_fields_extracts_only_notrequired_str_fields_from_a_probe_type`
+    below for its new home."""
     assert _str_fields(_StrFieldProbe) == [
         "field_a",
         "field_b",
         "field_c",
-        "optional_field",
     ]
+
+
+def test_optional_str_fields_extracts_only_notrequired_str_fields_from_a_probe_type() -> None:
+    """DEBT-53 (prose): the `NotRequired[str]` companion pin -- THE
+    KILLING TEST for the landmine this row describes. Before the fix (no
+    `include_extras`, no `NotRequired` origin check),
+    `_optional_str_fields` did not exist and `optional_field` lived,
+    wrongly, in `_str_fields`'s REQUIRED result above. Replacing
+    `_optional_str_fields`'s body with `[]` (dropping the class this row
+    exists to catch) must go RED here."""
+    assert _optional_str_fields(_StrFieldProbe) == ["optional_field"]
 
 
 def test_str_fields_of_document_record_is_document_id_and_item_id() -> None:

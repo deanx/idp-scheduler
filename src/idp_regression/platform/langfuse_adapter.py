@@ -23,7 +23,7 @@ import random
 import time
 import urllib.parse
 from collections.abc import Callable
-from typing import Any, Literal, NotRequired, cast, get_args, get_origin, get_type_hints
+from typing import Any, NotRequired, cast, get_args, get_origin, get_type_hints
 
 from idp_regression.platform.errors import (
     DatasetFetchFailedError,
@@ -51,28 +51,59 @@ logger = logging.getLogger(__name__)
 
 
 def _str_annotated_field_names(td: type) -> list[str]:
-    """FO-2 (DEBT-48/40/43/47) — derive a TypedDict's `str`-obligated field
-    names from the DECLARED TYPE, never hand-listed. Production-side
-    counterpart of ``tests/platform/_type_pins.py::_str_fields`` (kept as a
-    separate copy, deliberately: production code must not import from
-    ``tests/``).
+    """FO-2 (DEBT-48/40/43/47) — derive a TypedDict's REQUIRED,
+    `str`-obligated field names from the DECLARED TYPE, never hand-listed.
+    Production-side counterpart of
+    ``tests/platform/_type_pins.py::_str_fields`` (kept as a separate
+    copy, deliberately: production code must not import from ``tests/``).
 
-    ⚠️ Why this does NOT also use ``ScoreInput.__required_keys__`` for a
-    separate presence check, as the DocumentRecord guard does above:
-    on this repo's Python (3.13.5) + ``from __future__ import annotations``,
-    ``TypedDict.__required_keys__`` mis-derives ``NotRequired`` fields as
-    required — e.g. ``ScoreInput.__required_keys__`` includes ``"comment"``
-    even though it is declared ``NotRequired[str | None]`` (verified live:
-    ``ScoreInput.__required_keys__ == frozenset({'id', 'name', 'value',
-    'comment'})``). Using it here would make the guard reject every score
-    that omits ``comment`` — a real regression, not a hardening. This
-    function sidesteps that bug entirely: ``get_type_hints`` (no
-    ``include_extras``) resolves ``NotRequired[str | None]`` to ``str |
-    None``, which is not ``str``, so ``comment`` is excluded by the same
-    ``hint is str`` filter regardless of the required/optional mislabel —
-    presence AND type are checked together, in one pass, over exactly the
-    fields this filter identifies."""
-    return sorted(name for name, hint in get_type_hints(td).items() if hint is str)
+    DEBT-53 (prose) fix: this now calls ``get_type_hints(td,
+    include_extras=True)`` and EXCLUDES any field whose origin is
+    ``typing.NotRequired`` — the OLD version called ``get_type_hints``
+    with no ``include_extras``, which strips the ``NotRequired[...]``
+    wrapper entirely, so a hypothetical future ``NotRequired[str]`` field
+    (no ``| None``) would have resolved to plain ``str`` and been wrongly
+    folded into this REQUIRED set — the identical
+    presence-mis-derivation trap ``_required_field_names`` above was
+    fixed for DEBT-49, reintroduced on the VALUE-TYPE axis by the very
+    function meant to sidestep it. ``ScoreInput.comment``
+    (``NotRequired[str | None]``) stays excluded either way, but now
+    because it is explicitly ``NotRequired`` AND its inner type is
+    ``str | None`` (not ``str``) — not by the lucky coincidence the old
+    docstring described. See ``_optional_str_annotated_field_names``
+    below for the ``NotRequired[str]`` companion: fields that are
+    `str`-typed but legitimately absent, which must NEVER be folded into
+    this presence+type combined set."""
+    hints = get_type_hints(td, include_extras=True)
+    result = []
+    for name, hint in hints.items():
+        if get_origin(hint) is NotRequired:
+            continue
+        if hint is str:
+            result.append(name)
+    return sorted(result)
+
+
+def _optional_str_annotated_field_names(td: type) -> list[str]:
+    """DEBT-53 (prose) companion to ``_str_annotated_field_names`` above:
+    the ``NotRequired[str]`` fields of ``td`` — `str`-typed WHEN PRESENT,
+    but legitimately absent. Deliberately a SEPARATE derivation, never
+    folded into the required set: a guard that combines presence+type
+    for a field that may legitimately be missing rejects every score/
+    record that omits it, the exact shape of the landmine this row
+    describes. ``NotRequired[str | None]`` (e.g. ``ScoreInput.comment``)
+    is NOT included here — its inner type is ``str | None``, not ``str``,
+    so it is never type-checked by either derivation, matching today's
+    behaviour."""
+    hints = get_type_hints(td, include_extras=True)
+    result = []
+    for name, hint in hints.items():
+        if get_origin(hint) is not NotRequired:
+            continue
+        (inner,) = get_args(hint)
+        if inner is str:
+            result.append(name)
+    return sorted(result)
 
 
 def _required_field_names(td: type) -> list[str]:
@@ -138,14 +169,33 @@ _DEFAULT_SCORE_WRITE_MAX_ATTEMPTS = 3
 _DEFAULT_SCORE_WRITE_BACKOFF_BASE_SECONDS = 1.0
 _DEFAULT_SCORE_WRITE_BACKOFF_CAP_SECONDS = 8.0
 
-#: FO-2 (DEBT-48): the `str`-obligated fields of ``ScoreInput`` -- computed
-#: ONCE, from the declared type (see ``_str_annotated_field_names``), and
-#: reused by ``_require_record_shape``'s score-loop below. Verified today:
+#: FO-2 (DEBT-48): the REQUIRED `str`-obligated fields of ``ScoreInput``
+#: -- computed ONCE, from the declared type (see
+#: ``_str_annotated_field_names``), and reused by
+#: ``_require_record_shape``'s score-loop below. Verified today:
 #: ``["id", "name", "value"]`` -- ``comment`` is excluded because it is
 #: NOT `str` (it's `NotRequired[str | None]`, i.e. `str | None`), never
 #: because of ``__required_keys__`` (see that function's docstring for why
 #: that attribute is unsafe to use here).
 _SCORE_STR_FIELDS = _str_annotated_field_names(ScoreInput)
+
+#: DEBT-53 (prose): the presence derivation for ``ScoreInput`` -- SEPARATE
+#: from ``_SCORE_STR_FIELDS`` even though both produce ``["id", "name",
+#: "value"]`` today (every required ``ScoreInput`` field happens to be
+#: ``str``), the same MY-25/DEBT-43 reason ``_RUN_METADATA_REQUIRED_
+#: FIELDS`` is kept separate from ``_RUN_METADATA_STR_FIELDS`` below --
+#: collapsing presence onto the `str`-only derivation would silently miss
+#: a future required non-`str` field's presence check.
+_SCORE_REQUIRED_FIELDS = _required_field_names(ScoreInput)
+
+#: DEBT-53 (prose): the ``NotRequired[str]`` fields of ``ScoreInput`` --
+#: `str`-typed WHEN PRESENT, but never required to be present. Empty
+#: today (``comment`` is ``NotRequired[str | None]``, not
+#: ``NotRequired[str]``) -- kept as its own derivation, never folded into
+#: ``_SCORE_STR_FIELDS``, so the day a genuine ``NotRequired[str]`` field
+#: is added it is type-checked ONLY when supplied, not rejected for being
+#: absent.
+_SCORE_OPTIONAL_STR_FIELDS = _optional_str_annotated_field_names(ScoreInput)
 
 #: DEBT-49: the SOUND presence derivation for ``DocumentRecord`` — computed
 #: ONCE, from the declared type (see ``_required_field_names``), and reused
@@ -248,36 +298,60 @@ def _require_record_shape(record: DocumentRecord) -> None:
             "'scores' value (expected a list of score dicts)"
         )
     for score in scores:
-        # FO-2 (DEBT-48/40/43/47): this used to hand-enumerate "id" and
-        # "name" only, omitting "value" (declared `str` on `ScoreInput`,
-        # four lines below the guard FU-01.3-G fixed for `DocumentRecord`)
-        # -- the identical hand-enumeration defect one level down. Now
-        # derived from `_SCORE_STR_FIELDS` (the declared type, via
-        # `_str_annotated_field_names`), covering presence AND value type
-        # for every `str`-obligated field in one pass -- a future
-        # `str`-annotated field on `ScoreInput` auto-generates its own
-        # check here, the same structural fix DoD (3) applied to
-        # `DocumentRecord`. (This single-loop presence+type combination is
-        # sound here only because every one of `ScoreInput`'s REQUIRED
-        # fields -- `id`/`name`/`value` -- is also `str`-annotated; a
-        # required non-`str` field would need the same two-derivation
-        # split `_require_run_metadata_shape` uses below.)
+        # FO-2 (DEBT-48/40/43/47), split per DEBT-53 (prose): this used to
+        # hand-enumerate "id" and "name" only, omitting "value" (declared
+        # `str` on `ScoreInput`, four lines below the guard FU-01.3-G
+        # fixed for `DocumentRecord`) -- the identical hand-enumeration
+        # defect one level down. That was then folded into a SINGLE
+        # presence+type loop over `_SCORE_STR_FIELDS`, "sound only
+        # because every required field happens to be str-annotated" --
+        # the same MY-25 coincidence `_require_run_metadata_shape` below
+        # was already split to avoid, reintroduced here on a different
+        # TypedDict. Now split identically: presence over
+        # `_SCORE_REQUIRED_FIELDS` (every required field, `str`-obligated
+        # or not), type over `_SCORE_STR_FIELDS` (the `str`-obligated
+        # REQUIRED subset only -- presence already guaranteed by the loop
+        # above), and a third pass over `_SCORE_OPTIONAL_STR_FIELDS`
+        # (`NotRequired[str]` fields -- type-checked ONLY when supplied,
+        # never required to be present).
         if not isinstance(score, dict):
             raise ExperimentRecordFailedError(
                 f"record_run: a score for document_id={document_id!r} is not a dict "
                 "(malformed input)"
             )
         score_as_dict = cast(dict[str, Any], score)
-        for key in _SCORE_STR_FIELDS:
-            # INV-02: name the FIELD only, never interpolate the value --
-            # a score value is a verdict literal but is treated as
-            # sensitive here, mirroring `document_id`'s guard above.
-            # (`cast` above: `key` is a runtime str, not a literal, so
-            # ScoreInput's TypedDict subscript restriction doesn't apply.)
-            if key not in score_as_dict or not isinstance(score_as_dict[key], str):
+        for key in _SCORE_REQUIRED_FIELDS:
+            # PRESENCE only -- covers every required field regardless of
+            # value type (MY-25's fix, applied here).
+            if key not in score_as_dict:
                 raise ExperimentRecordFailedError(
-                    f"record_run: a score for document_id={document_id!r} is missing "
-                    f"or has a non-string {key!r}"
+                    f"record_run: a score for document_id={document_id!r} is missing {key!r}"
+                )
+        for key in _SCORE_STR_FIELDS:
+            # VALUE TYPE only, for the REQUIRED `str`-obligated subset --
+            # presence already guaranteed by the loop above, so this
+            # subscript cannot raise KeyError. INV-02: name the FIELD
+            # only, never interpolate the value -- a score value is a
+            # verdict literal but is treated as sensitive here, mirroring
+            # `document_id`'s guard above. (`cast` above: `key` is a
+            # runtime str, not a literal, so ScoreInput's TypedDict
+            # subscript restriction doesn't apply.)
+            if not isinstance(score_as_dict[key], str):
+                raise ExperimentRecordFailedError(
+                    f"record_run: a score for document_id={document_id!r} has a "
+                    f"non-string {key!r}"
+                )
+        for key in _SCORE_OPTIONAL_STR_FIELDS:
+            # DEBT-53 (prose): VALUE TYPE only, and only IF SUPPLIED -- a
+            # `NotRequired[str]` field's absence is legitimate and must
+            # never raise here. This is the fix: the OLD single-loop
+            # derivation would have folded a future field of this shape
+            # into `_SCORE_STR_FIELDS` and rejected every score that
+            # legitimately omitted it.
+            if key in score_as_dict and not isinstance(score_as_dict[key], str):
+                raise ExperimentRecordFailedError(
+                    f"record_run: a score for document_id={document_id!r} has a "
+                    f"non-string {key!r}"
                 )
 
 
@@ -821,7 +895,13 @@ class LangfuseAdapter:
     def mark_run_status(
         self,
         run_id: str,
-        status: Literal["aborted", "complete"],
+        # DEBT-53 (prose) F-5: was a hand-written `Literal["aborted",
+        # "complete"]`, four lines under a comment claiming "never
+        # hand-written" -- `_VALID_RUN_STATUSES` already derives from
+        # this same `RunStatus` alias (types.py), so the parameter now
+        # names it instead of re-declaring its members. One token,
+        # matches the Protocol's own signature (types.py:126).
+        status: RunStatus,
         *,
         action_id: str,
         action_version: str,

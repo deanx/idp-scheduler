@@ -11,7 +11,7 @@ exists to stop.
 
 from __future__ import annotations
 
-from typing import NotRequired, TypedDict, get_origin, get_type_hints
+from typing import NotRequired, TypedDict, get_args, get_origin, get_type_hints
 
 
 def _required_fields(td: type) -> list[str]:
@@ -40,20 +40,50 @@ def _required_fields(td: type) -> list[str]:
 
 
 def _str_fields(td: type) -> list[str]:
-    """Extract the `str`-annotated field names of a TypedDict, sorted --
-    the SINGLE derivation every real value-pin parametrize (record_run's
-    `DocumentRecord`, get_dataset's `DatasetItem`) and `_StrFieldProbe`'s
-    dedicated pin (below) call through. Atchim R-4 (fresh DEBT-44
-    instance, FU-01.3-G fix round): extracting this into a named,
-    independently-testable function is what makes the "type-driven, not
-    a hand list in disguise" claim PINNABLE -- `DocumentRecord` alone has
-    only two `str` fields today, so a hand-written `["item_id",
-    "document_id"]` and a genuine `get_type_hints` derivation are
-    indistinguishable by any test that only ever looks at
-    `DocumentRecord`. `_str_fields` gives the claim a second,
-    structurally different subject (`_StrFieldProbe`) to be tested
-    against."""
-    return sorted(name for name, hint in get_type_hints(td).items() if hint is str)
+    """Extract the REQUIRED `str`-annotated field names of a TypedDict,
+    sorted -- the SINGLE derivation every real value-pin parametrize
+    (record_run's `DocumentRecord`, get_dataset's `DatasetItem`) and
+    `_StrFieldProbe`'s dedicated pin (below) call through. Atchim R-4
+    (fresh DEBT-44 instance, FU-01.3-G fix round): extracting this into a
+    named, independently-testable function is what makes the
+    "type-driven, not a hand list in disguise" claim PINNABLE --
+    `DocumentRecord` alone has only two `str` fields today, so a
+    hand-written `["item_id", "document_id"]` and a genuine
+    `get_type_hints` derivation are indistinguishable by any test that
+    only ever looks at `DocumentRecord`. `_str_fields` gives the claim a
+    second, structurally different subject (`_StrFieldProbe`) to be
+    tested against.
+
+    DEBT-53 (prose) fix: mirrors production's `_str_annotated_field_names`
+    (`langfuse_adapter.py`) -- resolves with `include_extras=True` and
+    EXCLUDES any `NotRequired`-wrapped field, rather than the old
+    no-`include_extras` call that silently folded a hypothetical
+    `NotRequired[str]` field into this REQUIRED set. See
+    `_optional_str_fields` below for the `NotRequired[str]` companion."""
+    hints = get_type_hints(td, include_extras=True)
+    result = []
+    for name, hint in hints.items():
+        if get_origin(hint) is NotRequired:
+            continue
+        if hint is str:
+            result.append(name)
+    return sorted(result)
+
+
+def _optional_str_fields(td: type) -> list[str]:
+    """DEBT-53 (prose) companion to `_str_fields` above: the
+    `NotRequired[str]` fields of `td` -- `str`-typed WHEN PRESENT, never
+    required to be present. Test-side twin of production's
+    `_optional_str_annotated_field_names`."""
+    hints = get_type_hints(td, include_extras=True)
+    result = []
+    for name, hint in hints.items():
+        if get_origin(hint) is not NotRequired:
+            continue
+        (inner,) = get_args(hint)
+        if inner is str:
+            result.append(name)
+    return sorted(result)
 
 
 class _StrFieldProbe(TypedDict):
