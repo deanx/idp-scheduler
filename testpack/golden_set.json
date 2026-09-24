@@ -1,0 +1,558 @@
+{
+  "inv-001-clean": {
+    "document_id": "inv-001-clean.pdf",
+    "fields": {
+      "vendor_name": {
+        "value": "Acme Robotics Ltd",
+        "type": "text",
+        "critical": true
+      },
+      "bill_to": {
+        "value": "Northwind Traders Inc.",
+        "type": "text",
+        "critical": false
+      },
+      "invoice_number": {
+        "value": "INV-1001",
+        "type": "id",
+        "critical": true
+      },
+      "invoice_date": {
+        "value": "2026-01-15",
+        "type": "date",
+        "critical": true
+      },
+      "currency": {
+        "value": "USD",
+        "type": "text",
+        "critical": true
+      },
+      "subtotal": {
+        "value": "1200.00",
+        "type": "number",
+        "critical": true
+      },
+      "total": {
+        "value": "1296.00",
+        "type": "number",
+        "critical": true
+      },
+      "po_number": {
+        "value": "PO-4471",
+        "type": "id",
+        "critical": false
+      },
+      "tax": {
+        "value": "96.00",
+        "type": "number",
+        "critical": false
+      }
+    },
+    "tables": {
+      "line_items": {
+        "match_key": "sku",
+        "critical": true,
+        "rows": [
+          {
+            "sku": "SKU-100",
+            "description": "Widget Assembly Kit",
+            "quantity": "10",
+            "unit_price": "25.00",
+            "amount": "250.00"
+          },
+          {
+            "sku": "SKU-200",
+            "description": "Precision Bearing",
+            "quantity": "20",
+            "unit_price": "12.50",
+            "amount": "250.00"
+          },
+          {
+            "sku": "SKU-300",
+            "description": "Servo Motor",
+            "quantity": "5",
+            "unit_price": "80.00",
+            "amount": "400.00"
+          },
+          {
+            "sku": "SKU-400",
+            "description": "Control Board",
+            "quantity": "2",
+            "unit_price": "150.00",
+            "amount": "300.00"
+          }
+        ]
+      }
+    }
+  },
+  "inv-002-format-variance": {
+    "document_id": "inv-002-format-variance.pdf",
+    "fields": {
+      "vendor_name": {
+        "value": "Acme Robotics Ltd",
+        "type": "text",
+        "critical": true
+      },
+      "bill_to": {
+        "value": "Northwind Traders Inc.",
+        "type": "text",
+        "critical": false
+      },
+      "invoice_number": {
+        "value": "INV-1002",
+        "type": "id",
+        "critical": true
+      },
+      "invoice_date": {
+        "value": "2026-01-22",
+        "type": "date",
+        "critical": true
+      },
+      "currency": {
+        "value": "USD",
+        "type": "text",
+        "critical": true
+      },
+      "subtotal": {
+        "value": "1752.00",
+        "type": "number",
+        "critical": true
+      },
+      "total": {
+        "value": "1892.16",
+        "type": "number",
+        "critical": true
+      },
+      "po_number": {
+        "value": "PO-4488",
+        "type": "id",
+        "critical": false
+      },
+      "tax": {
+        "value": "140.16",
+        "type": "number",
+        "critical": false
+      }
+    },
+    "tables": {
+      "line_items": {
+        "match_key": "sku",
+        "critical": true,
+        "rows": [
+          {
+            "sku": "SKU-101",
+            "description": "Widget Assembly Kit v2",
+            "quantity": "15",
+            "unit_price": "26.00",
+            "amount": "390.00"
+          },
+          {
+            "sku": "SKU-201",
+            "description": "Precision Bearing",
+            "quantity": "30",
+            "unit_price": "13.00",
+            "amount": "390.00"
+          },
+          {
+            "sku": "SKU-301",
+            "description": "Servo Motor",
+            "quantity": "6",
+            "unit_price": "82.00",
+            "amount": "492.00"
+          },
+          {
+            "sku": "SKU-401",
+            "description": "Control Board",
+            "quantity": "3",
+            "unit_price": "160.00",
+            "amount": "480.00"
+          }
+        ]
+      }
+    }
+  },
+  "inv-003-table-heavy": {
+    "document_id": "inv-003-table-heavy.pdf",
+    "fields": {
+      "vendor_name": {
+        "value": "Global Parts Supply Co",
+        "type": "text",
+        "critical": true
+      },
+      "bill_to": {
+        "value": "Meridian Manufacturing",
+        "type": "text",
+        "critical": false
+      },
+      "invoice_number": {
+        "value": "INV-1003",
+        "type": "id",
+        "critical": true
+      },
+      "invoice_date": {
+        "value": "2026-02-03",
+        "type": "date",
+        "critical": true
+      },
+      "currency": {
+        "value": "USD",
+        "type": "text",
+        "critical": true
+      },
+      "subtotal": {
+        "value": "521.00",
+        "type": "number",
+        "critical": true
+      },
+      "total": {
+        "value": "562.68",
+        "type": "number",
+        "critical": true
+      },
+      "po_number": {
+        "value": "PO-4501",
+        "type": "id",
+        "critical": false
+      },
+      "tax": {
+        "value": "41.68",
+        "type": "number",
+        "critical": false
+      }
+    },
+    "tables": {
+      "line_items": {
+        "match_key": "sku",
+        "critical": true,
+        "rows": [
+          {
+            "sku": "SKU-500",
+            "description": "Bolt M6x20",
+            "quantity": "100",
+            "unit_price": "0.10",
+            "amount": "10.00"
+          },
+          {
+            "sku": "SKU-501",
+            "description": "Nut M6",
+            "quantity": "100",
+            "unit_price": "0.05",
+            "amount": "5.00"
+          },
+          {
+            "sku": "SKU-502",
+            "description": "Washer M6",
+            "quantity": "100",
+            "unit_price": "0.02",
+            "amount": "2.00"
+          },
+          {
+            "sku": "SKU-500",
+            "description": "Bolt M6x20 (2nd shipment)",
+            "quantity": "50",
+            "unit_price": "0.10",
+            "amount": "5.00"
+          },
+          {
+            "sku": "SKU-503",
+            "description": "Gasket Set",
+            "quantity": "0",
+            "unit_price": "15.00",
+            "amount": "0.00"
+          },
+          {
+            "sku": "SKU-504",
+            "description": "Hinge Bracket",
+            "quantity": "40",
+            "unit_price": "3.50",
+            "amount": "140.00"
+          },
+          {
+            "sku": "SKU-505",
+            "description": "Cable Tie 200mm",
+            "quantity": "500",
+            "unit_price": "0.03",
+            "amount": "15.00"
+          },
+          {
+            "sku": "SKU-506",
+            "description": "Spacer Ring",
+            "quantity": "60",
+            "unit_price": "0.75",
+            "amount": "45.00"
+          },
+          {
+            "sku": "SKU-507",
+            "description": "Mounting Plate",
+            "quantity": "20",
+            "unit_price": "9.00",
+            "amount": "180.00"
+          },
+          {
+            "sku": "SKU-508",
+            "description": "Rubber Grommet",
+            "quantity": "80",
+            "unit_price": "0.40",
+            "amount": "32.00"
+          },
+          {
+            "sku": "SKU-509",
+            "description": "Lock Washer",
+            "quantity": "100",
+            "unit_price": "0.06",
+            "amount": "6.00"
+          },
+          {
+            "sku": "SKU-510",
+            "description": "Thread Insert",
+            "quantity": "30",
+            "unit_price": "1.20",
+            "amount": "36.00"
+          },
+          {
+            "sku": "SKU-511",
+            "description": "Shim Pack",
+            "quantity": "10",
+            "unit_price": "4.50",
+            "amount": "45.00"
+          }
+        ]
+      }
+    }
+  },
+  "inv-004-multipage": {
+    "document_id": "inv-004-multipage.pdf",
+    "fields": {
+      "vendor_name": {
+        "value": "Continental Freight & Logistics",
+        "type": "text",
+        "critical": true
+      },
+      "bill_to": {
+        "value": "Harbor Point Distribution",
+        "type": "text",
+        "critical": false
+      },
+      "invoice_number": {
+        "value": "INV-1004",
+        "type": "id",
+        "critical": true
+      },
+      "invoice_date": {
+        "value": "2026-02-20",
+        "type": "date",
+        "critical": true
+      },
+      "currency": {
+        "value": "USD",
+        "type": "text",
+        "critical": true
+      },
+      "subtotal": {
+        "value": "1431.25",
+        "type": "number",
+        "critical": true
+      },
+      "total": {
+        "value": "1545.75",
+        "type": "number",
+        "critical": true
+      },
+      "po_number": {
+        "value": "PO-4522",
+        "type": "id",
+        "critical": false
+      },
+      "tax": {
+        "value": "114.50",
+        "type": "number",
+        "critical": false
+      }
+    },
+    "tables": {
+      "line_items": {
+        "match_key": "sku",
+        "critical": true,
+        "rows": [
+          {
+            "sku": "SKU-700",
+            "description": "Freight Item 1",
+            "quantity": "12",
+            "unit_price": "9.00",
+            "amount": "108.00"
+          },
+          {
+            "sku": "SKU-701",
+            "description": "Freight Item 2",
+            "quantity": "8",
+            "unit_price": "14.50",
+            "amount": "116.00"
+          },
+          {
+            "sku": "SKU-702",
+            "description": "Freight Item 3",
+            "quantity": "20",
+            "unit_price": "3.25",
+            "amount": "65.00"
+          },
+          {
+            "sku": "SKU-703",
+            "description": "Freight Item 4",
+            "quantity": "5",
+            "unit_price": "40.00",
+            "amount": "200.00"
+          },
+          {
+            "sku": "SKU-704",
+            "description": "Freight Item 5",
+            "quantity": "16",
+            "unit_price": "6.75",
+            "amount": "108.00"
+          },
+          {
+            "sku": "SKU-705",
+            "description": "Freight Item 6",
+            "quantity": "10",
+            "unit_price": "11.00",
+            "amount": "110.00"
+          },
+          {
+            "sku": "SKU-706",
+            "description": "Freight Item 7",
+            "quantity": "25",
+            "unit_price": "2.40",
+            "amount": "60.00"
+          },
+          {
+            "sku": "SKU-707",
+            "description": "Freight Item 8",
+            "quantity": "6",
+            "unit_price": "18.00",
+            "amount": "108.00"
+          },
+          {
+            "sku": "SKU-708",
+            "description": "Freight Item 9",
+            "quantity": "9",
+            "unit_price": "7.50",
+            "amount": "67.50"
+          },
+          {
+            "sku": "SKU-709",
+            "description": "Freight Item 10",
+            "quantity": "14",
+            "unit_price": "5.00",
+            "amount": "70.00"
+          },
+          {
+            "sku": "SKU-710",
+            "description": "Freight Item 11",
+            "quantity": "18",
+            "unit_price": "3.00",
+            "amount": "54.00"
+          },
+          {
+            "sku": "SKU-711",
+            "description": "Freight Item 12",
+            "quantity": "7",
+            "unit_price": "22.00",
+            "amount": "154.00"
+          },
+          {
+            "sku": "SKU-712",
+            "description": "Freight Item 13",
+            "quantity": "11",
+            "unit_price": "8.25",
+            "amount": "90.75"
+          },
+          {
+            "sku": "SKU-713",
+            "description": "Freight Item 14",
+            "quantity": "4",
+            "unit_price": "30.00",
+            "amount": "120.00"
+          }
+        ]
+      }
+    }
+  },
+  "inv-005-missing-fields": {
+    "document_id": "inv-005-missing-fields.pdf",
+    "fields": {
+      "vendor_name": {
+        "value": "Riverside Office Supplies",
+        "type": "text",
+        "critical": true
+      },
+      "bill_to": {
+        "value": "Cedar Grove Elementary",
+        "type": "text",
+        "critical": false
+      },
+      "invoice_number": {
+        "value": "INV-1005",
+        "type": "id",
+        "critical": true
+      },
+      "invoice_date": {
+        "value": "2026-03-01",
+        "type": "date",
+        "critical": true
+      },
+      "currency": {
+        "value": "USD",
+        "type": "text",
+        "critical": true
+      },
+      "subtotal": {
+        "value": "215.00",
+        "type": "number",
+        "critical": true
+      },
+      "total": {
+        "value": "215.00",
+        "type": "number",
+        "critical": true
+      },
+      "po_number": {
+        "value": "N/A",
+        "type": "id",
+        "critical": false
+      },
+      "tax": {
+        "value": "0.00",
+        "type": "number",
+        "critical": false
+      }
+    },
+    "tables": {
+      "line_items": {
+        "match_key": "sku",
+        "critical": true,
+        "rows": [
+          {
+            "sku": "SKU-900",
+            "description": "Copy Paper A4 (500 sheets)",
+            "quantity": "20",
+            "unit_price": "4.50",
+            "amount": "90.00"
+          },
+          {
+            "sku": "SKU-901",
+            "description": "Stapler Heavy Duty",
+            "quantity": "5",
+            "unit_price": "12.00",
+            "amount": "60.00"
+          },
+          {
+            "sku": "SKU-902",
+            "description": "Whiteboard Markers (Pack of 8)",
+            "quantity": "10",
+            "unit_price": "6.50",
+            "amount": "65.00"
+          }
+        ]
+      }
+    }
+  }
+}
