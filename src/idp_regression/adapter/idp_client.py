@@ -34,7 +34,7 @@ from idp_regression.adapter.types import NormalizedOutput
 logger = logging.getLogger(__name__)
 
 #: OAuth2 client-credentials token endpoint (ADR-0002 §Context).
-TOKEN_URL = "https://anypoint.mulesoft.com/accounts/api/v2/oauth2/token"
+TOKEN_URL = "https://anypoint.mulesoft.com/accounts/api/v2/oauth2/token"  # noqa: S105 - a public endpoint URL, not a credential
 
 DEFAULT_SUBMIT_TIMEOUT_SECONDS = 30.0
 DEFAULT_POLL_TIMEOUT_SECONDS = 120.0

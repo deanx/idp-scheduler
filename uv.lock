@@ -386,7 +386,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "langfuse", specifier = ">=4.15.4" },
+    { name = "langfuse", specifier = ">=4.15.4,<4.16" },
     { name = "python-dotenv", specifier = ">=1.2.3" },
 ]
 

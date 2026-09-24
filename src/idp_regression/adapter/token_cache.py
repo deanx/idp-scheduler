@@ -57,7 +57,7 @@ class TokenCache:
         except IDPAuthenticationError:
             # Fail-closed, no retry (A3) — propagate the typed error as-is.
             raise
-        except Exception as exc:  # noqa: BLE001 - fail-closed, wrap as typed error
+        except Exception as exc:
             raise IDPAuthenticationError("OAuth token request failed") from exc
         self._token = token
         self._expires_at = self._clock() + expires_in

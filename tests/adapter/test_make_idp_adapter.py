@@ -46,8 +46,8 @@ def test_default_terminal_and_success_statuses_are_succeeded_only(
 ) -> None:
     _set_required_env(monkeypatch)
     adapter = make_idp_adapter(_ORG_ID)
-    assert adapter._terminal_statuses == {"SUCCEEDED"}  # noqa: SLF001 - white-box pin
-    assert adapter._success_statuses == {"SUCCEEDED"}  # noqa: SLF001
+    assert adapter._terminal_statuses == {"SUCCEEDED"}
+    assert adapter._success_statuses == {"SUCCEEDED"}
 
 
 def test_comma_separated_terminal_statuses_are_parsed_into_a_set(
@@ -57,8 +57,8 @@ def test_comma_separated_terminal_statuses_are_parsed_into_a_set(
     monkeypatch.setenv("IDP_TERMINAL_STATUSES", "SUCCEEDED,FAILED,PARTIAL_SUCCESS")
     monkeypatch.setenv("IDP_SUCCESS_STATUSES", "SUCCEEDED,PARTIAL_SUCCESS")
     adapter = make_idp_adapter(_ORG_ID)
-    assert adapter._terminal_statuses == {"SUCCEEDED", "FAILED", "PARTIAL_SUCCESS"}  # noqa: SLF001
-    assert adapter._success_statuses == {"SUCCEEDED", "PARTIAL_SUCCESS"}  # noqa: SLF001
+    assert adapter._terminal_statuses == {"SUCCEEDED", "FAILED", "PARTIAL_SUCCESS"}
+    assert adapter._success_statuses == {"SUCCEEDED", "PARTIAL_SUCCESS"}
 
 
 def test_whitespace_around_comma_separated_statuses_is_stripped(
@@ -68,7 +68,7 @@ def test_whitespace_around_comma_separated_statuses_is_stripped(
     monkeypatch.setenv("IDP_TERMINAL_STATUSES", " SUCCEEDED , FAILED ")
     monkeypatch.setenv("IDP_SUCCESS_STATUSES", "SUCCEEDED")
     adapter = make_idp_adapter(_ORG_ID)
-    assert adapter._terminal_statuses == {"SUCCEEDED", "FAILED"}  # noqa: SLF001
+    assert adapter._terminal_statuses == {"SUCCEEDED", "FAILED"}
 
 
 _TIMING_ENV_NAMES = [
@@ -201,7 +201,7 @@ def test_org_id_parameter_reaches_the_adapter_unchanged(
     `_org_id`, not something derived from `IDP_ORG_ID`."""
     _set_required_env(monkeypatch)
     adapter = make_idp_adapter("a-distinctive-org-id-4d9c")
-    assert adapter._org_id == "a-distinctive-org-id-4d9c"  # noqa: SLF001 - white-box pin
+    assert adapter._org_id == "a-distinctive-org-id-4d9c"
 
 
 def test_idp_org_id_env_var_is_not_read_even_when_set(
@@ -217,4 +217,4 @@ def test_idp_org_id_env_var_is_not_read_even_when_set(
     _set_required_env(monkeypatch)
     monkeypatch.setenv("IDP_ORG_ID", "env-org-should-be-ignored")
     adapter = make_idp_adapter("param-org-should-win")
-    assert adapter._org_id == "param-org-should-win"  # noqa: SLF001
+    assert adapter._org_id == "param-org-should-win"

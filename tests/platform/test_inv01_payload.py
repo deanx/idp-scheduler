@@ -80,8 +80,8 @@ class RecordingTracingClient:
 def test_write_scores_payload_never_carries_a_file_path_or_bytes() -> None:
     client = RecordingHttpClient()
     adapter = LangfuseAdapter(client=client, tracing_client=RecordingTracingClient())
-    adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
-    adapter._cached_dataset_name = "ds"  # noqa: SLF001
+    adapter._item_cache = {"item-1": "ds-1"}
+    adapter._cached_dataset_name = "ds"
     scores = build_score_inputs(
         golden={
             "document_id": "invoice-007.pdf",
@@ -193,8 +193,8 @@ def test_record_run_completes_and_posts_no_sentinel_value_in_any_score_body() ->
     golden_sentinel = "SENTINEL-GOLDEN-VALUE-7f3a"
     client = RecordingHttpClient()
     adapter = LangfuseAdapter(client=client, tracing_client=RecordingTracingClient())
-    adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
-    adapter._cached_dataset_name = "ds"  # noqa: SLF001
+    adapter._item_cache = {"item-1": "ds-1"}
+    adapter._cached_dataset_name = "ds"
     scores = build_score_inputs(
         golden={
             "fields": {"total": {"value": golden_sentinel, "type": "number", "critical": True}}
@@ -243,8 +243,8 @@ def test_experiment_item_input_contains_only_document_id() -> None:
     client = RecordingHttpClient()
     tracing_client = RecordingTracingClient()
     adapter = LangfuseAdapter(client=client, tracing_client=tracing_client)
-    adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
-    adapter._cached_dataset_name = "ds"  # noqa: SLF001
+    adapter._item_cache = {"item-1": "ds-1"}
+    adapter._cached_dataset_name = "ds"
 
     adapter.record_run(
         dataset_name="ds",
@@ -280,8 +280,8 @@ def test_experiment_item_expected_output_is_never_the_golden() -> None:
     client = RecordingHttpClient()
     tracing_client = RecordingTracingClient()
     adapter = LangfuseAdapter(client=client, tracing_client=tracing_client)
-    adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
-    adapter._cached_dataset_name = "ds"  # noqa: SLF001
+    adapter._item_cache = {"item-1": "ds-1"}
+    adapter._cached_dataset_name = "ds"
 
     adapter.record_run(
         dataset_name="ds",
@@ -309,8 +309,8 @@ def test_experiment_task_output_is_the_verdict_map_never_a_raw_value() -> None:
     client = RecordingHttpClient()
     tracing_client = RecordingTracingClient()
     adapter = LangfuseAdapter(client=client, tracing_client=tracing_client)
-    adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
-    adapter._cached_dataset_name = "ds"  # noqa: SLF001
+    adapter._item_cache = {"item-1": "ds-1"}
+    adapter._cached_dataset_name = "ds"
     scores: list[ScoreInput] = [
         {
             "id": score_id(run_id="run-1", document_id="doc-1", score_name="field:total"),
@@ -348,8 +348,8 @@ def test_run_metadata_forwarded_as_experiment_metadata() -> None:
     client = RecordingHttpClient()
     tracing_client = RecordingTracingClient()
     adapter = LangfuseAdapter(client=client, tracing_client=tracing_client)
-    adapter._item_cache = {"item-1": "ds-1"}  # noqa: SLF001
-    adapter._cached_dataset_name = "ds"  # noqa: SLF001
+    adapter._item_cache = {"item-1": "ds-1"}
+    adapter._cached_dataset_name = "ds"
 
     adapter.record_run(
         dataset_name="ds",

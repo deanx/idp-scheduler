@@ -33,12 +33,12 @@ def _adapter(
     monkeypatch.setattr(
         transport,
         "post_json",
-        lambda *a, **kw: (200, {"access_token": "tok-1", "expires_in": 300}),  # noqa: ARG005
+        lambda *a, **kw: (200, {"access_token": "tok-1", "expires_in": 300}),
     )
     monkeypatch.setattr(
         transport,
         "post_multipart_file",
-        lambda *a, **kw: submit_result,  # noqa: ARG005
+        lambda *a, **kw: submit_result,
     )
     return MuleSoftIDPAdapter(
         client_id="cid",

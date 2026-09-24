@@ -147,7 +147,7 @@ def _validate_actual(actual: NormalizedOutput) -> None:
 
 
 def _classify_field(
-    name: str,
+    name: str,  # noqa: ARG001 - kept for call-site symmetry/future error context
     gvalue: str | None,
     ftype: str,
     critical: bool,

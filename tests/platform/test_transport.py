@@ -23,12 +23,12 @@ def test_redact_strips_a_basic_auth_header_value() -> None:
 
 def test_client_has_a_configurable_bounded_timeout() -> None:
     client = UrllibHttpClient("http://localhost:1", "pub", "sec", timeout_seconds=5.0)
-    assert client._timeout_seconds == 5.0  # noqa: SLF001
+    assert client._timeout_seconds == 5.0
 
 
 def test_client_defaults_to_a_bounded_timeout() -> None:
     client = UrllibHttpClient("http://localhost:1", "pub", "sec")
-    assert 0 < client._timeout_seconds <= 60  # noqa: SLF001
+    assert 0 < client._timeout_seconds <= 60
 
 
 def test_socket_timeout_raises_typed_transport_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -127,7 +127,7 @@ class _RecordingHandler(http.server.BaseHTTPRequestHandler):
     received_auth_headers: list[str | None] = []
     response_status = 200
 
-    def do_GET(self) -> None:  # noqa: N802 - stdlib handler method name
+    def do_GET(self) -> None:
         self.received_auth_headers.append(self.headers.get("Authorization"))
         self.send_response(self.response_status)
         if self.response_status in (301, 302, 303, 307, 308):

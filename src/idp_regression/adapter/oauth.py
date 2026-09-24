@@ -21,7 +21,7 @@ from idp_regression.adapter.errors import IDPAuthenticationError, IDPTransportEr
 
 #: OAuth2 client-credentials token endpoint — identical to
 #: ``idp_client.TOKEN_URL`` (ADR-0002 §Context).
-TOKEN_URL = "https://anypoint.mulesoft.com/accounts/api/v2/oauth2/token"
+TOKEN_URL = "https://anypoint.mulesoft.com/accounts/api/v2/oauth2/token"  # noqa: S105 - a public endpoint URL, not a credential
 
 #: A sane upper bound on a token's advertised lifetime (1 year) — mirrors
 #: ``idp_client.MAX_EXPIRES_IN_SECONDS``.

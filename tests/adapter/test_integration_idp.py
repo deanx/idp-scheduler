@@ -43,7 +43,7 @@ def test_live_oauth_token_fetch_and_cache_reuse() -> None:
     # not an env var make_idp_adapter() reads itself -- IDP_ORG_ID here is
     # only this test's own test-harness-convenience source for the value.
     adapter = make_idp_adapter(org_id)
-    token_cache = adapter._token_cache  # noqa: SLF001 - white-box, this IS the test
+    token_cache = adapter._token_cache
 
     first = token_cache.get()
     assert isinstance(first, str) and first

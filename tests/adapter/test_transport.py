@@ -357,7 +357,7 @@ class _RecordingHandler(http.server.BaseHTTPRequestHandler):
     received_auth_headers: list[str | None] = []
     response_status = 200
 
-    def do_GET(self) -> None:  # noqa: N802 - stdlib handler method name
+    def do_GET(self) -> None:
         self.received_auth_headers.append(self.headers.get("Authorization"))
         self.send_response(self.response_status)
         if self.response_status in (301, 302, 303, 307, 308):

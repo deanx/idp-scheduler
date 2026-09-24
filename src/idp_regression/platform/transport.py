@@ -110,11 +110,13 @@ class UrllibHttpClient:
 
     def request(self, method: str, path: str, body: Any = None) -> tuple[int, Any]:
         data = None if body is None else json.dumps(body).encode("utf-8")
-        req = urllib.request.Request(self._host + path, data=data, method=method)
+        req = urllib.request.Request(  # noqa: S310 - configured Langfuse host, no-redirect
+            self._host + path, data=data, method=method
+        )
         req.add_header("Authorization", self._auth_header)
         req.add_header("Content-Type", "application/json")
         try:
-            with _urlopen(req, self._timeout_seconds) as resp:  # noqa: S310 - internal Langfuse host only
+            with _urlopen(req, self._timeout_seconds) as resp:
                 raw = resp.read().decode("utf-8")
                 status = resp.status
         except urllib.error.HTTPError as exc:

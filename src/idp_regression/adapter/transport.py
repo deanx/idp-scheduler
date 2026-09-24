@@ -125,7 +125,9 @@ def post_json(
     headers: dict[str, str] | None = None,
 ) -> tuple[int, Any]:
     data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(url, data=data, method="POST")
+    req = urllib.request.Request(  # noqa: S310 - configured host, no-redirect (ADR-0002)
+        url, data=data, method="POST"
+    )
     req.add_header("Content-Type", "application/json")
     for key, value in (headers or {}).items():
         req.add_header(key, value)
@@ -138,7 +140,7 @@ def get_json(
     timeout_seconds: float,
     headers: dict[str, str] | None = None,
 ) -> tuple[int, Any]:
-    req = urllib.request.Request(url, method="GET")
+    req = urllib.request.Request(url, method="GET")  # noqa: S310 - IDP host, no-redirect
     for key, value in (headers or {}).items():
         req.add_header(key, value)
     status, body, _response_headers = _send(req, timeout_seconds)
@@ -155,7 +157,7 @@ def get_json_with_headers(
     to read ``Retry-After`` on a 429. Kept as a separate function rather
     than widening ``get_json``'s return shape so every existing ``get_json``
     caller/test (submit-leg-adjacent, T-01.2) stays untouched."""
-    req = urllib.request.Request(url, method="GET")
+    req = urllib.request.Request(url, method="GET")  # noqa: S310 - IDP host, no-redirect
     for key, value in (headers or {}).items():
         req.add_header(key, value)
     return _send(req, timeout_seconds)
@@ -198,7 +200,9 @@ def post_multipart_file(
     body += file_bytes
     body += f"\r\n--{boundary}--\r\n".encode()
 
-    req = urllib.request.Request(url, data=bytes(body), method="POST")
+    req = urllib.request.Request(  # noqa: S310 - configured host, no-redirect (ADR-0002)
+        url, data=bytes(body), method="POST"
+    )
     req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
     for key, value in (headers or {}).items():
         req.add_header(key, value)
@@ -223,7 +227,9 @@ def post_empty_multipart(
     ``post_multipart_file``/``get_json`` use, never a second transport."""
     boundary = uuid.uuid4().hex
     body = f"--{boundary}--\r\n".encode()
-    req = urllib.request.Request(url, data=body, method="POST")
+    req = urllib.request.Request(  # noqa: S310 - configured host, no-redirect (ADR-0002)
+        url, data=body, method="POST"
+    )
     req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
     for key, value in (headers or {}).items():
         req.add_header(key, value)
@@ -288,7 +294,7 @@ def _send(req: urllib.request.Request, timeout_seconds: float) -> tuple[int, Any
     unexpected_redirect = False
     response_headers: dict[str, str] = {}
     try:
-        with _urlopen(req, timeout_seconds) as resp:  # noqa: S310 - internal MuleSoft IDP host only
+        with _urlopen(req, timeout_seconds) as resp:
             raw_bytes = _read_bounded(resp)
             status = resp.status
             response_headers = _response_headers(resp)

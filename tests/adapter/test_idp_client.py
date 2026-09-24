@@ -84,10 +84,10 @@ def _adapter(
     random_func: Callable[[], float] | None = None,
 ) -> MuleSoftIDPAdapter:
     monkeypatch.setattr(
-        transport, "post_json", lambda *a, **kw: fetch_token_result  # noqa: ARG005
+        transport, "post_json", lambda *a, **kw: fetch_token_result
     )
     monkeypatch.setattr(
-        transport, "post_multipart_file", lambda *a, **kw: submit_result  # noqa: ARG005
+        transport, "post_multipart_file", lambda *a, **kw: submit_result
     )
 
     def _padded(

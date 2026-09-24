@@ -8,7 +8,12 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "langfuse>=4.15.4",
+    # DEBT-75: capped, not just pinned-by-lock. CT-05 and the three
+    # make_platform tests in tests/platform/test_langfuse_adapter.py pin
+    # SDK internals (see CLAUDE.md External services) that a version bump
+    # breaks silently — a bump past this cap requires the CT-05 re-probe
+    # sweep before the ceiling moves.
+    "langfuse>=4.15.4,<4.16",
     "python-dotenv>=1.2.3",
 ]
 
@@ -50,11 +55,56 @@ strict = true
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
-packages = ["idp_regression"]
+# DEBT-33 (scope leg): a bare `mypy` invocation must check the same file
+# set as the documented gate (`mypy src tests`) or the config silently
+# lies about what CI enforces. `files` mirrors that command exactly.
+files = ["src", "tests"]
 
 [tool.ruff]
 line-length = 99
 target-version = "py313"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+# DEBT-41: bandit (S) enabled — the transport modules open URLs from
+# config-influenced input and the adapter handles OAuth secrets.
+# DEBT-37/DEBT-73: RUF100 enabled to catch stale `# noqa` markers; ARG,
+# BLE and N added because the repo already carries hand-written `# noqa`
+# comments against exactly these families (see DEBT-73) that were
+# previously decorative — selecting the rule makes each one either a
+# real, reviewed suppression or a flagged dead one.
+# SLF001 (flake8-self, private-member-access) is DELIBERATELY NOT
+# selected this pass: 47 of DEBT-73's 71 sites are this one family, most
+# of them in other lanes' `tests/adapter` and `tests/platform` files that
+# were being edited concurrently while this pass ran. Enabling it safely
+# means clearing dozens of already-stale per-line markers spread across
+# files this lane doesn't own, one file at a time — a dedicated pass, not
+# a config toggle. Left open; see DEBT-73 report.
+select = ["E", "F", "I", "UP", "B", "SIM", "S", "ARG", "BLE", "N", "RUF100"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test-file idioms, not security/quality findings: `assert` is how pytest
+# reports a failure (S101); fixtures, Protocol stubs and lambda mocks take
+# arguments a specific test doesn't use, by design (ARG001/ARG002/ARG005);
+# subprocess calls, temp-file paths and a permissive chmod are exercised
+# deliberately by tooling/hardening tests, not by runtime code
+# (S603/S607/S106/S108/S103); `do_GET` mirrors
+# `http.server.BaseHTTPRequestHandler`'s fixed handler name (N802).
+"tests/**" = ["S101", "ARG001", "ARG002", "ARG005", "S603", "S607", "S106", "S108", "S103", "N802"]
+# `redirect_request` overrides `urllib.request.HTTPRedirectHandler`'s fixed
+# signature (ADR-0002 no-redirect opener) — args are unused by design.
+"src/idp_regression/adapter/transport.py" = ["ARG002"]
+"src/idp_regression/platform/transport.py" = ["ARG002"]
+# `emit` overrides `logging.Handler`'s fixed signature (record unused —
+# only the fact that a record was logged matters, per R5 watcher design).
+"src/idp_regression/platform/tracing.py" = ["ARG002"]
+# `task(**kwargs)` is the duck-typed callback shape `run_experiment`
+# calls by position/keyword from the SDK side (ADR-0005 #9); the closure
+# doesn't consume every field the SDK may pass.
+"src/idp_regression/platform/langfuse_adapter.py" = ["ARG001", "ARG002"]
+# DEBT-73 remainder, not fixed here (owned by Lane D/orchestration):
+# five exception classes (CheckVersionsRefused, StateFileLocked,
+# _ArgumentParsingFailed, RunAborted, _PathContainmentViolation) predate
+# this rule and are referenced by name at multiple call sites; renaming
+# is a behavior-visible change outside tooling/config scope. Tracked in
+# DEBT-73's report to Lane E's caller, not swept.
+"src/idp_regression/orchestration/*.py" = ["N818"]
