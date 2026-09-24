@@ -92,7 +92,7 @@ https://idp-rt.us-east-1.anypoint.mulesoft.com/api/v1/organizations/ef1232be-0e8
 
 ### 2.1 Extract each document once and keep the raw responses
 ```bash
-ORG=<org-id>; ACTION=<action-id>; VER=1.0.0
+ORG=ef1232be-0e85-43e7-a7b2-927d32eb6d38; ACTION=fb900ba5-de93-4445-9ddb-89fe175585b2; VER=1.0.0
 mkdir -p testpack/captures
 for f in testpack/inv-00*.pdf; do
   .venv/bin/python scripts/capture_raw.py \
@@ -133,11 +133,29 @@ are correct, unnecessary, or wrong. Record the answer in the ADR-0002 A11 note e
 ## Phase 3 — Load the golden set into Langfuse (~5 min, no cost)
 
 ```bash
-.venv/bin/python scripts/provision_golden_dataset.py --dry-run --golden testpack/golden_set.json
-.venv/bin/python scripts/provision_golden_dataset.py          --golden testpack/golden_set.json
+DATASET=idp-regression-testpack
+
+# See exactly what would be sent, touching no network.
+# --dry-run prints field NAMES plus a payload digest; add --show-values only if
+# you deliberately want the expected values on your terminal.
+.venv/bin/python scripts/provision_golden_dataset.py \
+  --dataset "$DATASET" --golden-file testpack/golden_set.json \
+  --seed inv-001-clean --dry-run
+
+# Provision all five. The script does ONE item per invocation by design —
+# it also provisions the committed golden JSON Schema onto the dataset.
+for s in inv-001-clean inv-002-format-variance inv-003-table-heavy \
+         inv-004-multipage inv-005-missing-fields; do
+  .venv/bin/python scripts/provision_golden_dataset.py \
+    --dataset "$DATASET" --golden-file testpack/golden_set.json --seed "$s"
+done
 ```
-`--dry-run` prints field *names* and a digest, not values. Set `GOLDEN_DATASET_NAME` in `.env` to
-the dataset name you used.
+
+Pass `--dataset "$DATASET"` to every later command. (Putting it in `.env` as
+`GOLDEN_DATASET_NAME` only feeds `run_eval_local.sh` — see 1.2.)
+
+> **Flag names matter here:** it is `--golden-file` (not `--golden`), `--dataset` is required, and
+> `--seed` selects **one** key from the file. The keys are the `inv-00*` names above.
 
 > The committed golden JSON Schema is provisioned onto the dataset at the same time. If you later
 > change the schema without re-provisioning, every run aborts `schema_drift` — that is deliberate.
