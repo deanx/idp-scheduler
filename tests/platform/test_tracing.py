@@ -24,6 +24,7 @@ import pytest
 from idp_regression.platform.errors import ExperimentRecordFailedError, FlushFailedError
 from idp_regression.platform.tracing import (
     LANGFUSE_SDK_LOGGER_NAME,
+    OTEL_SDK_EXPORT_LOGGER_NAME,
     OTLP_EXPORTER_LOGGER_NAME,
     ExperimentItem,
     record_experiment,
@@ -429,3 +430,120 @@ def test_otlp_path_never_leaks_the_auth_header_on_a_4xx_or_5xx_export_failure(
 
     assert "Basic" not in str(excinfo.value)
     assert "cHVibGljOnNlY3JldA==" not in str(excinfo.value)
+
+
+# --- DEBT-27(a): opentelemetry.sdk.trace.export queue-drop, false NEGATIVE ---
+
+
+def test_debt27a_span_queue_full_drop_warning_raises_flush_failed() -> None:
+    """DEBT-27(a): before the fix, a BatchSpanProcessor queue-full DROP
+    (logged at WARNING on `opentelemetry.sdk.trace.export`, never
+    ERROR, never on the OTLP-exporter-specific logger) was invisible to
+    every watcher here -- a run with incomplete evidence reported GREEN.
+    THE KILLING TEST: replacing the new watcher's logger name, level, or
+    filter with a no-op must go RED here."""
+    items = _items(1)
+
+    class _QueueFullDrop(_OkTracingClient):
+        def run_experiment(self, **kwargs: object) -> _FakeResult:
+            logging.getLogger(OTEL_SDK_EXPORT_LOGGER_NAME).warning(
+                "Queue is full, likely spans will be dropped."
+            )
+            return super().run_experiment(**kwargs)
+
+    with pytest.raises(FlushFailedError):
+        record_experiment(_QueueFullDrop(items), run_name="r", items=items, task=_task)
+
+
+def test_debt27a_an_unrelated_benign_warning_on_the_same_logger_does_not_raise() -> None:
+    """ADR-0005 #9 amendment A1: a fix MUST NOT trade the false negative
+    away for a false positive. Widening the watched logger set AND
+    lowering the level floor to WARNING, with no message filter, would
+    make ANY WARNING on this logger abort a healthy run -- this proves
+    the `_DropClassFilter` is actually doing the discriminating, not
+    just the level."""
+    items = _items(1)
+
+    class _BenignWarning(_OkTracingClient):
+        def run_experiment(self, **kwargs: object) -> _FakeResult:
+            logging.getLogger(OTEL_SDK_EXPORT_LOGGER_NAME).warning(
+                "Overriding of current TracerProvider is not allowed"
+            )
+            return super().run_experiment(**kwargs)
+
+    items_result = record_experiment(_BenignWarning(items), run_name="r", items=items, task=_task)
+    assert items_result == {"item-0": "trace-item-0"}
+
+
+def test_debt27a_watcher_handler_is_also_removed_after_the_call() -> None:
+    items = _items(1)
+    export_logger = logging.getLogger(OTEL_SDK_EXPORT_LOGGER_NAME)
+    before = len(export_logger.handlers)
+
+    record_experiment(_OkTracingClient(items), run_name="r", items=items, task=_task)
+
+    assert len(export_logger.handlers) == before
+
+
+# --- DEBT-17 / DEBT-27(b): cross-talk between concurrent record_experiment
+# calls in the same process (never the production CLI -- one client per
+# process -- but a real risk in a process running multiple clients, e.g.
+# this test suite) --------------------------------------------------------
+
+
+def test_debt17_record_experiment_calls_are_mutually_exclusive_in_one_process() -> None:
+    """DEBT-17 / DEBT-27(b): two record_experiment calls in the same
+    process must never have their watcher windows open at the same time
+    -- otherwise one call's watcher could observe (or fail to be blamed
+    for) an ERROR logged by a wholly different, concurrent call. THE
+    KILLING TEST: removing the module-level lock makes thread B enter
+    `run_experiment` WHILE thread A is still inside it, flipping
+    `overlap_observed`, which this test asserts against directly (not
+    inferred from flakiness)."""
+    entered = threading.Event()
+    release = threading.Event()
+    overlap_observed = threading.Event()
+    active = {"count": 0}
+    active_lock = threading.Lock()  # test-only bookkeeping, not the fix under test
+
+    class _BlockingClient(_OkTracingClient):
+        def run_experiment(self, **kwargs: object) -> _FakeResult:
+            with active_lock:
+                active["count"] += 1
+                if active["count"] > 1:
+                    overlap_observed.set()
+            try:
+                if not entered.is_set():
+                    entered.set()
+                    release.wait(timeout=5.0)
+            finally:
+                with active_lock:
+                    active["count"] -= 1
+            return super().run_experiment(**kwargs)
+
+    items = _items(1)
+    client_a = _BlockingClient(items)
+    client_b = _BlockingClient(items)
+
+    thread_a = threading.Thread(
+        target=record_experiment,
+        kwargs={"tracing_client": client_a, "run_name": "a", "items": items, "task": _task},
+    )
+    thread_a.start()
+    assert entered.wait(timeout=5.0), "thread A never entered run_experiment"
+
+    thread_b = threading.Thread(
+        target=record_experiment,
+        kwargs={"tracing_client": client_b, "run_name": "b", "items": items, "task": _task},
+    )
+    thread_b.start()
+    # Thread B must be BLOCKED on the lock, not inside run_experiment yet.
+    thread_b.join(timeout=0.5)
+    assert thread_b.is_alive(), "thread B ran concurrently with thread A -- calls were not serialized"
+
+    release.set()
+    thread_a.join(timeout=5.0)
+    thread_b.join(timeout=5.0)
+    assert not thread_a.is_alive()
+    assert not thread_b.is_alive()
+    assert not overlap_observed.is_set()

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -38,10 +39,50 @@ from idp_regression.platform.errors import ExperimentRecordFailedError, FlushFai
 #: on export failure).
 OTLP_EXPORTER_LOGGER_NAME = "opentelemetry.exporter.otlp.proto.http.trace_exporter"
 
+#: DEBT-27(a): the OTel SDK's own span-export logger (parent of the
+#: exporter-specific one above) — a `BatchSpanProcessor` queue-full DROP
+#: is logged here, typically at WARNING, and was previously invisible to
+#: this module (only the OTLP exporter's own ERROR-level failures were
+#: watched). A span silently dropped by a full queue is a genuine
+#: false-NEGATIVE residual (a run reports GREEN with incomplete evidence)
+#: -- see `_DropClassFilter` below for why this is filtered by MESSAGE,
+#: not just level: a bare WARNING floor on this logger would also match
+#: unrelated, benign warnings, trading a false negative for a false
+#: positive, which ADR-0005 #9 amendment A1 forbids doing silently.
+OTEL_SDK_EXPORT_LOGGER_NAME = "opentelemetry.sdk.trace.export"
+
 #: The langfuse SDK's own logger (and its submodules, via propagation) —
 #: a failed `dataset_run_items.create` call (R5c) is logged here, not on
 #: the OTLP exporter logger.
 LANGFUSE_SDK_LOGGER_NAME = "langfuse"
+
+#: DEBT-27(a): substrings (case-insensitive) the OTel SDK actually uses
+#: for a span-processor DROP -- "queue is full" (BatchSpanProcessor's
+#: `_export_batch`/`on_end`, current OTel Python SDK wording) and the
+#: more generic "dropping"/"dropped" a future SDK version might phrase it
+#: with. Matching the WORDING, not merely the level, is what keeps a
+#: benign WARNING on the same logger (if one is ever added) from
+#: widening the false-positive surface DEBT-27's false positive leg
+#: already describes.
+_DROP_CLASS_MESSAGE_MARKERS = ("queue is full", "dropping", "dropped")
+
+#: DEBT-17 / DEBT-27(b): the log-watch handlers below are attached to
+#: PROCESS-WIDE loggers by design (R5 -- catches a background-thread
+#: export that fires mid-call, not just a synchronous raise). In a
+#: process running exactly one `LangfuseAdapter`/`Langfuse` client
+#: sequentially (the real CLI, ADR-0001), that is always correct. In a
+#: process running MULTIPLE clients concurrently (never the production
+#: CLI -- observed in this test suite), one call's watcher could
+#: previously observe an ERROR from a wholly different, concurrent
+#: `record_experiment` call: a false FAIL for a run with nothing wrong,
+#: or (the mirror case) a real failure attributed to the wrong call. This
+#: lock makes every `record_experiment` call in this process MUTUALLY
+#: EXCLUSIVE for the span the watchers are attached -- no two watcher
+#: windows can ever overlap, closing the cross-talk case completely
+#: without narrowing what any one watcher window itself catches (a
+#: background export thread firing DURING this call's own window is
+#: still legitimately this call's problem, and is still caught).
+_RECORD_EXPERIMENT_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -76,15 +117,31 @@ class ExperimentRunner(Protocol):
 
 
 class _FailureWatcher(logging.Handler):
-    """Records only THAT an ERROR was logged — never the message itself,
-    since a message may carry an API error body (NFR N5, INV-02)."""
+    """Records only THAT a qualifying record was logged — never the
+    message itself, since a message may carry an API error body (NFR N5,
+    INV-02). ``level`` defaults to ERROR (the OTLP exporter / langfuse
+    SDK watchers); DEBT-27(a)'s OTel-SDK-export watcher lowers it to
+    WARNING and pairs it with ``_DropClassFilter`` so the level change
+    alone is never what decides a match."""
 
-    def __init__(self) -> None:
-        super().__init__(level=logging.ERROR)
+    def __init__(self, level: int = logging.ERROR) -> None:
+        super().__init__(level=level)
         self.failed = False
 
     def emit(self, record: logging.LogRecord) -> None:
         self.failed = True
+
+
+class _DropClassFilter(logging.Filter):
+    """DEBT-27(a): matches only records whose MESSAGE names a span drop
+    (see ``_DROP_CLASS_MESSAGE_MARKERS``) -- not every WARNING+ record on
+    ``OTEL_SDK_EXPORT_LOGGER_NAME``. Attached to the export watcher so
+    widening that logger's level floor to WARNING cannot, by itself,
+    widen the false-positive surface with an unrelated benign warning."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage().lower()
+        return any(marker in message for marker in _DROP_CLASS_MESSAGE_MARKERS)
 
 
 def record_experiment(
@@ -111,69 +168,77 @@ def record_experiment(
     ``ExperimentRecordFailedError``. Never retried by this function —
     the caller (``record_run``) does not retry either (ADR-0005 #9).
     """
-    otlp_watcher = _FailureWatcher()
-    langfuse_watcher = _FailureWatcher()
-    otlp_logger = logging.getLogger(OTLP_EXPORTER_LOGGER_NAME)
-    langfuse_logger = logging.getLogger(LANGFUSE_SDK_LOGGER_NAME)
-    otlp_logger.addHandler(otlp_watcher)
-    langfuse_logger.addHandler(langfuse_watcher)
-    # `to_raise` is set INSIDE an except block but raised OUTSIDE it
-    # (below, after the `finally`) -- deliberately, to close the
-    # `__context__` leak (Atchim suggestion, 2026-09-21): raising a NEW
-    # exception WHILE Python is still handling `exc` makes the
-    # interpreter attach `exc` to the new exception's `__context__`
-    # regardless of `from None` (that only sets `__suppress_context__`,
-    # which hides it from DEFAULT traceback printing -- the original
-    # exception object, e.g. `RuntimeError('Bearer sk-lf-SECRET')`,
-    # still lives on `.__context__` and would survive a custom
-    # exc_info-walking logger, which is exactly what Atchim reproduced).
-    # No exception is being handled once control reaches the deferred
-    # `raise to_raise` below, so `__context__` is naturally `None` there.
-    to_raise: Exception | None = None
-    result: Any = None
-    try:
+    with _RECORD_EXPERIMENT_LOCK:
+        otlp_watcher = _FailureWatcher()
+        langfuse_watcher = _FailureWatcher()
+        # DEBT-27(a): WARNING floor, gated by `_DropClassFilter` (see its
+        # docstring for why the level alone is not the discriminator).
+        otel_export_watcher = _FailureWatcher(level=logging.WARNING)
+        otel_export_watcher.addFilter(_DropClassFilter())
+        otlp_logger = logging.getLogger(OTLP_EXPORTER_LOGGER_NAME)
+        langfuse_logger = logging.getLogger(LANGFUSE_SDK_LOGGER_NAME)
+        otel_export_logger = logging.getLogger(OTEL_SDK_EXPORT_LOGGER_NAME)
+        otlp_logger.addHandler(otlp_watcher)
+        langfuse_logger.addHandler(langfuse_watcher)
+        otel_export_logger.addHandler(otel_export_watcher)
+        # `to_raise` is set INSIDE an except block but raised OUTSIDE it
+        # (below, after the `finally`) -- deliberately, to close the
+        # `__context__` leak (Atchim suggestion, 2026-09-21): raising a NEW
+        # exception WHILE Python is still handling `exc` makes the
+        # interpreter attach `exc` to the new exception's `__context__`
+        # regardless of `from None` (that only sets `__suppress_context__`,
+        # which hides it from DEFAULT traceback printing -- the original
+        # exception object, e.g. `RuntimeError('Bearer sk-lf-SECRET')`,
+        # still lives on `.__context__` and would survive a custom
+        # exc_info-walking logger, which is exactly what Atchim reproduced).
+        # No exception is being handled once control reaches the deferred
+        # `raise to_raise` below, so `__context__` is naturally `None` there.
+        to_raise: Exception | None = None
+        result: Any = None
         try:
-            result = tracing_client.run_experiment(
-                name=run_name,
-                run_name=run_name,
-                data=items,
-                task=task,
-                max_concurrency=1,
-                metadata=metadata,
-            )
-        except (Exception, asyncio.CancelledError) as exc:
-            # HARDEN-01 GAP-2 (2026-09-21): `run_experiment` was called
-            # with no `except Exception` at all -- any exception the SDK
-            # raises (transport, auth) propagated untyped straight out of
-            # `record_run` and `run_eval`, the reachable production
-            # trigger for GAP-1 (an untyped escape `run_eval`'s own
-            # contract says is impossible). `str(exc)` is not
-            # interpolated (INV-02: SDK exception text may carry
-            # transport/auth response content this codebase never logs).
-            # GAP-5 (Branca `/harden` re-run, 2026-09-21): `run_experiment`
-            # internally uses `asyncio.gather`, which can raise
-            # `asyncio.CancelledError` -- a `BaseException` subclass a
-            # plain `except Exception` does NOT catch. Caught explicitly
-            # here alongside `Exception`; `KeyboardInterrupt`/`SystemExit`
-            # are deliberately NOT in this tuple and still propagate.
-            to_raise = ExperimentRecordFailedError(
-                f"record_experiment: run_experiment raised {type(exc).__name__}"
-            )
-        if to_raise is None:
             try:
-                tracing_client.flush()
-            except (Exception, asyncio.CancelledError) as exc:
-                # Same GAP-2/GAP-5 findings, the flush() call -- mapped to
-                # FlushFailedError specifically (not
-                # ExperimentRecordFailedError) so a raised flush failure
-                # is indistinguishable, at the caller, from a LOGGED one
-                # (`otlp_watcher.failed` below).
-                to_raise = FlushFailedError(
-                    f"record_experiment: flush() raised {type(exc).__name__}"
+                result = tracing_client.run_experiment(
+                    name=run_name,
+                    run_name=run_name,
+                    data=items,
+                    task=task,
+                    max_concurrency=1,
+                    metadata=metadata,
                 )
-    finally:
-        otlp_logger.removeHandler(otlp_watcher)
-        langfuse_logger.removeHandler(langfuse_watcher)
+            except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 - HARDEN-01 GAP-2
+                # HARDEN-01 GAP-2 (2026-09-21): `run_experiment` was called
+                # with no `except Exception` at all -- any exception the SDK
+                # raises (transport, auth) propagated untyped straight out of
+                # `record_run` and `run_eval`, the reachable production
+                # trigger for GAP-1 (an untyped escape `run_eval`'s own
+                # contract says is impossible). `str(exc)` is not
+                # interpolated (INV-02: SDK exception text may carry
+                # transport/auth response content this codebase never logs).
+                # GAP-5 (Branca `/harden` re-run, 2026-09-21): `run_experiment`
+                # internally uses `asyncio.gather`, which can raise
+                # `asyncio.CancelledError` -- a `BaseException` subclass a
+                # plain `except Exception` does NOT catch. Caught explicitly
+                # here alongside `Exception`; `KeyboardInterrupt`/`SystemExit`
+                # are deliberately NOT in this tuple and still propagate.
+                to_raise = ExperimentRecordFailedError(
+                    f"record_experiment: run_experiment raised {type(exc).__name__}"
+                )
+            if to_raise is None:
+                try:
+                    tracing_client.flush()
+                except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 - GAP-2/GAP-5
+                    # Same GAP-2/GAP-5 findings, the flush() call -- mapped to
+                    # FlushFailedError specifically (not
+                    # ExperimentRecordFailedError) so a raised flush failure
+                    # is indistinguishable, at the caller, from a LOGGED one
+                    # (`otlp_watcher.failed` below).
+                    to_raise = FlushFailedError(
+                        f"record_experiment: flush() raised {type(exc).__name__}"
+                    )
+        finally:
+            otlp_logger.removeHandler(otlp_watcher)
+            langfuse_logger.removeHandler(langfuse_watcher)
+            otel_export_logger.removeHandler(otel_export_watcher)
 
     if to_raise is not None:
         raise to_raise
@@ -182,6 +247,15 @@ def record_experiment(
         raise FlushFailedError(
             "OTLP span export failed during record_experiment "
             "(see the opentelemetry exporter's own ERROR log for detail)"
+        )
+    if otel_export_watcher.failed:
+        # DEBT-27(a): a BatchSpanProcessor queue-full DROP -- same
+        # observable consequence as an OTLP export failure (incomplete
+        # evidence for a run the caller believes succeeded), so mapped to
+        # the same typed error.
+        raise FlushFailedError(
+            "the OTel SDK logged a span-drop warning during record_experiment "
+            "(see the opentelemetry.sdk.trace.export logger's own log for detail)"
         )
     if langfuse_watcher.failed:
         raise ExperimentRecordFailedError(
@@ -233,7 +307,7 @@ def record_experiment(
             )
     except ExperimentRecordFailedError as exc:
         structural_error = exc
-    except (Exception, asyncio.CancelledError) as exc:
+    except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 - SDK-drift defense
         # A version bump that renames/removes `item_results`/`.trace_id`/
         # `.dataset_run_id`/`.item.id` (the exact class of drift
         # CLAUDE.md's SDK-internals warning names), or any other
