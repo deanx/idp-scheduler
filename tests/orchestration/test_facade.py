@@ -355,6 +355,93 @@ def test_run_eval_quota_ceiling_boundary_equal_is_accepted(
     assert exit_code == 0
 
 
+class _LyingLenList(list):  # type: ignore[type-arg]
+    """A dataset `items` double that genuinely CONTAINS `n` items but
+    reports a SMALLER count from `len()` -- the realistic way the
+    mid-loop `submits_made` bug detector (ADR-0004 A10, 2026-09-24 ruff
+    S101 fix) can actually fire: the pre-flight ceiling check
+    (`item_count = len(dataset["items"])`, `facade.py`) and the
+    per-document loop (`for item in dataset["items"]`) read the SAME
+    object at two different points in `run_eval`'s execution -- if that
+    object's length lies (a misbehaving/future `PlatformAdapter`, or a
+    lazily-populated collection mutated between the two reads), the
+    pre-flight guard passes on stale information while the loop still
+    walks every real item. `reported_len` caps what `len()` claims;
+    iteration/indexing always see the true, full list -- exactly a TOCTOU
+    shape, not a contrived unit-test-only hook."""
+
+    def __init__(self, items: list[object], *, reported_len: int) -> None:
+        super().__init__(items)
+        self._reported_len = reported_len
+
+    def __len__(self) -> int:
+        return self._reported_len
+
+
+def test_run_eval_mid_loop_submits_made_invariant_fires_when_the_preflight_count_was_stale(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+) -> None:
+    """F-ADR0004-A10 / ruff S101 (2026-09-24): this used to be a bare
+    `assert submits_made <= max_documents_per_run`, which `python -O`
+    strips entirely -- the guard would silently vanish under an
+    optimised interpreter, on the exact path that spends real IDP quota.
+    It is now an explicit, unconditional `raise RuntimeError(...)`. This
+    test does NOT merely call the raise directly (that would only prove
+    Python's own `raise` statement works) -- it drives `run_eval` through
+    a dataset whose reported length (1, what the pre-flight ceiling
+    check reads) disagrees with its true length (2, what the loop
+    actually walks), so the invariant is violated via the SAME two call
+    sites production code uses, not a synthetic shortcut. Must NOT be
+    misreported as `quota_ceiling_exceeded` (that is the pre-flight,
+    zero-quota-spent policy path with its own `AbortReason` and no
+    `run_id`) -- this fires mid-loop, after at least one real `extract()`
+    call, and is logged as an unexpected internal error with a `run_id`
+    and a best-effort `aborted` marker, exactly like any other untyped
+    exception escaping the loop."""
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    document_dir = "/documents"
+    dataset = _two_item_dataset()
+    dataset["items"] = _LyingLenList(cast("list[object]", dataset["items"]), reported_len=1)
+    recording_platform = _RecordingPlatform(dataset)
+    monkeypatch.setattr(facade, "make_platform", lambda: recording_platform)
+    idp_outputs: dict[str, object] = {
+        f"{document_dir}/doc-1": _matching_actual_for(document_dir, "doc-1")[1],
+        f"{document_dir}/doc-2": _matching_actual_for(document_dir, "doc-2")[1],
+    }
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda org_id: _FakeIDPAdapter(idp_outputs))
+    monkeypatch.setenv("IDP_DOCUMENT_DIR", document_dir)
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012",
+            "1.0",
+            "nightly",
+            "idp-regression-golden",
+            "org-t",
+            # the LIE (reported_len=1) passes this ceiling -- the loop
+            # still walks the true 2 items underneath it.
+            max_documents_per_run=1,
+        )
+
+    assert exit_code == 1
+    # never conflated with the pre-flight, zero-quota-spent refusal path
+    assert "quota_ceiling_exceeded" not in caplog.text
+    # the un-vetted str(exc) is never logged (INV-02) -- only the type
+    # name, which is deliberately specific enough to be self-explanatory
+    # without it.
+    assert "RuntimeError" in caplog.text
+    # a run_id DOES exist here (unlike quota_ceiling_exceeded) -- ADR-0004
+    # #14's best-effort aborted marker fires.
+    assert recording_platform.mark_run_status_calls
+    assert recording_platform.mark_run_status_calls[-1]["status"] == "aborted"
+    # the second document must never reach the IDP -- the invariant
+    # fires BEFORE that submit, not after.
+    assert len(recording_platform.mark_run_status_calls) == 1
+
+
 def test_run_eval_logs_the_effective_max_documents_per_run_value(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
