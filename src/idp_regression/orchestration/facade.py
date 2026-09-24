@@ -613,10 +613,25 @@ def run_eval(
             # legitimately reach it mid-loop -- if it ever fires, the
             # pre-flight computation was wrong, not the operator's budget.
             submits_made += 1
-            assert submits_made <= max_documents_per_run, (
-                "internal invariant violated: submits_made exceeded "
-                "max_documents_per_run despite the pre-flight guard"
-            )
+            # HARDEN 2026-09-24 (ruff S101, once the `S` family was finally
+            # selected -- DEBT-41): this was an `assert`, which `python -O`
+            # STRIPS. A bug detector that disappears depending on how the
+            # interpreter was invoked is not a detector; and this one sits on
+            # the path that spends real IDP quota, so its absence would be
+            # discovered by an over-spend rather than by a failure. Raised
+            # explicitly instead -- same fail-closed direction, same message,
+            # but it cannot be optimised away.
+            #
+            # Deliberately NOT a `RunAborted`/`AbortReason`: the pre-flight
+            # ceiling refusal is a different, operator-facing path with its own
+            # reason (`quota_ceiling_exceeded`). Reaching here means the
+            # pre-flight computation itself was wrong (A10: "a bug detector,
+            # not a policy"), which is ours, not the operator's budget.
+            if submits_made > max_documents_per_run:
+                raise RuntimeError(
+                    "internal invariant violated: submits_made exceeded "
+                    "max_documents_per_run despite the pre-flight guard"
+                )
             try:
                 actual = idp_adapter.extract(document_path, action_id, version)
             except IDPAuthenticationError as exc:
