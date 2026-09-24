@@ -1861,6 +1861,13 @@ def test_run_eval_never_logs_the_document_dir_path_in_telemetry(
             "items": [{"item_id": "", "document_id": "doc-1", "golden": {}}],
             "expected_output_schema": None,
         },  # empty-string item_id
+        # DEBT-57 A-4 (Branca /harden re-run, 2026-09-21): a
+        # whitespace-only item_id used to pass this guard silently --
+        # only the credential path (bootstrap.py) applied `.strip()`.
+        {
+            "items": [{"item_id": "   ", "document_id": "doc-1", "golden": {}}],
+            "expected_output_schema": None,
+        },  # whitespace-only item_id
     ],
 )
 def test_run_eval_never_escapes_on_a_malformed_dataset_shape(
@@ -2443,3 +2450,119 @@ def test_run_eval_exit_code_is_unaffected_by_a_run_artifact_write_failure(
     )
 
     assert exit_code == 0
+
+
+# --- DEBT-57 A-5 / DEBT-59: catch-all shape at the two remaining sites -----
+
+
+def test_run_eval_never_escapes_when_the_run_end_log_line_itself_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+) -> None:
+    """DEBT-57 A-5 (Branca /harden re-run, 2026-09-21): `_log_run_end` is
+    reached from all 13 of `run_eval`'s exit points with no guard of its
+    own -- a raising log handler (full disk, a broken formatter installed
+    by the CALLER's own logging config, ...) used to propagate raw out of
+    `run_eval`, breaking the `-> int` contract on the observability call
+    itself, on an otherwise fully successful run. Only the `run_end` log
+    call is made to explode here (every other `logger.info`/`.error` call
+    in this run stays real) so this pins THAT site, not logging broadly."""
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
+    _stub_make_idp_adapter_success(monkeypatch)
+
+    real_info = facade.logger.info
+
+    def _raise_on_run_end(msg: object, *args: object) -> None:
+        if isinstance(msg, str) and msg.startswith("run_eval: run_end"):
+            raise OSError("log handler exploded: disk full")
+        real_info(msg, *args)
+
+    monkeypatch.setattr(facade.logger, "info", _raise_on_run_end)
+
+    exit_code = run_eval(
+        "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden", "org-t"
+    )
+
+    assert exit_code == 0
+
+
+def test_run_eval_lets_keyboard_interrupt_propagate_from_the_final_complete_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+) -> None:
+    """DEBT-59: the FIFTH `_mark_run_status_best_effort` call site -- the
+    tail `status="complete"` marker after an otherwise fully successful
+    run -- sits outside every try-block in `run_eval`. `KeyboardInterrupt`/
+    `SystemExit` must still propagate from it, exactly like the other four
+    sites, but no repo test exercised this one: the existing KI tests
+    (`test_run_eval_propagates_keyboard_interrupt_*`) monkeypatch
+    `check_schema_drift`, an early PRE-run site, not this post-loop one.
+    A future accidental widening of `_mark_run_status_best_effort`'s
+    `except (Exception, asyncio.CancelledError)` to a bare
+    `except BaseException` would swallow this silently; this test fails
+    if that ever happens."""
+    dataset = _well_formed_dataset()
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    platform = _RecordingPlatform(dataset, mark_run_status_error=KeyboardInterrupt("stop"))
+    monkeypatch.setattr(facade, "make_platform", lambda: platform)
+    _stub_make_idp_adapter_success(monkeypatch)
+
+    with pytest.raises(KeyboardInterrupt):
+        run_eval(
+            "12345678-1234-1234-1234-123456789012",
+            "1.0",
+            "nightly",
+            "idp-regression-golden",
+            "org-t",
+        )
+
+    # The record_run call must still have happened before the marker --
+    # only the tail "complete" marker itself is under test here.
+    assert len(platform.record_run_calls) == 1
+    assert [c["status"] for c in platform.mark_run_status_calls] == ["complete"]
+
+
+# --- DEBT-54 A-1: the _abort() detail= field is redacted, not just escaped -
+
+
+def test_run_eval_redacts_a_credential_value_embedded_in_an_abort_detail(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """DEBT-54 A-1 (Branca /harden, 2026-09-21): every `detail=` call
+    site is vetted today, so this used to be safe only by construction --
+    `sanitize_for_log` escapes/quotes but never removes content. Proven
+    here with a typed adapter error whose message happens to embed the
+    live `IDP_CLIENT_SECRET` value (a plausible shape for an upstream
+    error that echoes request content): the secret must not reach the
+    `run_end`/abort log line."""
+    from idp_regression.adapter.errors import IDPAuthenticationError
+
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    _stub_make_platform_with_a_well_formed_dataset(monkeypatch)
+
+    secret = os.environ["IDP_CLIENT_SECRET"]
+
+    class _LeakyIDPAdapter:
+        def extract(self, document_path: str, action_id: str, version: str) -> object:
+            raise IDPAuthenticationError(f"token rejected, sent secret={secret}")
+
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda org_id: _LeakyIDPAdapter())
+
+    with caplog.at_level(logging.INFO):
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012",
+            "1.0",
+            "nightly",
+            "idp-regression-golden",
+            "org-t",
+        )
+
+    assert exit_code != 0
+    assert secret not in caplog.text
+    assert "auth_failure" in caplog.text

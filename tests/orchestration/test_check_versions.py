@@ -314,6 +314,67 @@ def test_a_429_on_the_first_pending_unknown_abandons_the_rest_of_the_tick_rq3() 
     assert "1.0.2" in result.new_state.pending_unknowns
 
 
+def test_a_429_reported_on_a_non_unknown_result_still_abandons_the_walks_grid() -> None:
+    """Known-open item, closed 2026-09-24 (Wave-1 Lane D): before this
+    fix, the walk's own grid loop (unlike `_resolve_unknowns` above and
+    the sweep loop) checked `last_status_code == 429`
+    (`_probe_with_rate_limit_check`'s `hit_rate_limited`) ONLY inside the
+    `ProbeResult.UNKNOWN` branch -- contradicting
+    `_probe_with_rate_limit_check`'s own "enforced once, not three
+    times" docstring. `classify_probe_response` always maps a 429 status
+    to `UNKNOWN` for the real `MuleSoftVersionProbe`, so this never fires
+    in production -- but `IDPVersionProbe` is a bare Protocol, and
+    nothing ties `last_status_code` to the returned `ProbeResult` at the
+    type level. This probe double simulates a non-conforming
+    implementation that reports EXISTS on a 429 response, to prove the
+    walk's grid loop now honours the same rule its two siblings already
+    do, not merely that `classify_probe_response` happens to make the
+    gap unreachable today."""
+
+    class DecoupledStatusProbe:
+        last_status_code: int | None = None
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def probe(self, org_id: str, action_id: str, version: str) -> ProbeResult:
+            self.calls.append(version)
+            if version == "1.0.0":
+                self.last_status_code = 200
+                return ProbeResult.EXISTS
+            if version == NEGATIVE_CONTROL_VERSION:
+                self.last_status_code = 200
+                return ProbeResult.ABSENT
+            if version == "1.0.1":
+                # The decoupling: a 429 status code alongside a
+                # non-UNKNOWN result -- impossible through the real
+                # classifier, reachable only via a non-conforming probe.
+                self.last_status_code = 429
+                return ProbeResult.EXISTS
+            # Any candidate beyond "1.0.1" must NEVER be reached once the
+            # tick has been correctly abandoned.
+            self.last_status_code = 200
+            return ProbeResult.EXISTS
+
+    probe = DecoupledStatusProbe()
+    result = check_once(
+        probe=probe,
+        **_base_kwargs(
+            max_probes_per_tick=10,
+            patch_lookahead=3,
+            minor_lookahead=0,
+            major_lookahead=0,
+        ),
+    )
+
+    assert result.event["rate_limited"] is True
+    # The walk re-anchors to "1.0.1" (it WAS reported EXISTS) but must
+    # abandon the tick immediately afterwards -- no candidate past it is
+    # ever probed, exactly like a same-shaped 429 in `_resolve_unknowns`
+    # or the sweep loop.
+    assert "1.0.2" not in probe.calls
+
+
 # -- indeterminate counter -> detector_degraded (D13) ------------------------
 
 

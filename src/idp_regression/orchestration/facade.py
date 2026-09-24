@@ -43,6 +43,7 @@ token or path ever reaches any of these lines.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import time
@@ -69,6 +70,7 @@ from idp_regression.orchestration.errors import AbortReason, RunAborted
 from idp_regression.orchestration.log_sanitize import (
     format_execution_failed_status_for_log,
     frame_location,
+    redact_secrets_for_log,
 )
 from idp_regression.orchestration.prerun import (
     check_empty_set,
@@ -87,7 +89,7 @@ from idp_regression.platform.errors import (
 )
 from idp_regression.platform.hashing import hash_dataset
 from idp_regression.platform.scoring import build_score_inputs
-from idp_regression.platform.types import DocumentRecord, PlatformAdapter, RunMetadata
+from idp_regression.platform.types import DocumentRecord, PlatformAdapter, RunMetadata, RunStatus
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +207,14 @@ def _validate_dataset_shape(dataset: object) -> None:
     for item in items:
         if not isinstance(item, dict):
             raise DatasetFetchFailedError("a dataset item is not a dict")
-        if not isinstance(item.get("item_id"), str) or not item["item_id"]:
+        item_id = item.get("item_id")
+        if not isinstance(item_id, str) or not item_id.strip():
+            # DEBT-57 A-4 (Branca /harden re-run, 2026-09-21): a
+            # whitespace-only item_id used to pass this guard (only the
+            # credential path in bootstrap.py applied `.strip()`) --
+            # matches the N6 credential shape now, same reasoning: a
+            # value that is technically present but practically empty
+            # must fail the same way an actually-empty value does.
             raise DatasetFetchFailedError("a dataset item has a missing/non-string item_id")
         if not isinstance(item.get("document_id"), str) or not item["document_id"]:
             raise DatasetFetchFailedError("a dataset item has a missing/non-string document_id")
@@ -214,7 +223,7 @@ def _validate_dataset_shape(dataset: object) -> None:
 def _mark_run_status_best_effort(
     platform: PlatformAdapter,
     run_id: str,
-    status: str,
+    status: RunStatus,
     *,
     action_id: str,
     action_version: str,
@@ -245,7 +254,7 @@ def _mark_run_status_best_effort(
     try:
         platform.mark_run_status(
             run_id,
-            status,  # type: ignore[arg-type]
+            status,
             action_id=action_id,
             action_version=action_version,
             golden_version=golden_version,
@@ -338,16 +347,27 @@ def run_eval(
         `exit_code`/the counts are fixed, non-secret values, and
         `elapsed_seconds` comes from stdlib's monotonic clock, so this
         line needs no `sanitize_for_log` pass (nothing here is a golden
-        value, an extracted value, a token, or a path)."""
-        logger.info(
-            "run_eval: run_end outcome=%s exit_code=%s pass_count=%d fail_count=%d "
-            "elapsed_seconds=%.3f",
-            outcome,
-            exit_code,
-            pass_count,
-            fail_count,
-            time.monotonic() - started_at,
-        )
+        value, an extracted value, a token, or a path).
+
+        DEBT-57 A-5 (Branca /harden re-run, 2026-09-21): this is reached
+        from all 13 of `run_eval`'s exit points with no guard of its own
+        -- a raising log handler (a full disk, a broken formatter
+        installed by the caller's own logging config, ...) at any one of
+        them used to propagate raw out of `run_eval`, breaking the
+        `-> int` exit-code contract on the observability call itself.
+        Swallowed best-effort, matching every other best-effort site in
+        this module (`_mark_run_status_best_effort`) -- `KeyboardInterrupt`/
+        `SystemExit` still propagate, everything else does not."""
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            logger.info(
+                "run_eval: run_end outcome=%s exit_code=%s pass_count=%d fail_count=%d "
+                "elapsed_seconds=%.3f",
+                outcome,
+                exit_code,
+                pass_count,
+                fail_count,
+                time.monotonic() - started_at,
+            )
 
     # C-1 (Atchim gate, 2026-09-21) widened after a `/harden` re-run
     # (Branca) found the first merge (`get_dataset` +
@@ -548,7 +568,18 @@ def run_eval(
         style. `detail` MUST already be `sanitize_for_log`-clean; this
         function logs it via a `%s` placeholder, never interpolates it
         into the exception message itself (INV-02 -- see `RunAborted`'s
-        own docstring)."""
+        own docstring).
+
+        DEBT-54 A-1 (Branca /harden, 2026-09-21): `detail` is
+        escaped/quoted by `sanitize_for_log` below but that alone never
+        REMOVES content -- every current call site is vetted (typed
+        adapter/platform error messages, or a literal), so this is safe
+        today only by construction, per HARDEN-01's own framing. `detail`
+        is now also run through `redact_secrets_for_log` first, so a
+        credential value that ever reached this field (a future raiser
+        this file's authors didn't vet, an upstream error that echoes
+        request content) is stripped before it is escaped, not merely
+        escaped."""
         _mark_run_status_best_effort(
             platform,
             run_id,
@@ -562,7 +593,7 @@ def run_eval(
             "run_eval: %s document_id=%s detail=%s",
             reason,
             sanitize_for_log(document_id) if document_id is not None else "<none>",
-            sanitize_for_log(detail),
+            sanitize_for_log(redact_secrets_for_log(detail)),
         )
         return RunAborted(reason, f"per-document/record-phase abort: {reason}")
 

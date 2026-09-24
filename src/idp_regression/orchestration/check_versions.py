@@ -304,16 +304,34 @@ def _run_walk(
             result, hit_rate_limited = _probe_with_rate_limit_check(
                 probe, org_id, action_id, candidate
             )
+            # Known-open item, closed 2026-09-24 (Wave-1 Lane D): this
+            # used to check `hit_rate_limited` ONLY inside the UNKNOWN
+            # branch, while `_resolve_unknowns` and the sweep loop below
+            # both check it unconditionally after every probe --
+            # contradicting `_probe_with_rate_limit_check`'s own "enforced
+            # once, not three times" docstring. In production this branch
+            # never diverges (`classify_probe_response` always maps 429 ->
+            # UNKNOWN, so an EXISTS/ABSENT result and a 429 status code
+            # cannot co-occur through `MuleSoftVersionProbe`), but
+            # `IDPVersionProbe` is a Protocol -- nothing at the type level
+            # ties `last_status_code` to the returned `ProbeResult`, so a
+            # differently-behaved probe (a future implementation, or a
+            # test double) could decouple them, and this loop would then
+            # silently drop the rate-limit signal exactly where the other
+            # two loops catch it. Checked unconditionally now, matching
+            # both siblings.
             if result is ProbeResult.EXISTS:
                 hits.append(candidate)
                 current_anchor = candidate
                 re_anchored = True
-                break  # re-anchor: restart the walk from the new anchor
-            if result is ProbeResult.UNKNOWN:
+            elif result is ProbeResult.UNKNOWN:
                 unknowns.append(candidate)
-                if hit_rate_limited:
-                    rate_limited = True
-                    break
+            if hit_rate_limited:
+                rate_limited = True
+            if rate_limited:
+                break
+            if re_anchored:
+                break  # re-anchor: restart the walk from the new anchor
         if rate_limited:
             break
         if exhausted_mid_candidates:

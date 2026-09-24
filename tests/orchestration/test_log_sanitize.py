@@ -249,3 +249,85 @@ def test_frame_location_escapes_a_newline_so_it_cannot_forge_a_second_log_line()
     # used everywhere else in this module), not silently dropped.
     assert "\\n" in location
     assert forged_line not in location.splitlines()
+
+
+# --- DEBT-54 A-1/A-3: a redaction floor under sanitize_for_log ------------
+
+
+def test_redact_secrets_for_log_replaces_a_live_credential_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DEBT-54: `sanitize_for_log` escapes/quotes -- it never removes
+    content. `redact_secrets_for_log` is the additional floor: a value
+    that embeds a currently-set credential env var's exact value must
+    come back with that value replaced, not merely quoted."""
+    from idp_regression.orchestration.log_sanitize import redact_secrets_for_log
+
+    monkeypatch.setenv("IDP_CLIENT_SECRET", "sekrit-value-9f3a2c71")
+
+    result = redact_secrets_for_log("upstream said: token=sekrit-value-9f3a2c71 invalid")
+
+    assert "sekrit-value-9f3a2c71" not in result
+    assert "<redacted>" in result
+
+
+@pytest.mark.parametrize(
+    "var_name", ["LANGFUSE_HOST", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "IDP_CLIENT_ID"]
+)
+def test_redact_secrets_for_log_covers_every_named_sensitive_var(
+    monkeypatch: pytest.MonkeyPatch, var_name: str
+) -> None:
+    """Every var this function checks must actually be exercised -- a
+    row that quietly stops checking one of them (e.g. a copy-paste that
+    drops an entry from `_SENSITIVE_ENV_VAR_NAMES`) must fail here, not
+    pass vacuously because only one var was ever tested."""
+    from idp_regression.orchestration.log_sanitize import redact_secrets_for_log
+
+    monkeypatch.setenv(var_name, "distinctive-secret-payload-4d9c")
+
+    result = redact_secrets_for_log("detail: distinctive-secret-payload-4d9c leaked")
+
+    assert "distinctive-secret-payload-4d9c" not in result
+
+
+def test_redact_secrets_for_log_leaves_unrelated_text_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("IDP_CLIENT_SECRET", raising=False)
+    monkeypatch.delenv("IDP_CLIENT_ID", raising=False)
+    monkeypatch.delenv("LANGFUSE_HOST", raising=False)
+    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+
+    from idp_regression.orchestration.log_sanitize import redact_secrets_for_log
+
+    assert redact_secrets_for_log("hard_failure: poll timed out") == "hard_failure: poll timed out"
+
+
+def test_redact_secrets_for_log_ignores_a_too_short_env_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A near-empty credential var (e.g. a misconfigured `X=a`) must not
+    cause this function to redact every incidental occurrence of the
+    letter `a` in an unrelated message."""
+    from idp_regression.orchestration.log_sanitize import redact_secrets_for_log
+
+    monkeypatch.setenv("IDP_CLIENT_ID", "ab")
+
+    result = redact_secrets_for_log("hard_failure: abandoned after retries")
+
+    assert result == "hard_failure: abandoned after retries"
+
+
+def test_format_execution_failed_status_redacts_a_live_credential_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DEBT-54 A-3: the IDP-controlled status string goes through the
+    same redaction floor as `detail=` (A-1) -- proven end to end here,
+    not just at the shared helper."""
+    monkeypatch.setenv("IDP_CLIENT_SECRET", "sekrit-value-9f3a2c71")
+    exc = IDPExecutionFailedError("boom", status="sekrit-value-9f3a2c71")
+
+    result = format_execution_failed_status_for_log(exc)
+
+    assert "sekrit-value-9f3a2c71" not in result
