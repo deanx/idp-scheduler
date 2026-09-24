@@ -1,56 +1,47 @@
 # /test stamp — SPEC-01 (S-01.4 run orchestration + CLI)
 
-**Status:** ✅ PASSED
-**Source:** /test gap-fill (Atchim TDD gate)
-**Date:** 2026-09-22
-**Commit:** cfd2bd7e2bcb3f4a0aaea679b88ec64be7f6bb39
-**Author:** alex@divinocosta.com.br
-**Atchim TDD gate:** PASSED. Run by a fresh instance with no prior verdict on S-01.4, as **DEBT-44** requires. `Risk: high` ⇒ a /test stamp is required regardless of the `prototype` profile (profile ≠ risk level).
-**Independence:** ✅ structural (different models): Dengoso (sonnet) reviewed and gated by Atchim (opus).
-**Static:** ✅ clean: `mypy src` (31 files) + `ruff check src tests`; `gitleaks` clean over the batch range. `mypy tests` is ungated and reports pre-existing errors — DEBT-51.
-**Files:** src/idp_regression/adapter/errors.py, src/idp_regression/adapter/idp_client.py, src/idp_regression/adapter/normalize.py, src/idp_regression/adapter/token_cache.py, src/idp_regression/adapter/transport.py, src/idp_regression/adapter/types.py, src/idp_regression/classifier/gate.py, src/idp_regression/orchestration/bootstrap.py, src/idp_regression/orchestration/cli.py, src/idp_regression/orchestration/dotenv_support.py, src/idp_regression/orchestration/errors.py, src/idp_regression/orchestration/facade.py, src/idp_regression/orchestration/log_sanitize.py, src/idp_regression/orchestration/prerun.py, src/idp_regression/orchestration/run_naming.py, src/idp_regression/platform/__init__.py, src/idp_regression/platform/errors.py, src/idp_regression/platform/langfuse_adapter.py, src/idp_regression/platform/scoring.py, src/idp_regression/platform/tracing.py, src/idp_regression/platform/transport.py, src/idp_regression/platform/types.py, tests/adapter/__init__.py, tests/adapter/fixtures/raw_idp_response.json, tests/adapter/test_errors.py, tests/adapter/test_idp_client.py, tests/adapter/test_integration_idp.py, tests/adapter/test_make_idp_adapter.py, tests/adapter/test_module_boundary.py, tests/adapter/test_normalize.py, tests/adapter/test_normalize_contract.py, tests/adapter/test_token_cache.py, tests/adapter/test_transport.py, tests/classifier/test_gate.py, tests/classifier/test_validation.py, tests/orchestration/__init__.py, tests/orchestration/test_bootstrap.py, tests/orchestration/test_cli.py, tests/orchestration/test_dotenv_support.py, tests/orchestration/test_e2e_orchestration.py, tests/orchestration/test_exit_code_contract.py, tests/orchestration/test_facade.py, tests/orchestration/test_integration_e2e.py, tests/orchestration/test_log_sanitize.py, tests/orchestration/test_prerun.py, tests/orchestration/test_run_naming.py, tests/orchestration/test_static_orchestration_checks.py, tests/platform/_tp45_subprocess_scenario.py, tests/platform/_type_pins.py, tests/platform/test_integration_langfuse.py, tests/platform/test_inv01_payload.py, tests/platform/test_langfuse_adapter.py, tests/platform/test_module_boundary.py, tests/platform/test_record_run_preconditions.py, tests/platform/test_schema_provisioning.py, tests/platform/test_scoring.py, tests/platform/test_tracing.py, tests/platform/test_transport.py, tests/tooling/__init__.py, tests/tooling/test_secrets_gate.py
+**Status:** ❌ **FAILED at `f3b0b65`** — fixes have since landed; **a re-stamp is owed.**
+**Date:** 2026-09-24 · **Rigor:** SPEC-01 header is `Risk: high` ⇒ this stamp binds regardless of
+the `prototype` profile. **Profile ≠ risk level.**
 
-## Suite results
+> ⚠️ **Record correction, 2026-09-24.** This file read `✅ PASSED` (from `cfd2bd7`, 2026-09-22)
+> while the gate had **failed twice** — at `a5805ec` and again at `f3b0b65`. Both verdicts were
+> produced by fresh instances and both were acted on, but neither was written here. **The register
+> said PASSED for roughly a day while the gate said FAILED**, which is DEBT-54's own defect class
+> (a register lagging reality) landing on the one artifact whose entire job is to state whether a
+> `Risk: high` delta is gated. Recorded rather than quietly overwritten.
 
-| Scope | Passed | Failed |
+## History — what each gate found
+
+| Commit | Verdict | Findings |
 |---|---|---|
-| Unit + contract (default run) | 857 | 0 |
-| Skipped | 15 | — (live integration; incl. the TP-01 placeholder) |
+| `cfd2bd7` (2026-09-22) | ✅ PASSED | superseded; stale within a day (DEBT-72: `orchestration/` moved ~7 files, +1626/−78, two new modules) |
+| `a5805ec` | ❌ FAILED | **F-1** fail-open #4 (a watcher whose every tick failed reported "no new versions found", exit 0, unbounded) · **F-2** INV-02 raw traceback carrying filesystem paths · **F-4** a vacuous test (mutating its double `return 1`→`return 0` left the file 23/23 green) · F-3 recorded |
+| `f3b0b65` | ❌ **FAILED** | F-3, F-4 **closed and verified**. **F-2 NOT closed** — a third state-file I/O site the fix never enumerated, reproduced live. **F-1 partially closed** — its own fix introduced **F-5** (fail-open #5: mixed failing/healthy ticks defeat both the ceiling and the honest summary), **F-6** (a surviving mutant: deleting the consecutive-failure reset left the whole orchestration suite green — "consecutive" was pinned by nothing), **F-7** (a tick-1 halt also printed "no new versions found") |
 
-## How this story was verified
+## Fixes landed since `f3b0b65` — verified by the coordinator, NOT by an independent gate
+- **F-5** — the summary is now keyed on `failed_ticks`, not `healthy_ticks == 0`. Reproduced
+  before and after: a probe failing 3 ticks in 4 previously closed with
+  `"no new versions found."` at exit 0; it now reads
+  `"no new versions found (30 of 40 tick(s) got no answer)."`
+- **F-2** — one **outer** catch-all on `main()`'s whole body, mirroring `check_versions.main()`,
+  replacing the enumerate-the-sites approach that missed a third site. The two vacuous tests were
+  replaced with a parametrized invariant test over sites the old pair never reached.
+- **F-6** — an interleaved failing/succeeding probe test; the reset mutant now goes RED.
+- **F-7** — the wrong `and failed_ticks > 0` conjunct removed.
+- Plus (found separately, ruff `S101` once the bandit family was finally selected): the A10 quota
+  **bug detector was an `assert`**, which `python -O` strips. Now an explicit raise, with a test
+  driving it through the real call sites via a length-lying dataset. Demonstrated, not argued:
+  `assert-based guard under -O: no guard fired` / `raise-based guard under -O: RuntimeError`.
 
-Four independent passes, each finding what the previous missed:
-1. **Code review gates** (fresh instance each time, DEBT-44): found the `document_id` type/NUL escape, then C-1 (the catch-all on the wrong `try`), then the `frame_location` traversal leak that the previous fix had introduced.
-2. **`/harden`** (Branca, 4 rounds, ~180 probes): found GAP-1 (13 reproductions of raw escapes), GAP-2 (unguarded SDK calls), then four more pre-run seams the C-1 fix missed, then GAP-6 — 8 reproduced leaks of golden content and secrets into logs — and GAP-8.
-3. **Independent coverage audit** (fresh agent, no implementation context): found 8 gaps, headline being that the **mid-run 401 refresh-and-retry block could be deleted with zero test failures**.
-4. **This `/test` gate**: re-applied the killer mutation and 5 more, 6/6 killed.
+## What a re-stamp must still check
+1. **A sixth fail-open.** Five were found this week and **each fix created the next**, because each
+   closed the reported case rather than the violated invariant. Three of those were in this module.
+2. **An eighth vacuous test.** Seven found so far, two in this tree.
+3. The gaps every prior stamp named and that still stand: `--auto-run` ships as a POC override of
+   four unmet ADR-0006 §A′.5 preconditions; **no backoff exists** despite the ADR naming it;
+   **no heartbeat** (a dead watcher is indistinguishable from a quiet one); nothing has run under a
+   loaded `launchd` schedule; `test_watch.py::_base_kwargs` hard-codes `sweep_every_n_ticks=0` so
+   **the sweep never runs through `run_watch_loop`** in any watcher test.
 
-## AC coverage (gap-fill batch)
-
-| Row | Test |
-|---|---|
-| DEBT-21 / ADR-0004 #7 — 401 refresh-then-retry, one `invalidate()` | `test_idp_client.py::test_poll_401_or_403_refresh_then_retry_succeeds_and_invalidates_once` |
-| `MalformedActualError` reachable raise site | `test_facade.py::test_run_eval_aborts_malformed_actual_from_classify` |
-| TP-19 / INV-08 — no platform read beyond `get_dataset` (forbidden set derived from the Protocol) | `test_static_orchestration_checks.py::test_orchestration_issues_no_platform_read_beyond_get_dataset` + 2 derivation pins |
-| TP-46 — no `jsonschema` in `orchestration/` (N28 ≡ N22) | `::test_orchestration_never_imports_jsonschema` + 3-form pin |
-| N6 — fail-closed over all 4 IDP vars | `test_facade.py::test_run_eval_returns_nonzero_and_names_the_missing_idp_var[×4]` |
-| `item_id` shape guard | `::test_run_eval_never_escapes_on_a_malformed_dataset_shape[6/7/8]` |
-| Abort-reason raise-site totality (AST, comment-only mention rejected) | `test_exit_code_contract.py::test_every_abort_reason_has_a_real_raise_site` |
-| N3 — success-path latency | `test_e2e_orchestration.py::test_all_gates_pass_success_path_returns_promptly` |
-
-Earlier batches' rows (the pre-run chain, the loop, containment, telemetry, `--dataset`/4-field `RunMetadata`, CT-04, the e2e harness) are covered by `test_facade.py`, `test_prerun.py`, `test_cli.py`, `test_exit_code_contract.py`, `test_e2e_orchestration.py`, `test_log_sanitize.py` and `test_tracing.py`, each gated in its own review round.
-
-## Deferred / carried
-
-- **TP-01 live orchestration e2e** — `test_integration_e2e.py`, skipped with an honest reason: needs a real published IDP action id + version (**S-01.6**).
-- **In-loop `MalformedGoldenError`** — provably unreachable: N28 runs `validate_golden_structure`, the `is`-identical alias of the `_validate_golden` that `classify()` calls, over every item before the loop. The ordering premise is itself pinned by `test_prerun.py::test_validate_golden_set_runs_before_any_idp_call`, so the argument is test-backed. Documented in place.
-- **T-01.4.10 leg 1 / DEBT-45** — carried; `/qa` judges it against Soneca's reconciled DoD wording.
-- **Containment** — discharged separately at `b473ce4` (HARDEN-01 §10).
-
-## Rigor — `prototype` profile
-
-Correctness and Security ran in full, plus the mechanical floor (tests, mypy, ruff, secret scan) and a mutation battery in every round.
-**skipped: prototype profile** — Readability, Architecture, Performance, design-pattern conformance, regression-worthiness PIN, doubt-driven adversarial pass. Re-runnable at `--rigor=full`.
-
-## History
-- Initial stamp (no prior stamp for S-01.4)
+**DEBT-44:** the re-stamp must be run by an instance that issued no APPROVE on this delta.
