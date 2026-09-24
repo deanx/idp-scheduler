@@ -18,6 +18,7 @@ Lives on the evaluation platform as the `expected_output` of a dataset item. Sto
     "line_items": {
       "match_key": "description",
       "critical": true,
+      "columns": { "qty": "number", "unit_price": "number" },
       "rows": [
         { "description": "Widget A", "qty": "10", "unit_price": "50.00" }
       ]
@@ -35,13 +36,14 @@ Lives on the evaluation platform as the `expected_output` of a dataset item. Sto
 - `fields.<name>.critical` — bool; if `true`, a `missing`/`wrong_value` verdict fails the gate (ADR-0003, BR2).
 - `tables.<name>.match_key` — the column used to pair actual rows to golden rows (BR8). Required for any table block.
 - `tables.<name>.critical` — bool; if `true`, a `missing` row or `wrong_value` column fails the gate.
+- `tables.<name>.columns` — **optional** `{column_name: type}` map, types `number|date|id|text` (added 2026-09-24, ADR-0003 Amendment A1, closes DEBT-04). Drives the classifier's per-column canonical comparison. **Absent, or a column absent from the map, means `text`** — byte-identical to the pre-amendment behaviour, so every existing golden stays valid and compares identically. Two fail-closed rules (`MalformedGoldenError`, abort `malformed_golden`): a key that is **not a column of any golden row** in that table is rejected (a typo must be loud, not an inert no-op that quietly restores the false FAIL), and a key equal to that table's **`match_key`** is rejected (row pairing uses `match_key_form`, so typing the key column would declare nothing). **The map drives comparison only — it adds NO per-type `value` pattern to cells.** The asymmetry with flat fields is deliberate: cell patterns would invalidate goldens storing `"$50.00"` and turn an additive change into an expand/contract migration, and the classifier canonicalizes anyway.
 - `prompts.<key>` — the IDP `prompt` string **verbatim**: 1–200 chars, no control characters (ADR-0002 amendment 2026-09-19, ADR-0005 F10). The `[A-Za-z0-9_\-]` charset applies to field and table names only.
 - `prompts.<key>.answer` — expected free-form prompt answer, a **plain string** (not the spike's `answer.value` object); `critical` optional.
 - Presence: `fields` is required and must be non-empty; `tables` and `prompts` are optional; `document_id` is optional (it duplicates the item `input`). No other top-level keys are allowed. (Schema review 2026-09-19, C3.)
 
 > **Schema limits (ADR-0005, 2026-09-19; guarded by CT-05):**
 > - Per-type patterns apply to `fields.<name>.value` only. `number` = `^-?[0-9]+(\.[0-9]+)?$`, which forbids currency symbols and thousands separators (store `"1250.00"`, not `"$1,250.00"`). `date` = ISO `YYYY-MM-DD` and is **syntactic only** (`"2024-02-31"` passes).
-> - Table cells and prompt answers are string-only (any string passes) until per-column types land (DEBT-04).
+> - Table cells and prompt answers are string-only (any string passes). **Amended 2026-09-24 (ADR-0003 A1, DEBT-04): they stay string-only — per-column `type` now exists but drives *comparison*, not *validation*.** The `columns` map is declared as `{"type":"object","propertyNames":{"type":"string","pattern":"^[A-Za-z0-9_-]{1,128}$"},"additionalProperties":{"type":"string","enum":["number","date","id","text"]}}` inside `tables.additionalProperties.properties`, beside `match_key`/`critical`/`rows` (the table entry keeps `additionalProperties: false`, so it must be declared to be accepted). Ajv `strict:true` clean: no new `if`/`then` (CT-05 rule 1), no new `required` key (rule 2), +175 minified chars → schema **2,073** chars (measured 2026-09-24), far under the 10,000 cap (rule 3). **Migration: the golden item itself does not change** (the key is optional); what changes is the committed schema's canonical hash, so the dataset's `expectedOutputSchema` must be **re-provisioned in the same change that commits the schema**, or every run aborts `schema_drift` (ADR-0005 #8). `idp-regression-seed001` needs no re-curation and the Curator is asked for nothing.
 > - The platform's raw JSON editor collapses a duplicate key to one entry (last wins) without warning, so key uniqueness in a golden is JSON-object semantics, not a guarantee the Curator sees.
 > - **F2 measurement (S-01.3, 2026-09-19):** committed schema `src/idp_regression/platform/schema/golden_schema_v1.json` (version `v1`), CT-05-guarded. Minified full-schema length = **1,898 (after the C1–C3 schema changes, 17a4f64; was 1,641) chars** (`fields`+`tables`+`prompts` blocks), well under the 10,000-char Langfuse cap; `fields`-only block = 961 chars, `tables`-only block = 298 chars — consistent with the spike's ~954-char measurement for the fields+prompts block alone (Addendum 2).
 >
@@ -75,7 +77,7 @@ Why fix it now: nothing real is loaded yet. Tightening the schema after real gol
   - `number` accepts leading zeros and `-0`. That is fine because the classifier canonicalizes.
   - `text` allows `""`. This is intentional: an empty string is distinct from a missing value.
 - **N2. `$` differs between validators.** In Ajv (the server, which is authoritative) `$` matches only at the true end of the string. In Python `jsonschema`, which uses `re.search`, `$` also matches before a trailing `\n`. So local validation of `"1250.00\n"` is looser than the server's. Never use local validation as the golden gate.
-- **N3. Tables** follow Decision #2. Cells are string-only (DEBT-04). The rule "`match_key` must be a column" cannot be expressed in the schema, so it stays the classifier's job. Column names never reach score keys (DEBT-14; comments are `None`).
+- **N3. Tables** follow Decision #2. Cells are string-only — **still true after the 2026-09-24 `columns` amendment**, which types comparison, not validation (DEBT-04 closed by ADR-0003 A1). The rule "`match_key` must be a column" cannot be expressed in the schema, so it stays the classifier's job — as do the two `columns` validation rules. **Column names still never reach score keys**: the 2026-09-24 table score is the per-table roll-up `table:<name>`, not `table:<name>:<column>` (ADR-0005 A4; comments remain `None`).
 - **N4. Prompts.** `propertyNames` matches the ADR-0002 amendment verbatim. `answer` is a plain string.
 - **N5. Top-level keys.** Top-level `additionalProperties: false` is correct. The optional `document_id` duplicates the item's `input`; it is harmless.
 - **N6. Draft and version.** Draft-07 is live-verified. The version lives only in the filename and `title`; the schema's identity is the canonical hash (Decision #8). Do not add `$id`: Ajv's per-instance id collisions are untested on Langfuse.
@@ -127,13 +129,23 @@ Per-field map; one entry per (golden field ∪ actual field ∪ table ∪ prompt
 
 In-app only: `expected`/`actual`/`confidence` never leave the process. Only the `verdict` literal (and the gate) is written, as a score value (DEBT-18 option B, 2026-09-19).
 
-The six verdicts: `match`, `missing`, `wrong_value`, `wrong_format`, `new_field`, `new_line` (glossary). `new_field`/`new_line` are always `critical: false` and never fail the gate.
+The verdicts: `match`, `missing`, `wrong_value`, `wrong_format`, `new_field`, `new_line` (glossary), and — **added 2026-09-24, ADR-0003 Amendment A2 (DEBT-05), a versioned seventh literal** — `new_table`. `new_field`/`new_line`/`new_table` are always `critical: false` and never fail the gate.
+
+**`new_table`** — a table present in `actual.tables` with no golden counterpart. It is a **flat `Verdict`**, not a `TableVerdict` container (`TableVerdict.verdict` stays `Literal["detail"]` and keeps carrying `rows[]`):
+
+```json
+"shipping_charges": { "verdict": "new_table", "expected": null, "actual": null,
+                      "confidence": null, "critical": false, "type": null }
+```
+
+`actual` is `null` deliberately — no cell content enters the entry for a table nobody expected; the row detail lives in ADR-0007's local `0600` run artifact. `overall_gate` needs no change (`_VALID_VERDICTS` derives from the Literal). **`new_table` is never written to the platform** (§4) — actual-only keys have never been scored; `new_field` is not either.
 
 ## 4. Run / score schema (on the evaluation platform) — ADR-0001
 
 The platform persists, per named run:
 
 - One **`field:<name>`** score per field per document (value = verdict string; comment carries **no values**: no expected, actual or confidence. It is `None` or value-free metadata only, per DEBT-18 option B, user decision 2026-09-19). These keys are the **stable contract** the remediation UI reads (BR11, INV-03).
+- One **`table:<name>`** score per **golden-declared** table per document (added 2026-09-24, ADR-0005 Amendment A4, closes DEBT-14). Value = the **worst row-verdict in the block**, one verdict literal, under the fixed precedence `missing` > `wrong_value` > `wrong_format` > `new_line` > `match`; an empty golden `rows: []` → `match`, so the score never disagrees with the gate; an unrecognised row verdict **raises** rather than ranking lowest (the fail-open this roll-up invites — derive the precedence from `VerdictLiteral`). `dataType` `CATEGORICAL`; `id` = the existing `score_id(run_id|document_id|"table:<name>")`; **`comment: None` — no cell value, no column name, no `match_key`, no confidence, no row count (DEBT-18 option B: verdicts only).** The name is safe under INV-03 because golden table names already carry the §1 C1 charset. **Actual-only tables (`new_table`) are NOT scored**, so no IDP-controlled name can become a score key. Per-column (`table:<name>:<column>`) and per-cell shapes were considered and rejected — per-cell puts a `match_key` **value** into an immutable score name; per-column needs a column-name charset guard that does not exist yet. Diagnosis lives in ADR-0007's local artifact; the platform only has to make the regression **visible**.
 - One **`gate`** score per document (value = `PASS` | `FAIL`).
 - Run **metadata**: `action_id` (the IDP action exercised), `action_version` (the regression variable, BR1), `golden_version` (app-tracked for Langfuse, ADR-0001 — resolves ASM-03, INV-04) and, from 2026-09-21, **`golden_dataset_name`** (which named golden set the run was measured against — ADR-0004 Amendment A6, §5 note).
 
@@ -143,7 +155,7 @@ The platform persists, per named run:
 
 Mapping (from `requirements-spec.md`):
 - Dataset item `input` = `document_id` (opaque); `expected_output` = the Golden above.
-- Score name `field:<name>` — value is the verdict. *(Amended 2026-09-19, DEBT-18 option B: every score comment is `None`. Table blocks are not individually scored (DEBT-14), so no row-level detail block or cell value reaches the platform.)*
+- Score name `field:<name>` — value is the verdict. *(Amended 2026-09-19, DEBT-18 option B: every score comment is `None`. Amended 2026-09-24, ADR-0005 A4: a table block now gets **one roll-up `table:<name>` score carrying a verdict literal only** — no row-level detail block, column name, `match_key` or cell value reaches the platform.)*
 - Score name `gate` — value is the aggregate gate.
 
 ## 5. Config (env/secrets) — never stored on the platform

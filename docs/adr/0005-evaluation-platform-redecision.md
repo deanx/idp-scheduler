@@ -294,3 +294,88 @@ Atchim review: **APPROVED (R1–R4 closed, re-checked 2026-09-19)**. Original ve
 Amendments applied (Soneca, 2026-09-19): R1 integrity claim narrowed to `fields` (§Threat model, Option A, Decision, Consequences); R2 run-start schema-drift abort (Decision #8); R3 F1 resolved, Ajv strict authoring rules as contract CT-05; R4 F10 resolved (ADR-0002 amendment). Suggestions folded: `answer` shape, duplicate-key collapse, pattern limits, pinned `NAMESPACE`, SPEC-01 idempotency wording (F3), project-roles assumption (to confirm, Mestre). Atchim confirmation: APPROVED (R1–R4 closed, re-checked 2026-09-19).
 
 Amendment 2026-09-19 (Soneca): Decision #9 added (record-after experiment linkage; `PlatformAdapter.record_run`), in answer to Atchim S-01.3 R6 and specifying the R5 fix. **Atchim CONFIRMED 2026-09-20** — re-derived from the ADR text and the code independently of the fact that it shipped; record-after ruled correct against options (b) and (c). Three required doc-only amendments attached and applied 2026-09-20 (Soneca): **A3** `run_id` kept and verified at the `record_run` precondition (Item mapping); **A1** log-watch failure envelope, both residuals named, heuristic accepted, fallback (c) live after S-01.3 (Failure detection); **A2** step-3 claim scoped to in-loop aborts, step-4 partial-record residual and consumer contract stated (Changed flow, F8). L233/L238 consistency fixes applied in fe09898.
+
+---
+
+## Amendment A4 — the table score family (DEBT-14), 2026-09-24
+
+**Status:** Accepted (Soneca, design pass). Amends CT-03 and DATA-MODEL-01 §4. **Does not amend
+DEBT-18 option B, `## Domain`, INV-01 or ADR-0007** — all stand as written.
+
+### The gap
+
+The classifier computes a full per-row, per-column table verdict block and `build_score_inputs`
+then throws it away: only `field:<name>`, `prompt:<16-hex>` and `gate` are written. A line-item
+regression therefore exists in the platform only as `gate = FAIL` with no score that moved — in the
+compare view, a table regression and an unexplained failure look identical. The information is
+already computed; the cost here is deciding a *shape*, not building a feature.
+
+### Options considered
+
+- **A — per-cell `table:<name>:<row>:<col>`.** Rejected on two independent grounds. (1) Row identity
+  is the `match_key` **value** — golden content (`"Widget A"`, and in a real invoice a part number
+  or a customer reference). Putting it in a score *name* writes expected content onto the platform
+  outside the dataset item, which is DEBT-18 option B violated in substance even if the same string
+  already exists in the item; score names are also immutable (BR11) and un-deletable in practice.
+  (2) The count is unbounded in rows × columns, against N9.
+- **B — per-column `table:<name>:<column>`.** No value leak (column names are schema-ish), bounded
+  by golden columns. Rejected as the *first* step, not as wrong: column names have **no charset
+  guard** in the golden schema today (`rows` items are an open `{string: string}` map), so a column
+  named `a:b` or with a newline would break INV-03 — it needs a `propertyNames` rule first, and that
+  rule is a golden-invalidating tightening, not an additive one. Revisit for Epic E if per-table
+  proves too coarse; do it as its own change with its own migration.
+- **C — one `table:<name>` roll-up per golden table per document.** Chosen.
+
+### Decision — Option C
+
+**One `table:<name>` score per golden-declared table, per document, per run.**
+
+- **Name:** `table:<name>`, where `<name>` is the golden table name — already charset-guarded by the
+  §1 C1 `propertyNames` rule `^[A-Za-z0-9_-]{1,128}$`, so INV-03 holds by construction and no new
+  guard is needed. Prefix `table:` cannot collide with `field:`/`prompt:`/`gate`.
+- **Value:** a **single verdict literal**, the worst row-verdict in the block, under this fixed
+  precedence: `missing` > `wrong_value` > `wrong_format` > `new_line` > `match`. `dataType`
+  `CATEGORICAL`, like every other score here.
+- **`comment: None`** — DEBT-18 option B. No cell value, no column name, no `match_key`, no
+  confidence, no row count. **Verdicts only.** That is the whole reconciliation: the score answers
+  *"did this table regress, and how badly"*, and nothing else.
+- **Empty golden `rows: []` → `match`**, because `overall_gate` returns PASS for that block. The
+  score and the gate must never disagree; a score that says "bad" while the gate says PASS is worse
+  than no score.
+- **An unrecognised row verdict must raise**, not fall through to `match`. This is the same
+  fail-open shape as FO-4/FO-5 and it is the default a roll-up invites. Derive the precedence table
+  from `VerdictLiteral` so a future eighth literal with no precedence entry fails loudly rather than
+  being silently ranked lowest.
+- **`id`:** the existing `score_id(run_id=…, document_id=…, score_name="table:<name>")` — no new
+  derivation, retry-safe and run-scoped exactly like the others (N26).
+- **Actual-only tables (`new_table`, ADR-0003 A2) are NOT scored.** `build_score_inputs` iterates
+  the **golden**, and always has — `new_field` is not scored either. Keeping that rule means no
+  IDP-controlled name can ever become a score key, and N9's formula stays bounded by the curated
+  golden rather than by whatever an action decided to emit. The `new_table` signal lives in the
+  verdict map and ADR-0007's local `0600` artifact.
+
+### Why a roll-up is enough
+
+ADR-0007 is accepted: the full verdict detail — every row, column, expected and actual — is written
+to a local gitignored `0600` artifact. The platform's job is therefore only to make a regression
+**visible and comparable across runs**, not diagnosable. A per-table verdict does that: the compare
+view shows `table:line_items` moving `match → missing` between two runs, which is precisely the
+"better or worse" question this product exists to answer. Anything finer is diagnosis, and diagnosis
+has a home that does not require putting more data on an instance that (SIGNOFF B-1/B-2) still runs
+on a published encryption key.
+
+### NFR N9 — the score-count formula changes
+
+From `N_documents × (N_fields + 1)` to
+**`N_documents × (N_fields + N_prompts + N_golden_tables + 1)`**. Still linear in the *golden*, still
+with no actual-derived term, so "no unbounded score write" holds — but the stated formula was
+already stale (it omitted `prompt:` scores, which have shipped) and is now correct. CT-03's count
+assertion must be updated in the same change, and it should assert the formula, not the number.
+
+### Migration and reversal
+
+**No migration.** Additive: new score names in new runs; every existing score keeps its name, id and
+value. Old runs simply have no `table:*` scores, which reads correctly as "this run predates table
+scoring". **Reversal cost: low but one-way in one respect** — score names are immutable (BR11) and
+already-written `table:*` scores stay on the platform forever. Stopping is "stop emitting"; it is
+not "undo".
