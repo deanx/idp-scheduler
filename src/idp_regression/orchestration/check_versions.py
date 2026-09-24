@@ -41,7 +41,7 @@ from idp_regression.adapter.version_probe import (
     sweep_candidates,
     walk_candidates,
 )
-from idp_regression.orchestration.cli import configure_logging
+from idp_regression.orchestration.cli import _is_valid_action_id, configure_logging
 from idp_regression.orchestration.dotenv_support import load_dotenv
 from idp_regression.orchestration.log_sanitize import frame_location
 
@@ -733,6 +733,39 @@ def save_state_atomic(path: Path, state: TickState) -> None:
     os.replace(tmp_path, path)
 
 
+#: Shared by both boundless-loop entry points on top of `check_once`
+#: (this module's own `main()` and `watch.py`'s `_run()`) -- deliberately
+#: NOT duplicated in `watch.py`, imported from here instead, so the two
+#: never drift. **The invariant (defect repro, 2026-09-24): no
+#: run-identity parameter may reach the network blank or whitespace-
+#: only.** `cli.py`'s `run_eval` entry point already enforces exactly
+#: this shape for `--org`/`--action`/`--dataset` (ADR-0004 A8/A9: reject
+#: after `.strip()`, fail closed, before any network call) -- these two
+#: entry points never got it, so a shell that lost its env vars (the
+#: live repro) sent an empty-string org/action/dataset straight into the
+#: probe URL, which then came back UNKNOWN/ABSENT and was reported as
+#: "ANCHOR CHECK UNREACHABLE" -- a diagnosis about the network for what
+#: was actually "you passed nothing". `--action` additionally gets
+#: `cli.py`'s UUID check (imported, not reinvented) -- watch/check-
+#: versions address the exact same MuleSoft action id `run_eval` does,
+#: and both print a ready-to-paste `run_eval --action <id> ...` command
+#: on detection, which would otherwise embed an already-invalid id that
+#: only surfaces as a failure once a human pastes it. INV-02: the
+#: message names only the field, never the value.
+def _validate_run_identity(org_id: str, action_id: str, dataset_name: str) -> str | None:
+    """Returns `None` if `org_id`/`action_id`/`dataset_name` are all
+    usable, else a one-line message naming the first offending field."""
+    if not (org_id or "").strip():
+        return "--org must not be blank"
+    if not (action_id or "").strip():
+        return "--action must not be blank"
+    if not _is_valid_action_id(action_id.strip()):
+        return "--action is not a valid UUID"
+    if not (dataset_name or "").strip():
+        return "--dataset must not be blank"
+    return None
+
+
 def _emit(event: dict[str, Any]) -> None:
     # Structured, one JSON object per line (ADR-0006 §A'.9). Every value
     # already sanitized at construction (org/action ids are CLI-supplied,
@@ -783,6 +816,15 @@ def main(argv: list[str] | None = None) -> int:
         logger.error(
             "check-versions: unexpected error loading .env: %s", type(exc).__name__
         )
+        return 1
+
+    # Defect 1 (2026-09-24, user repro): --org/--action/--dataset blank
+    # (or --action not a UUID) must be rejected here, BEFORE the state
+    # file is even opened -- see `_validate_run_identity`'s docstring for
+    # the full invariant.
+    identity_error = _validate_run_identity(args.org, args.action, args.dataset)
+    if identity_error is not None:
+        logger.error("check-versions: %s", identity_error)
         return 1
 
     try:

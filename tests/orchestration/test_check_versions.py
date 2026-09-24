@@ -778,6 +778,60 @@ def test_open_state_file_locked_does_not_conflict_with_a_lock_on_the_data_file_i
         os.close(fd)
 
 
+# -- Defect 1 (2026-09-24, user repro): run-identity flags must never --------
+# -- reach the network blank or invalid ---------------------------------------
+
+_BLANK_OR_INVALID_IDENTITY_CASES = [
+    ("", "12345678-1234-1234-1234-123456789012", "ds1", "--org must not be blank"),
+    ("   ", "12345678-1234-1234-1234-123456789012", "ds1", "--org must not be blank"),
+    ("org1", "", "ds1", "--action must not be blank"),
+    ("org1", "   ", "ds1", "--action must not be blank"),
+    ("org1", "not-a-uuid", "ds1", "--action is not a valid UUID"),
+    ("org1", "12345678-1234-1234-1234-123456789012", "", "--dataset must not be blank"),
+    ("org1", "12345678-1234-1234-1234-123456789012", "   ", "--dataset must not be blank"),
+]
+
+
+@pytest.mark.parametrize(
+    "org,action,dataset,expected_message", _BLANK_OR_INVALID_IDENTITY_CASES
+)
+def test_main_rejects_a_blank_or_invalid_run_identity_flag_pre_network(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    org: str,
+    action: str,
+    dataset: str,
+    expected_message: str,
+) -> None:
+    """Defect 1 (user repro, 2026-09-24), this module's own instance of
+    the identical bug `watch.py`'s `_run()` has: a shell that had lost
+    its env vars made `--org "" --action "" --dataset ""` expand to
+    blank strings, which argparse's own `required=True` happily accepts
+    (present, just empty) -- the blanks then sail into the probe URL.
+    Same fail-closed shape as `cli.py`'s ADR-0004 A8 guard, shared
+    between this module and `watch.py` via `_validate_run_identity` so
+    the two can never drift apart. A MISSING flag is unchanged (still
+    argparse's own exit 2, not this guard)."""
+    caplog.set_level("ERROR", logger="idp_regression")
+    exit_code = main(
+        [
+            "--org", org,
+            "--action", action,
+            "--dataset", dataset,
+            "--state-file", str(tmp_path / "state.json"),
+            "--max-probes-per-tick", "5",
+            "--max-probes-per-sweep", "5",
+            "--patch-lookahead", "3",
+            "--minor-lookahead", "0",
+            "--major-lookahead", "0",
+            "--sweep-every-n-ticks", "0",
+            "--max-indeterminate-ticks", "3",
+        ]
+    )
+    assert exit_code == 1
+    assert expected_message in caplog.text
+
+
 def test_main_reports_skipped_locked_and_never_touches_credentials_when_locked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -795,7 +849,7 @@ def test_main_reports_skipped_locked_and_never_touches_credentials_when_locked(
         exit_code = main(
             [
                 "--org", "org1",
-                "--action", "action1",
+                "--action", "12345678-1234-1234-1234-123456789012",
                 "--dataset", "ds1",
                 "--state-file", str(state_path),
                 "--max-probes-per-tick", "5",
@@ -832,7 +886,7 @@ def test_main_missing_credential_env_var_is_a_controlled_failure_not_a_traceback
     exit_code = main(
         [
             "--org", "org1",
-            "--action", "action1",
+            "--action", "12345678-1234-1234-1234-123456789012",
             "--dataset", "ds1",
             "--state-file", str(state_path),
             "--max-probes-per-tick", "5",
@@ -861,7 +915,7 @@ def test_main_a_load_dotenv_failure_is_a_controlled_exit_not_a_traceback(
     exit_code = main(
         [
             "--org", "org1",
-            "--action", "action1",
+            "--action", "12345678-1234-1234-1234-123456789012",
             "--dataset", "ds1",
             "--state-file", str(state_path),
             "--max-probes-per-tick", "5",

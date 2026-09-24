@@ -66,6 +66,7 @@ from idp_regression.orchestration.check_versions import (
     TickResult,
     TickState,
     _reject_state_file_inside_repo,
+    _validate_run_identity,
     check_once,
     load_state_from_file,
     open_state_file_locked,
@@ -399,6 +400,34 @@ def run_watch_loop(
     consecutive_tick_failures = 0
     started_at = clock()
     exit_code = 0
+
+    # F-5/F-7/(this fix) invariant, stated once: **the closing summary
+    # must never claim "no new versions found" unless the loop ended
+    # normally without halting.** Enforced by making the summary a
+    # function of HOW THE LOOP ENDED, not of `healthy_ticks`/
+    # `failed_ticks` counters -- those counters answered "did a tick
+    # complete", never "did the run finish with nothing to report", and a
+    # completed tick that reports a HALTING outcome (`anchor_vanished`,
+    # `discriminator_invalid`, `detector_degraded`) still increments
+    # `healthy_ticks` (it got an answer -- the answer was just bad news),
+    # which is exactly what let the old counter-only logic print "no new
+    # versions found" on a halt. `end_reason` is set at every `break` and
+    # is otherwise left at its default -- `while True` below has no
+    # fall-through exit, so `KeyboardInterrupt` (a clean Ctrl-C) is the
+    # only path that reaches the summary without ever assigning it,
+    # making this total over every way the loop can end:
+    #   - "interrupted"            -- Ctrl-C (the ordinary quiet stop)
+    #   - "refused"                -- CheckVersionsRefused, before or
+    #                                 between ticks
+    #   - "tick_failures_exceeded" -- consecutive transient failures hit
+    #                                 the ceiling
+    #   - "halted"                 -- a completed tick's own outcome was
+    #                                 one of `_HALT_OUTCOMES`
+    # A fifth reason added later needs a fifth arm below, or this match
+    # falls into the `else`, which never claims "no new versions found"
+    # either -- it cannot silently regress back to the old bug.
+    end_reason = "interrupted"
+    end_detail = ""
     try:
         while True:
             iteration += 1
@@ -425,7 +454,9 @@ def run_watch_loop(
                     exc.outcome,
                     sanitize_for_log(str(exc)),
                 )
-                _print_halt_block(_OUTCOME_PHRASES.get(exc.outcome, exc.outcome), str(exc))
+                end_reason = "refused"
+                end_detail = _OUTCOME_PHRASES.get(exc.outcome, exc.outcome)
+                _print_halt_block(end_detail, str(exc))
                 exit_code = 1
                 break
             except Exception as exc:  # noqa: BLE001 - a tick failing must not kill the loop
@@ -455,8 +486,10 @@ def run_watch_loop(
                         consecutive_tick_failures,
                         max_consecutive_tick_failures,
                     )
+                    end_reason = "tick_failures_exceeded"
+                    end_detail = _TICK_FAILURES_HALT_PHRASE
                     _print_halt_block(
-                        _TICK_FAILURES_HALT_PHRASE,
+                        end_detail,
                         f"{consecutive_tick_failures} consecutive tick(s) got no "
                         f"answer (ceiling {max_consecutive_tick_failures}) -- see "
                         f"tick {iteration}'s log line above",
@@ -496,12 +529,13 @@ def run_watch_loop(
 
             if result.outcome in _HALT_OUTCOMES:
                 logger.error("watch: halting -- outcome=%s", result.outcome)
-                halt_phrase = (
+                end_reason = "halted"
+                end_detail = (
                     _anchor_vanished_phrase(result.event)
                     if result.outcome == OUTCOME_ANCHOR_VANISHED
                     else _OUTCOME_PHRASES.get(result.outcome, result.outcome)
                 )
-                _print_halt_block(halt_phrase, f"see tick {iteration}'s log line above")
+                _print_halt_block(end_detail, f"see tick {iteration}'s log line above")
                 exit_code = 1
                 break
 
@@ -512,44 +546,45 @@ def run_watch_loop(
     elapsed = clock() - started_at
     elapsed_str = f"{int(elapsed // 60)}m{int(elapsed % 60):02d}s"
 
-    # F-5/F-7 (2026-09-24 `/test` re-gate, both Critical/Major, both
-    # reproduced): the invariant this block enforces is "the closing
-    # summary must never claim 'no new versions found' when the watcher
-    # did not get a clean answer from every tick it attempted" -- keyed
-    # on `failed_ticks` directly, never discarded once a single tick
-    # happens to succeed (F-5: a probe failing 3 of 4 ticks made the old
-    # `healthy_ticks == 0` guard permanently unreachable and a single
-    # early success silently absolved every later failure). `elif
-    # healthy_ticks == 0 and failed_ticks > 0` (F-7) was ALSO wrong the
-    # other way: a `CheckVersionsRefused` halt before any tick completes
-    # increments neither counter, so that conjunct excluded exactly the
-    # case it needed to cover -- the `and failed_ticks > 0` half is
-    # simply gone below.
+    # (This fix, 2026-09-24 -- fourth round on this function; see the
+    # invariant comment above `end_reason`'s declaration.) A detection
+    # always leads, regardless of how the loop ultimately ended -- it is
+    # never wrong to report a version actually detected this run, and it
+    # is the one case that can legitimately share a run with a later
+    # halt. Every other case matches on `end_reason`, so a halting
+    # outcome can NEVER reach the `"no new versions found"` phrase --
+    # that phrase lives in exactly one arm, `"interrupted"`.
     if detected_versions:
         found = f"detected {len(detected_versions)} new version(s): {', '.join(detected_versions)}"
-    elif healthy_ticks > 0:
-        found = "no new versions found"
+    elif end_reason == "interrupted":
+        # The ordinary quiet stop (Ctrl-C). F-5/F-7, preserved: a
+        # majority-failure run must say so even after a healthy tick
+        # (`failed_ticks` decides the mixed note, never `healthy_ticks
+        # == 0`), and a run that never completed a single tick (every
+        # attempted tick failed transiently, or Ctrl-C landed before the
+        # first tick) is "no answer", never "no new versions found".
+        if healthy_ticks > 0:
+            found = "no new versions found"
+            if failed_ticks > 0:
+                found += f" ({failed_ticks} of {iteration} tick(s) got no answer)"
+        else:
+            found = (
+                f"no answer -- {failed_ticks} tick(s) never got an answer"
+                if failed_ticks > 0
+                else "no answer -- watcher stopped before any tick completed"
+            )
+    elif end_reason == "refused":
+        found = f"no answer -- watcher refused to start ({end_detail})"
+    elif end_reason == "tick_failures_exceeded":
+        found = f"no answer -- {failed_ticks} tick(s) never got an answer ({end_detail})"
     else:
-        # No tick this run ever produced a real answer -- either every
-        # attempted tick failed transiently, or the watcher halted
-        # (`CheckVersionsRefused`) before a single tick could even be
-        # attempted (F-7's exact case: iteration=1, healthy_ticks=0,
-        # failed_ticks=0). Neither is evidence of "no new versions".
-        found = (
-            f"no answer -- {failed_ticks} tick(s) never got an answer"
-            if failed_ticks > 0
-            else f"no answer -- watcher halted before any tick completed "
-            f"({iteration} tick(s) attempted)"
-        )
-
-    # F-5: a mixed run (some ticks healthy, some failed) must say so even
-    # when a healthy tick (or an outright detection) also happened --
-    # `failed_ticks` alone decides whether this note is appended, not
-    # whether `healthy_ticks` is zero. This is the ONLY place `found` can
-    # still contain the bare phrase "no new versions found" while
-    # `failed_ticks > 0` is true, and it is never silent about it.
-    if healthy_ticks > 0 and failed_ticks > 0:
-        found += f" ({failed_ticks} of {iteration} tick(s) got no answer)"
+        # end_reason == "halted": a completed tick returned one of
+        # `_HALT_OUTCOMES` (anchor_vanished, discriminator_invalid,
+        # detector_degraded, or a future addition) -- this is the exact
+        # class this fix closes. The tick got an answer, but the answer
+        # was a halt, not a verdict on whether a new version exists; the
+        # old counter-only logic could not tell those apart.
+        found = f"watcher HALTED ({end_detail}) -- no new-version verdict for this run"
 
     print(f"\nStopped after {iteration} tick(s) ({elapsed_str}). {found}.")
     return exit_code
@@ -680,6 +715,25 @@ def _run(argv: list[str] | None) -> int:
 
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    # Defect 1 (2026-09-24, user repro): a shell that lost its env vars
+    # made --org/--action/--dataset expand to "", which used to sail
+    # straight past argparse's `required=True` (present, just empty) and
+    # into the probe URL -- the ambiguous UNKNOWN response that came back
+    # was then reported as "ANCHOR CHECK UNREACHABLE", a diagnosis about
+    # the network for what was actually "you passed nothing". Same
+    # fail-closed shape ADR-0004 A8 already requires of `cli.py`'s
+    # `--dataset` (`.strip()`, reject blank, exit before any network
+    # call) -- shared with `check_versions.main()` via
+    # `_validate_run_identity` so the two never drift; see that
+    # function's docstring for why `--action` also gets `cli.py`'s UUID
+    # check. Checked before the --auto-run consistency checks below: an
+    # unusable identity is the more fundamental problem either way.
+    identity_error = _validate_run_identity(args.org, args.action, args.dataset)
+    if identity_error is not None:
+        logger.error("watch: %s", identity_error)
+        print(f"error: {identity_error}", file=sys.stderr)
+        return 1
 
     if args.auto_run and args.max_runs_per_tick is None:
         logger.error(

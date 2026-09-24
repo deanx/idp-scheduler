@@ -289,7 +289,7 @@ def test_check_versions_logger_name_is_stable_under_python_dash_m_invocation(
             "--org",
             "org1",
             "--action",
-            "action1",
+            "12345678-1234-1234-1234-123456789012",
             "--dataset",
             "ds1",
             "--state-file",

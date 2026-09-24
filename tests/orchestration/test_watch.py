@@ -27,7 +27,12 @@ from idp_regression.orchestration.check_versions import (
     _lock_path_for,
     open_state_file_locked,
 )
-from idp_regression.orchestration.watch import DEFAULT_INTERVAL_SECONDS, main, run_watch_loop
+from idp_regression.orchestration.watch import (
+    _HALT_OUTCOMES,
+    DEFAULT_INTERVAL_SECONDS,
+    main,
+    run_watch_loop,
+)
 
 
 class FakeProbe:
@@ -463,6 +468,113 @@ def test_an_unreachable_positive_control_is_not_misreported_as_anchor_vanished(
     assert "UNREACHABLE" in out
     assert "ANCHOR VANISHED" not in out
     assert len(sleep_fn.calls) == 0  # halted before ever sleeping
+
+
+# -- Defect 2 (2026-09-24, user repro): the closing summary must never -------
+# -- claim "no new versions found" on a halting outcome ----------------------
+
+
+@pytest.mark.parametrize("halting_outcome", sorted(_HALT_OUTCOMES))
+def test_every_halting_outcome_never_lets_the_summary_claim_no_new_versions_found(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    halting_outcome: str,
+) -> None:
+    """Defect 2 (user repro, 2026-09-24, fourth round on this function):
+    a completed tick reporting ANY `_HALT_OUTCOMES` member (not just
+    `anchor_vanished`, the one the user's repro happened to hit) used to
+    still increment `healthy_ticks` before the halt check ran -- the old
+    summary logic keyed on `healthy_ticks > 0`, so it printed "no new
+    versions found" on every one of these halts. The invariant: the
+    closing summary must never claim "no new versions found" unless the
+    loop ended normally without halting. Iterates over every member of
+    `_HALT_OUTCOMES` rather than pinning the single outcome from the
+    repro (per the brief's explicit instruction), so a fourth halting
+    outcome added later is covered for free."""
+    from idp_regression.orchestration import watch as watch_module
+    from idp_regression.orchestration.check_versions import TickResult
+
+    state = TickState()
+    halt_event: dict[str, Any] = {
+        "event": "check_tick",
+        "outcome": halting_outcome,
+        "org_id": "org1",
+        "action_id": "x",
+        "dataset_name": "ds1",
+        "anchor": "1.0.0",
+        "tick_count": 0,
+        "probed": [],
+        "positive_control": str(ProbeResult.ABSENT),
+    }
+
+    def _fake_check_once(**kwargs: object) -> TickResult:
+        return TickResult(halting_outcome, state, dict(halt_event), [])
+
+    monkeypatch.setattr(watch_module, "check_once", _fake_check_once)
+
+    exit_code = run_watch_loop(
+        probe=FakeProbe({}),
+        sleep_fn=_stop_after(5),
+        **_base_kwargs(),
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "Stopped after 1 tick(s)" in out
+    assert "no new versions found" not in out
+    assert "watcher HALTED" in out
+
+
+# -- Defect 1 (2026-09-24, user repro): run-identity flags must never --------
+# -- reach the network blank or invalid ---------------------------------------
+
+_BLANK_OR_INVALID_IDENTITY_CASES = [
+    ("", "12345678-1234-1234-1234-123456789012", "ds1", "--org must not be blank"),
+    ("   ", "12345678-1234-1234-1234-123456789012", "ds1", "--org must not be blank"),
+    ("org1", "", "ds1", "--action must not be blank"),
+    ("org1", "   ", "ds1", "--action must not be blank"),
+    ("org1", "not-a-uuid", "ds1", "--action is not a valid UUID"),
+    ("org1", "12345678-1234-1234-1234-123456789012", "", "--dataset must not be blank"),
+    ("org1", "12345678-1234-1234-1234-123456789012", "   ", "--dataset must not be blank"),
+]
+
+
+@pytest.mark.parametrize(
+    "org,action,dataset,expected_message", _BLANK_OR_INVALID_IDENTITY_CASES
+)
+def test_watch_main_rejects_a_blank_or_invalid_run_identity_flag_pre_network(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    org: str,
+    action: str,
+    dataset: str,
+    expected_message: str,
+) -> None:
+    """Defect 1 (user repro, 2026-09-24): a shell that had lost its env
+    vars made `--org "" --action "" --dataset ""` expand to blank
+    strings -- argparse's own `required=True` only checks the flag is
+    PRESENT, not non-empty, so the blanks sailed straight into the probe
+    URL. The probe then came back an ambiguous UNKNOWN, which the watcher
+    reported as "ANCHOR CHECK UNREACHABLE" -- a diagnosis about the
+    NETWORK for what was actually "you passed nothing". Must be rejected
+    here, exit 1, before any probe call -- mirrors `cli.py`'s ADR-0004 A8
+    shape for `run_eval`'s identical `--org`/`--action`/`--dataset`
+    flags (a MISSING flag is unchanged: that is still argparse's own
+    exit 2, not this guard)."""
+    exit_code = main(
+        [
+            "--org",
+            org,
+            "--action",
+            action,
+            "--dataset",
+            dataset,
+            "--state-file",
+            str(tmp_path / "state.json"),
+        ]
+    )
+    assert exit_code == 1
+    assert expected_message in capsys.readouterr().err
 
 
 # -- --auto-run: opt-in, bounded, spends quota --------------------------------
