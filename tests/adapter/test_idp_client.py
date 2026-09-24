@@ -49,17 +49,43 @@ def _advancing_clock(step: float = 0.1) -> Callable[[], float]:
     return clock
 
 
+#: DEBT-65: a poll-loop mutant that weakens the `now >= deadline` check
+#: (e.g. loosens the comparison) can no longer be signalled by the repeated
+#: LAST value alone -- with no cap, `_clock_from` repeats that value
+#: literally forever, so a broken deadline check loops until the 120s
+#: `pytest-timeout` kills the whole run, not a crisp assertion failure at
+#: the mutation itself. This is generous enough that no legitimate test
+#: (which calls `clock()` a handful of extra times past its pinned
+#: sequence, e.g. one final elapsed-time log call) can ever reach it.
+_CLOCK_FROM_MAX_REPEATS_AFTER_EXHAUSTION = 10_000
+
+
 def _clock_from(seq: list[float]) -> Callable[[], float]:
     """Returns each value in ``seq`` in order, then repeats the last value
-    forever (so a test only needs to pin the values it cares about, not the
-    exact total call count)."""
+    (so a test only needs to pin the values it cares about, not the exact
+    total call count) -- but only up to
+    ``_CLOCK_FROM_MAX_REPEATS_AFTER_EXHAUSTION`` times. Past that, a
+    genuinely infinite poll loop (e.g. a deadline-check mutant that a
+    frozen "now" can never satisfy) fails fast with a crisp
+    ``AssertionError`` instead of hanging until `pytest-timeout`."""
     it = iter(seq)
     last = seq[-1]
+    repeats_after_exhaustion = 0
 
     def clock() -> float:
-        nonlocal last
-        with contextlib.suppress(StopIteration):
+        nonlocal last, repeats_after_exhaustion
+        try:
             last = next(it)
+        except StopIteration:
+            repeats_after_exhaustion += 1
+            if repeats_after_exhaustion > _CLOCK_FROM_MAX_REPEATS_AFTER_EXHAUSTION:
+                raise AssertionError(
+                    "_clock_from's pinned sequence was exhausted and then read "
+                    f"more than {_CLOCK_FROM_MAX_REPEATS_AFTER_EXHAUSTION} more "
+                    "times -- likely a poll loop that never reaches its "
+                    "deadline (e.g. a weakened `now >= deadline` check), "
+                    "failing fast here instead of hanging until pytest-timeout"
+                ) from None
         return last
 
     return clock
@@ -351,6 +377,38 @@ def test_poll_transport_error_eventually_times_out_if_never_recovers(
     )
     monkeypatch.setattr(transport, "get_json_with_headers", always_failing_get_json)
     with pytest.raises(IDPPollTimeoutError):
+        adapter.extract(str(doc), "action-1", "v1")
+
+
+def test_poll_transport_error_retry_budget_exhaustion_raises_hard_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # DEBT-49(b): ADR-0004 #6 -- "connection reset" is retried under the
+    # SAME bounded attempts/backoff as #3, and exhausting that budget is a
+    # hard failure -> abort, exactly like the 429/5xx path just below it in
+    # the poll loop. Previously a flapping connection-level
+    # IDPTransportError retried unbounded WITHIN the deadline -- correct
+    # only by the deadline eventually arriving, not by an attempts bound,
+    # which is the wrong reason and unbounded in request count for a long
+    # poll budget. This test never lets the deadline arrive (huge poll
+    # budget, deterministic clock) so only the attempts bound can end it.
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+
+    def always_failing_get_json(
+        *args: object, **kwargs: object
+    ) -> tuple[int, dict[str, Any], dict[str, str]]:
+        raise IDPTransportError("connection reset")
+
+    adapter = _adapter(
+        monkeypatch,
+        poll_timeout_seconds=3600.0,
+        poll_retry_max_attempts=3,
+        clock=_advancing_clock(step=0.01),
+        sleep=lambda _seconds: None,
+    )
+    monkeypatch.setattr(transport, "get_json_with_headers", always_failing_get_json)
+    with pytest.raises(IDPPollHardFailureError):
         adapter.extract(str(doc), "action-1", "v1")
 
 
@@ -993,6 +1051,14 @@ def test_poll_429_honours_sane_retry_after_capped_to_remaining_budget(
     # budget (do not extend the budget)". Retry-After=1000s is far bigger
     # than the remaining budget, so the honoured sleep must be clamped down
     # to what's left, never extending the absolute poll deadline.
+    #
+    # DEBT-67(a): this is the public-path pin for the 429-honours-
+    # Retry-After behaviour. `test_poll_retry_sleep_seconds_ignores_retry_
+    # after_header_on_a_non_429_status` below covers the SAME status-code
+    # gate from the opposite (non-429) side by reaching for the private
+    # `_poll_retry_sleep_seconds` helper directly -- neither test should be
+    # deleted without checking the other; together they pin both sides of
+    # `if status_code == 429`.
     doc = tmp_path / "invoice.pdf"
     doc.write_bytes(b"%PDF")
     calls: list[int] = []
@@ -1113,7 +1179,13 @@ def test_poll_retry_sleep_seconds_ignores_retry_after_header_on_a_non_429_status
     header (which a real server has no ADR-0004-sanctioned reason to send
     on a 5xx) would otherwise be honoured verbatim instead of falling
     through to exponential backoff. Calls the private helper directly —
-    fast, no clock/sleep plumbing needed."""
+    fast, no clock/sleep plumbing needed.
+
+    DEBT-67(a): this is meaningful only while
+    ``test_poll_429_honours_sane_retry_after_capped_to_remaining_budget``
+    (above) remains the public-path pin for the honoured-on-429 side of the
+    same ``if status_code == 429`` gate -- together they pin both sides;
+    neither should be deleted without checking the other."""
     adapter = MuleSoftIDPAdapter(
         client_id="cid",
         client_secret="csecret",

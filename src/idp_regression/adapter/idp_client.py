@@ -447,13 +447,43 @@ class MuleSoftIDPAdapter:
             # deadline waiting on a single slow request or a final sleep
             # (Atchim suggestion).
             per_call_timeout = min(self._poll_interval_seconds * 2, remaining) or remaining
+            # Deferred-raise (see _fetch_token/_submit): never raise while
+            # an IDPTransportError is the "currently handled" exception, so
+            # it can't leak into __context__ even under `from None`.
+            transport_call_failed = False
             try:
                 token, status_code, body, headers = self._poll_get_with_auth_retry(
                     url, token, per_call_timeout
                 )
             except IDPTransportError:
-                # Transient transport error — keep polling within the same budget.
-                self._sleep(min(self._poll_interval_seconds, max(deadline - self._clock(), 0.0)))
+                transport_call_failed = True
+                status_code = 0
+                body = None
+                headers = {}
+            if transport_call_failed:
+                # DEBT-49(b) / ADR-0004 #6: "connection reset" is retried
+                # under the SAME bounded attempts + backoff as a 429/5xx
+                # (#3) -- sharing `poll_retry_count` with that branch below,
+                # not a separate unbounded-within-deadline loop. A retry
+                # that exhausts the shared budget is a hard failure, same
+                # as the 429/5xx case (never a bare "keep going until the
+                # deadline happens to arrive", which bounded the REQUEST
+                # COUNT only by how long the deadline takes to reach it).
+                poll_retry_count += 1
+                if poll_retry_count > self._poll_retry_max_attempts:
+                    raise IDPPollHardFailureError(
+                        "IDP poll retry budget exhausted for a transient "
+                        "transport failure (connection reset/timeout)",
+                        http_status=0,
+                    )
+                remaining_budget = max(deadline - self._clock(), 0.0)
+                # status_code=0/headers={}: never 429, so this always takes
+                # the exponential-backoff branch, never a Retry-After
+                # lookup -- there is no HTTP response to read one from.
+                sleep_seconds = self._poll_retry_sleep_seconds(
+                    poll_retry_count, 0, {}, remaining_budget
+                )
+                self._sleep(sleep_seconds)
                 continue
             if status_code == 429 or 500 <= status_code < 600:
                 # DEBT-24 / ADR-0004 #6: a transient 5xx/429 is retried,
