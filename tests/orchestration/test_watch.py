@@ -140,7 +140,12 @@ def test_startup_banner_and_quiet_tick_lines(capsys: pytest.CaptureFixture[str])
     tick_lines = [line for line in lines if "tick 1" in line or "tick 2" in line]
     assert len(tick_lines) == 2
     for line in tick_lines:
-        assert "no new versions" in line
+        # Smaller item (2026-09-24): the per-tick phrase and the closing
+        # summary's phrase are deliberately DIFFERENT strings (neither is
+        # a substring of the other) so a script can't confuse a quiet
+        # tick line with the final summary.
+        assert "no new version this tick" in line
+        assert "no new versions found" not in line
         assert line.strip().endswith("ok")
 
     assert "Stopped after 2 tick(s)" in out
@@ -211,7 +216,7 @@ def test_a_transient_probe_exception_does_not_kill_the_loop(
     assert "FAILED (transient)" in out
     assert "will retry next tick" in out
     # the loop kept going after the transient failure and completed a real tick
-    assert "no new versions" in out
+    assert "no new version this tick" in out
     assert len(sleep_fn.calls) == 2
 
 
@@ -247,6 +252,178 @@ def test_a_probe_that_fails_every_tick_eventually_halts_instead_of_running_forev
     assert "no new versions found" not in out
     assert "never got an answer" in out
     assert "4 tick(s)" in out
+
+
+def test_f5_a_majority_failure_rate_is_never_silently_hidden_by_one_success(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-5 (Critical, reproduced): before this fix, `failed_ticks` was
+    computed and then DISCARDED whenever `healthy_ticks > 0` -- a probe
+    failing 3 of every 4 ticks (the field-common case: a flaky
+    credential, a 5xx-ing endpoint -- `RaisesForeverProbe` above cannot
+    reproduce this, since a forever-failing probe makes "consecutive"
+    and "cumulative" failures the same number) made the
+    `max_consecutive_tick_failures` ceiling (consecutive-only)
+    permanently unreachable, AND a single early success made the closing
+    summary claim "no new versions found" for the rest of the run no
+    matter how many later ticks failed. The invariant: the closing
+    summary must never claim "no new versions found" UNQUALIFIED when
+    ANY tick failed to get an answer -- keyed on `failed_ticks` directly,
+    never on `healthy_ticks == 0`.
+
+    `check_once` itself is monkeypatched (rather than driven through a
+    scripted `IDPVersionProbe`) so the fail/succeed pattern is pinned at
+    TICK granularity, exactly matching the brief's own repro (30 of 40
+    ticks failed) without depending on how many `probe()` calls one
+    healthy tick happens to issue internally."""
+    from idp_regression.orchestration import watch as watch_module
+    from idp_regression.orchestration.check_versions import TickResult
+
+    state = TickState()
+    healthy_event: dict[str, Any] = {
+        "event": "check_tick",
+        "outcome": "no_new_versions",
+        "org_id": "org1",
+        "action_id": "x",
+        "dataset_name": "ds1",
+        "anchor": "1.0.0",
+        "tick_count": 0,
+        "probed": [],
+    }
+    calls = {"n": 0}
+
+    def _fake_check_once(**kwargs: object) -> TickResult:
+        n = calls["n"]
+        calls["n"] += 1
+        # 30 of 40 ticks fail -- 3 of every 4, the brief's exact ratio.
+        if n % 4 != 0:
+            raise ConnectionError("simulated flaky failure")
+        return TickResult("no_new_versions", state, dict(healthy_event), [])
+
+    monkeypatch.setattr(watch_module, "check_once", _fake_check_once)
+    sleep_fn = _stop_after(40)
+
+    exit_code = run_watch_loop(
+        probe=FakeProbe({}),
+        sleep_fn=sleep_fn,
+        max_consecutive_tick_failures=100,  # isolate the SUMMARY invariant, not the ceiling
+        **_base_kwargs(),
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Stopped after 40 tick(s)" in out
+    # the exact bug: this phrase, UNQUALIFIED, must never appear when any
+    # tick failed.
+    assert "no new versions found." not in out
+    assert "no new versions found (" in out
+    assert "30 of 40 tick(s) got no answer)" in out
+
+
+def test_f7_a_refusal_before_any_tick_completes_is_not_misreported_as_no_new_versions(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """F-7 (Major, reproduced): `elif healthy_ticks == 0 and failed_ticks
+    > 0` was wrong a second way -- a `CheckVersionsRefused` halt (an
+    unparseable anchor) increments NEITHER counter, so a watcher that
+    halts before a single tick completes fell through to the plain "no
+    new versions found" `else` branch. Reproduced with an anchor that
+    fails strict semver (`_run_walk` never runs; `check_once` raises
+    `CheckVersionsRefused` before the first probe)."""
+    probe = FakeProbe({})
+    state = TickState(known_versions=["not-a-semver"])
+
+    exit_code = run_watch_loop(
+        probe=probe,
+        sleep_fn=_stop_after(5),
+        **{**_base_kwargs(), "state": state, "known_version": None},
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "no new versions found" not in out
+    assert "no answer" in out
+    assert "Stopped after 1 tick(s)" in out
+
+
+def test_f6_interleaved_failing_and_succeeding_ticks_never_hit_the_consecutive_ceiling(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-6 mutant-killer: `test_a_probe_that_fails_every_tick_eventually_
+    halts...` uses a FOREVER-failing probe, where "consecutive" and
+    "cumulative" failure counts are numerically identical -- deleting the
+    `consecutive_tick_failures = 0` reset (the mutant named in the
+    brief) survives that test untouched. This test alternates a failing
+    tick with a healthy one: consecutive failures never exceed 1, but
+    CUMULATIVE failures grow past the ceiling well before the loop is
+    asked to stop. If the reset is ever deleted, this test goes RED (the
+    watcher wrongly halts partway through instead of running all 10
+    requested ticks)."""
+    from idp_regression.orchestration import watch as watch_module
+
+    state = TickState()
+    healthy_event: dict[str, Any] = {
+        "event": "check_tick",
+        "outcome": "no_new_versions",
+        "org_id": "org1",
+        "action_id": "x",
+        "dataset_name": "ds1",
+        "anchor": "1.0.0",
+        "tick_count": 0,
+        "probed": [],
+    }
+    calls = {"n": 0}
+
+    def _fake_check_once(**kwargs: object) -> Any:
+        from idp_regression.orchestration.check_versions import TickResult
+
+        n = calls["n"]
+        calls["n"] += 1
+        if n % 2 == 0:  # every OTHER tick fails -- never two in a row
+            raise ConnectionError("simulated transient failure")
+        return TickResult("no_new_versions", state, dict(healthy_event), [])
+
+    monkeypatch.setattr(watch_module, "check_once", _fake_check_once)
+
+    exit_code = run_watch_loop(
+        probe=FakeProbe({}),
+        sleep_fn=_stop_after(10),
+        max_consecutive_tick_failures=3,
+        **_base_kwargs(),
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0  # stopped by Ctrl-C (the sleep double), never a halt
+    assert "TICK FAILURES" not in out
+
+
+def test_auto_run_that_raises_does_not_crash_the_whole_watcher(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Smaller item: `save_state_atomic` persists a detected version into
+    `known_versions` BEFORE `--auto-run` ever fires, so a `run_eval_fn`
+    that RAISES (not merely returns a gate-FAIL exit code) used to escape
+    uncaught -- crashing the whole watch loop for one failed run, with
+    the detection already unretriable. Must be loud (printed + logged)
+    but not fatal to the loop."""
+    probe = FakeProbe({**_controls_ok("1.0.0"), "1.0.1": ProbeResult.EXISTS})
+
+    def _raising_run_eval(*args: object, **kwargs: object) -> int:
+        raise RuntimeError("simulated run_eval crash")
+
+    exit_code = run_watch_loop(
+        probe=probe,
+        sleep_fn=_stop_after(1),
+        auto_run=True,
+        max_runs_per_tick=5,
+        run_eval_fn=_raising_run_eval,
+        **_base_kwargs(),
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0  # the loop itself is healthy -- Ctrl-C'd normally
+    assert "FAILED TO RUN" in out
+    assert "no verdict" in out
 
 
 def test_anchor_vanished_halts_the_loop_loudly_and_returns_nonzero(
@@ -610,22 +787,20 @@ def test_watch_main_a_load_dotenv_failure_is_a_controlled_exit_not_a_traceback(
 # -- traceback carrying a filesystem path (INV-02) ---------------------------
 
 
-def test_watch_main_an_oserror_preparing_the_state_file_is_a_controlled_exit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_watch_main_the_live_repro_an_isadirectoryerror_from_load_state_is_a_controlled_exit(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """F-2 (Major): `main()`'s try only caught `CheckVersionsRefused` --
-    an `OSError` from `state_file.parent.mkdir()` (e.g. a read-only
-    parent) escaped `main()`, the outermost caller, as a RAW TRACEBACK
-    carrying the state-file path -- the same INV-02 bug class `cli.py`
-    closed 2026-09-21, just not carried into this newer entry point.
-    Reproduced here without touching the real filesystem permissions
-    (CI-portable) by monkeypatching `Path.mkdir` to raise."""
-    sentinel = "/some/should-never-leak/path"
-
-    def _boom(self: Path, *args: object, **kwargs: object) -> None:
-        raise OSError(f"[Errno 13] Permission denied: '{sentinel}'")
-
-    monkeypatch.setattr(Path, "mkdir", _boom)
+    """F-2 (Critical, STILL NOT CLOSED after the round that added the two
+    site-specific `except Exception` clauses above `load_state_from_file`'s
+    call site): the THIRD site. `load_state_from_file` does a bare
+    `os.open(...)` (`check_versions.py`); the try wrapping its call in
+    `main()` (now `_run()`) only ever caught `CheckVersionsRefused`. This
+    is the exact live repro (2026-09-24): a `--state-file` path that is
+    actually a directory makes that `os.open()` raise `IsADirectoryError`,
+    which used to escape `main()` raw, carrying both the state-file path
+    AND the absolute deployment path of the checkout in the traceback."""
+    state_path = tmp_path / "state.json"
+    state_path.mkdir()  # a directory sits where a file is expected
 
     exit_code = main(
         [
@@ -636,29 +811,55 @@ def test_watch_main_an_oserror_preparing_the_state_file_is_a_controlled_exit(
             "--dataset",
             "ds1",
             "--state-file",
-            str(tmp_path / "sub" / "state.json"),
+            str(state_path),
         ]
     )
 
     assert exit_code == 1
     err = capsys.readouterr().err
     assert "Traceback" not in err
-    assert sentinel not in err
+    assert str(state_path) not in err
+    # the absolute deployment path of the checkout must not leak either
+    assert str(Path(__file__).resolve().parents[2]) not in err
 
 
-def test_watch_main_an_unexpected_lock_error_is_a_controlled_exit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    "target",
+    [
+        # F-2's real invariant: "no exception from any state-file I/O --
+        # or from anywhere else in main() -- escapes raw", not "these two
+        # calls are guarded". Neither of these two sites was individually
+        # wrapped before this fix -- `load_state_from_file`'s try only
+        # ever caught `CheckVersionsRefused` (the exact third site the
+        # coordinator's repro names), and the `MuleSoftVersionProbe(...)`
+        # construction sits between two `try` blocks with no guard of its
+        # own at all. The old tests only proved the two sites the PRIOR
+        # fix round happened to touch (`Path.mkdir`,
+        # `open_state_file_locked`) -- exactly the "closes the case
+        # reported, not the invariant violated" pattern named in the
+        # brief. A third or fourth site added tomorrow needs no new test
+        # here, because the invariant is now enforced structurally
+        # (`main()`'s one outer catch-all), not enumerated.
+        "idp_regression.orchestration.watch.load_state_from_file",
+        "idp_regression.orchestration.watch.MuleSoftVersionProbe",
+    ],
+)
+def test_watch_main_no_exception_from_any_site_escapes_raw(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    target: str,
 ) -> None:
-    """F-2: `open_state_file_locked` raising anything OTHER than
-    `StateFileLocked` (a bare `OSError` from the sidecar's own `os.open`,
-    say a permission error) must not escape `main()` as a raw traceback
-    either -- only `StateFileLocked` was ever caught."""
-    sentinel = "/some/should-never-leak/lock-path"
+    sentinel = "should-never-leak-a-raw-traceback"
+    monkeypatch.setenv("IDP_CLIENT_ID", "id")
+    monkeypatch.setenv("IDP_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("IDP_REGION", "us")
+    monkeypatch.setattr("idp_regression.orchestration.watch.load_dotenv", lambda: None)
 
-    def _boom(state_file: Path) -> int:
-        raise OSError(f"[Errno 13] Permission denied: '{sentinel}'")
+    def _boom(*args: object, **kwargs: object) -> Any:
+        raise RuntimeError(sentinel)
 
-    monkeypatch.setattr("idp_regression.orchestration.watch.open_state_file_locked", _boom)
+    monkeypatch.setattr(target, _boom)
 
     exit_code = main(
         [
@@ -676,6 +877,7 @@ def test_watch_main_an_unexpected_lock_error_is_a_controlled_exit(
     assert exit_code == 1
     err = capsys.readouterr().err
     assert "Traceback" not in err
+    # only the exception's TYPE name is ever surfaced, never str(exc)
     assert sentinel not in err
 
 

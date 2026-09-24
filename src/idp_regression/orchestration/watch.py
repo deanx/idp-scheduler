@@ -110,8 +110,15 @@ _HALT_OUTCOMES = frozenset(
 _ANCHOR_VANISHED_PHRASE = "ANCHOR VANISHED -- stopping"
 _ANCHOR_UNREACHABLE_PHRASE = "ANCHOR CHECK UNREACHABLE (ambiguous response) -- stopping"
 
+#: Smaller item (2026-09-24 `/test` re-gate): the per-tick phrase and the
+#: closing summary's healthy-quiet phrase ("no new versions found", built
+#: below) used to share the substring "no new versions", so a script
+#: grepping the obvious phrase would match a single quiet TICK line just
+#: as readily as the final summary -- the "found" suffix was the only
+#: (undocumented) discriminator. Deliberately singular/differently worded
+#: here so the two are unambiguous without relying on that suffix alone.
 _OUTCOME_PHRASES = {
-    OUTCOME_NO_NEW_VERSIONS: "no new versions",
+    OUTCOME_NO_NEW_VERSIONS: "no new version this tick",
     OUTCOME_NEW_VERSION_DETECTED: "NEW VERSION DETECTED",
     OUTCOME_CEILING_REACHED: "probe budget reached (continuing next tick)",
     OUTCOME_INDETERMINATE: "ambiguous result (retrying)",
@@ -266,9 +273,36 @@ def _run_auto_run(
             run_name,
         )
         print(f"  >>> --auto-run: launching run_eval for {version} (spends real IDP quota)")
-        exit_code = run_eval_fn(
-            action_id, version, run_name, dataset_name, org_id, max_documents_per_run
-        )
+        # Smaller item (2026-09-24 `/test` re-gate): `save_state_atomic`
+        # already persisted this version into `known_versions` BEFORE
+        # `_run_auto_run` was ever called (it runs once per tick, right
+        # after the tick's own success), so a `run_eval_fn` that RAISES
+        # (as opposed to returning a gate FAIL exit code) previously
+        # escaped uncaught -- crashing the entire watch loop for what
+        # should be one failed run, while the detection itself could
+        # never be retried (it is already "known"). Distinct from an
+        # ordinary gate FAIL, which is loud on the console by design
+        # (see `verdict` below) -- this is the same loudness for the
+        # "didn't even get a verdict" case, without taking the whole
+        # watcher down with it.
+        try:
+            exit_code = run_eval_fn(
+                action_id, version, run_name, dataset_name, org_id, max_documents_per_run
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed run must not crash the watcher
+            logger.error(
+                "auto_run: run_eval RAISED for version=%s run=%s type=%s at %s -- "
+                "no verdict recorded, will NOT be retried (already known)",
+                version,
+                run_name,
+                type(exc).__name__,
+                frame_location(exc),
+            )
+            print(
+                f"  >>> --auto-run: {version} FAILED TO RUN (see log) -- "
+                "no verdict, will not be retried"
+            )
+            continue
         verdict = "PASS" if exit_code == 0 else "gate FAIL or abort"
         print(f"  >>> --auto-run: {version} finished -- {verdict} (exit={exit_code})")
         logger.warning(
@@ -477,17 +511,46 @@ def run_watch_loop(
 
     elapsed = clock() - started_at
     elapsed_str = f"{int(elapsed // 60)}m{int(elapsed % 60):02d}s"
+
+    # F-5/F-7 (2026-09-24 `/test` re-gate, both Critical/Major, both
+    # reproduced): the invariant this block enforces is "the closing
+    # summary must never claim 'no new versions found' when the watcher
+    # did not get a clean answer from every tick it attempted" -- keyed
+    # on `failed_ticks` directly, never discarded once a single tick
+    # happens to succeed (F-5: a probe failing 3 of 4 ticks made the old
+    # `healthy_ticks == 0` guard permanently unreachable and a single
+    # early success silently absolved every later failure). `elif
+    # healthy_ticks == 0 and failed_ticks > 0` (F-7) was ALSO wrong the
+    # other way: a `CheckVersionsRefused` halt before any tick completes
+    # increments neither counter, so that conjunct excluded exactly the
+    # case it needed to cover -- the `and failed_ticks > 0` half is
+    # simply gone below.
     if detected_versions:
         found = f"detected {len(detected_versions)} new version(s): {', '.join(detected_versions)}"
-    elif healthy_ticks == 0 and failed_ticks > 0:
-        # F-1: 0 detections here is NOT evidence of "no new versions" --
-        # every tick either failed transiently or the loop halted before
-        # one ever completed. Must never share a substring with the
-        # healthy-but-quiet branch below, so a human (or a script) can't
-        # mistake "never got an answer" for "asked and the answer was no".
-        found = f"no answer -- {failed_ticks} tick(s) never got an answer"
-    else:
+    elif healthy_ticks > 0:
         found = "no new versions found"
+    else:
+        # No tick this run ever produced a real answer -- either every
+        # attempted tick failed transiently, or the watcher halted
+        # (`CheckVersionsRefused`) before a single tick could even be
+        # attempted (F-7's exact case: iteration=1, healthy_ticks=0,
+        # failed_ticks=0). Neither is evidence of "no new versions".
+        found = (
+            f"no answer -- {failed_ticks} tick(s) never got an answer"
+            if failed_ticks > 0
+            else f"no answer -- watcher halted before any tick completed "
+            f"({iteration} tick(s) attempted)"
+        )
+
+    # F-5: a mixed run (some ticks healthy, some failed) must say so even
+    # when a healthy tick (or an outright detection) also happened --
+    # `failed_ticks` alone decides whether this note is appended, not
+    # whether `healthy_ticks` is zero. This is the ONLY place `found` can
+    # still contain the bare phrase "no new versions found" while
+    # `failed_ticks > 0` is true, and it is never silent about it.
+    if healthy_ticks > 0 and failed_ticks > 0:
+        found += f" ({failed_ticks} of {iteration} tick(s) got no answer)"
+
     print(f"\nStopped after {iteration} tick(s) ({elapsed_str}). {found}.")
     return exit_code
 
@@ -580,8 +643,31 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Thin outer shell. F-2 (2026-09-24 `/test` re-gate, Critical, still
+    NOT closed after the round that added the two site-specific catches
+    below): the invariant is *no exception from any state-file I/O --
+    or from anywhere else in this function -- escapes `main()` raw*, not
+    "these particular calls are individually guarded". `check_versions
+    .main()` already gets this right by putting its one catch-all on the
+    OUTER try wrapping everything; this mirrors that shape instead of
+    enumerating sites, so a site added tomorrow (a fourth `os.open`, a
+    new credential lookup, anything) is covered for free. The inner,
+    per-site `except`s in `_run(...)` below are NOT removed -- they give
+    a friendlier, more specific message for the failures already known
+    (`StateFileLocked`, `CheckVersionsRefused`, a missing env var) -- this
+    is the backstop for everything else."""
     configure_logging()
+    try:
+        return _run(argv)
+    except Exception as exc:  # noqa: BLE001 - F-2: the invariant, not a site list
+        logger.error(
+            "watch: unexpected error: %s at %s", type(exc).__name__, frame_location(exc)
+        )
+        print("error: unexpected error -- see log", file=sys.stderr)
+        return 1
 
+
+def _run(argv: list[str] | None) -> int:
     # R4 fix (2026-09-23, reviewer REQUEST CHANGES): this entry point
     # never called `load_dotenv()` at all -- `cli.py`/`facade.py` do
     # (INV-05) -- so the documented `python -m ...` invocation only
