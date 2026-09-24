@@ -27,6 +27,7 @@ from idp_regression.platform.errors import (
     TransportError,
 )
 from idp_regression.platform.langfuse_adapter import (
+    _DEFAULT_RECORD_DEADLINE_SECONDS,
     _VALID_RUN_STATUSES,
     LangfuseAdapter,
     make_platform,
@@ -995,6 +996,61 @@ def test_make_platform_constructs_the_sdk_client_with_base_url_equal_to_host(
     assert len(sdk_spy.calls) == 1
     _, kwargs = sdk_spy.calls[0]
     assert kwargs["base_url"] == kwargs["host"] == "https://example.invalid"
+
+
+def _env_for_make_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PLATFORM", "langfuse")
+    monkeypatch.setenv("LANGFUSE_HOST", "https://example.invalid")
+    monkeypatch.delenv("LANGFUSE_BASE_URL", raising=False)
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pub")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "secret")
+
+
+def test_make_platform_wires_a_generous_default_record_deadline_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DEBT-53 (table): DEBT-20's monotonic record-phase deadline landed
+    in the constructor but `make_platform()` never passed it, so the
+    record phase had NO bound in production despite the mechanism
+    existing in code. This is a `make_platform()`-level test on purpose
+    (Wave-0's own diagnosis: a ctor-level test cannot catch a wiring gap
+    at the factory)."""
+    _env_for_make_platform(monkeypatch)
+    monkeypatch.delenv("LANGFUSE_RECORD_DEADLINE_SECONDS", raising=False)
+
+    adapter = make_platform()
+
+    assert isinstance(adapter, LangfuseAdapter)
+    assert adapter._record_deadline_seconds == _DEFAULT_RECORD_DEADLINE_SECONDS  # noqa: SLF001
+    assert adapter._record_deadline_seconds is not None  # noqa: SLF001
+
+
+def test_make_platform_wires_record_deadline_seconds_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _env_for_make_platform(monkeypatch)
+    monkeypatch.setenv("LANGFUSE_RECORD_DEADLINE_SECONDS", "42")
+
+    adapter = make_platform()
+
+    assert isinstance(adapter, LangfuseAdapter)
+    assert adapter._record_deadline_seconds == 42.0  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    ["not-a-number", "0", "-5", "nan", "inf", "-inf", ""],
+)
+def test_make_platform_raises_on_a_non_positive_or_unparsable_record_deadline(
+    monkeypatch: pytest.MonkeyPatch, bad_value: str
+) -> None:
+    """Fails CLOSED, not silently-disabled: a malformed override must not
+    quietly fall back to the default and pretend nothing was set."""
+    _env_for_make_platform(monkeypatch)
+    monkeypatch.setenv("LANGFUSE_RECORD_DEADLINE_SECONDS", bad_value)
+
+    with pytest.raises(PlatformConfigurationError):
+        make_platform()
 
 
 # --- /test gap-fill: ScoreWriteFailedError (langfuse_adapter.py:178) -------

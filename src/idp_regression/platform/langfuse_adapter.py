@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import math
 import os
 import random
 import time
@@ -1009,5 +1010,45 @@ def make_platform() -> PlatformAdapter:
     sdk_client = Langfuse(host=host, base_url=host, public_key=public_key, secret_key=secret_key)
     return cast(
         PlatformAdapter,
-        LangfuseAdapter(client=client, tracing_client=cast(ExperimentRunner, sdk_client)),
+        LangfuseAdapter(
+            client=client,
+            tracing_client=cast(ExperimentRunner, sdk_client),
+            record_deadline_seconds=_record_deadline_seconds_from_env(),
+        ),
     )
+
+
+#: DEBT-53 (table, HARDEN-01 GAP-3): DEBT-20's monotonic record-phase
+#: deadline mechanism landed in the constructor but shipped disabled --
+#: `make_platform()` never passed it, so a hung record phase had NO bound
+#: in production even though the control existed in code. Wired here with
+#: a GENEROUS default (well above Branca's ~63h worst-case bound at N8's
+#: 50-document golden-set ceiling): a low guess would convert a
+#: slow-but-alive platform from *stretching* a run into *aborting* one
+#: that would otherwise have succeeded, on a CI gate whose entire value
+#: is being trusted. Provisional, same as the mechanism itself -- pin the
+#: real value once S-01.6 gives live timings.
+_DEFAULT_RECORD_DEADLINE_SECONDS = 259_200.0  # 72h
+
+
+def _record_deadline_seconds_from_env() -> float:
+    """Reads ``LANGFUSE_RECORD_DEADLINE_SECONDS`` (optional -- not in
+    ``REQUIRED_ENV_VARS``), falling back to the generous default above.
+    An unparsable or non-positive value fails closed rather than silently
+    disabling the deadline it was meant to arm."""
+    raw = os.environ.get("LANGFUSE_RECORD_DEADLINE_SECONDS")
+    if raw is None:
+        return _DEFAULT_RECORD_DEADLINE_SECONDS
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise PlatformConfigurationError(
+            "make_platform: LANGFUSE_RECORD_DEADLINE_SECONDS is set but is not a "
+            "valid number"
+        ) from exc
+    if not math.isfinite(value) or value <= 0:
+        raise PlatformConfigurationError(
+            "make_platform: LANGFUSE_RECORD_DEADLINE_SECONDS must be a finite, "
+            "positive number of seconds"
+        )
+    return value
