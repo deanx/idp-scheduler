@@ -224,17 +224,33 @@ go back to 2.2. A baseline that starts red makes every later result meaningless.
 
 Before spending a prompt change, prove the gate can fail at all.
 
-1. Copy the dataset to `…-perturbed` and change **one `critical` field's expected value**
-   (`total` is a good choice).
-2. Run against the perturbed dataset.
+```bash
+# Same golden, ONE critical field deliberately wrong, into a separate dataset.
+# --perturb-field/--perturb-value exist for exactly this.
+PERT=idp-regression-testpack-perturbed
+for s in inv-001-clean inv-002-format-variance inv-003-table-heavy \
+         inv-004-multipage inv-005-missing-fields; do
+  .venv/bin/python scripts/provision_golden_dataset.py \
+    --dataset "$PERT" --golden-file testpack/golden_set.json --seed "$s" \
+    --perturb-field total --perturb-value 1.00
+done
 
-**Expect exit non-zero**, `gate=FAIL`, and **only that field** flipped to `wrong_value` — every
-other field still `match`. If more than one field changes, something is wrong with the comparison,
-not with your edit.
+.venv/bin/python -m idp_regression.orchestration.cli \
+  --org <org-id> --action <action-id> --version 1.0.0 \
+  --dataset "$PERT" --run discriminates-check
+```
+
+**Expect exit non-zero**, `gate=FAIL`, and **only `total`** flipped to `wrong_value` — every other
+field still `match`. If more than one field changes, something is wrong with the comparison, not
+with your edit.
+
+Sanity check before you run it: the dry-run's `payload_sha256` must **differ** from the clean
+dataset's. If the digests match, the perturbation did not apply and the run proves nothing.
 
 > A gate that has only ever been observed green is not evidence of a working gate.
 
----
+> Keep the perturbed dataset. Phase 8 is easier to read if you can point at a run that failed for a
+> *known* reason next to one that failed for a real one.
 
 ## Phase 7 — The real test: regress the prompt (~20 min, 5 extractions)
 
