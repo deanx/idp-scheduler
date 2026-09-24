@@ -88,17 +88,26 @@ wrong, and everything downstream will fail confusingly.
 > **This is the step people skip and regret.** The goldens in `testpack/golden_set.json` are
 > authored from the PDFs' visible content. How IDP *formats* an extracted value — `1150.00` vs
 > `1150`, `2026-01-15` vs `15/01/2026` — is not knowable until it runs. Reconcile, don't assume.
+https://idp-rt.us-east-1.anypoint.mulesoft.com/api/v1/organizations/ef1232be-0e85-43e7-a7b2-927d32eb6d38/actions/fb900ba5-de93-4445-9ddb-89fe175585b2/versions/1.0.0/executions
 
 ### 2.1 Extract each document once and keep the raw responses
 ```bash
+ORG=<org-id>; ACTION=<action-id>; VER=1.0.0
 mkdir -p testpack/captures
 for f in testpack/inv-00*.pdf; do
-  IDP_TEST_DOCUMENT_PATH="$f" \
-  .venv/bin/python scripts/capture_raw.py > "testpack/captures/$(basename "$f" .pdf).raw.json"
+  .venv/bin/python scripts/capture_raw.py \
+    --org "$ORG" --action "$ACTION" --version "$VER" --document "$f" \
+    > "testpack/captures/$(basename "$f" .pdf).raw.json"
 done
 ```
-*(If `scripts/capture_raw.py` does not exist, use the one-off script pattern from
-`docs/spikes/PROBE-2026-09-22-idp-version-listing.md`: token → `_submit` → `_poll`.)*
+Each invocation **spends one real extraction** and says so on stderr before submitting. The
+execution id is redacted by default so the captures are safe to commit.
+
+On success it prints the answer to Phase 2.3 for you, per document:
+```
+capture_raw: done in 12.4s -- top-level keys: ['documentName', 'fields', 'id', 'status', 'tables']
+capture_raw: envelope shape -> top-level rollup
+```
 
 ### 2.2 Reconcile the goldens against reality
 For each capture, compare the extracted values to `testpack/golden_set.json` and **fix the golden
