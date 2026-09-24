@@ -91,6 +91,32 @@ def _validate_golden(golden: Golden) -> None:
         if not isinstance(pspec.get("critical", False), bool):
             raise MalformedGoldenError(f"golden prompt {pname!r} critical must be bool")
 
+    # Fail-open #6 (ADR-0003 residual note): classify() keys fields, tables,
+    # and prompts into ONE verdict-map namespace, and a later loop's write
+    # silently overwrites an earlier one's on a name collision -- a critical
+    # field's wrong_value can vanish behind a same-named table's "detail"
+    # verdict and the gate goes green. Fail closed here instead: a golden
+    # whose field names, table names, and prompt keys are not pairwise
+    # disjoint is malformed. Check all three pairings, not just the
+    # field/table route the collision was first reproduced on.
+    field_names = set(fields.keys())
+    table_names = set(tables.keys())
+    prompt_names = set(prompts.keys())
+    for a_label, a_names, b_label, b_names in (
+        ("field", field_names, "table", table_names),
+        ("field", field_names, "prompt", prompt_names),
+        ("table", table_names, "prompt", prompt_names),
+    ):
+        collisions = a_names & b_names
+        if collisions:
+            # INV-02: name the colliding key only -- never a value.
+            key = sorted(collisions)[0]
+            raise MalformedGoldenError(
+                f"golden {a_label}/{b_label} name collision on {key!r}: "
+                "field, table, and prompt keys share one verdict-map "
+                "namespace and must be pairwise disjoint"
+            )
+
 
 #: N28 (T-01.4.5, ADR-0005 Decision #8): the orchestration pre-run
 #: structural validator over the whole golden set MUST be the classifier's
