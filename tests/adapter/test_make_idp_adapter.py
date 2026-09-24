@@ -13,10 +13,18 @@ because it is no longer sourced from the environment at all.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from idp_regression.adapter.errors import IDPConfigurationError
+from idp_regression.adapter import transport
+from idp_regression.adapter.errors import (
+    IDPConfigurationError,
+    IDPExecutionFailedError,
+    IDPPollTimeoutError,
+)
 from idp_regression.adapter.idp_client import make_idp_adapter
+from idp_regression.adapter.types import NormalizedOutput
 
 _ORG_ID = "org-1"
 
@@ -41,34 +49,87 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("IDP_ORG_ID", raising=False)
 
 
+def _extract_against_a_single_poll_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: str
+) -> NormalizedOutput:
+    """DEBT-25(d): drives `make_idp_adapter()`'s constructed adapter through
+    a real `extract()` call and returns the normalized output -- a
+    behavioural proof of how `IDP_TERMINAL_STATUSES`/`IDP_SUCCESS_STATUSES`
+    parsed, replacing a direct read of the private `_terminal_statuses`/
+    `_success_statuses` attributes. `IDP_EXECUTION_TIMEOUT_SECONDS` is
+    pinned short so a status that the config does NOT treat as terminal
+    fails fast (`IDPPollTimeoutError`) instead of hanging on the real
+    `time.sleep` a factory-built adapter uses (no injectable clock)."""
+    monkeypatch.setenv("IDP_EXECUTION_TIMEOUT_SECONDS", "1")
+    monkeypatch.setattr(
+        transport,
+        "post_json",
+        lambda *a, **kw: (200, {"access_token": "tok-1", "expires_in": 300}),
+    )
+    monkeypatch.setattr(
+        transport, "post_multipart_file", lambda *a, **kw: (202, {"id": "exec-1"})
+    )
+    monkeypatch.setattr(
+        transport,
+        "get_json_with_headers",
+        lambda *a, **kw: (200, {"status": status, "fields": {}, "tables": {}}, {}),
+    )
+    adapter = make_idp_adapter(_ORG_ID)
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    return adapter.extract(str(doc), "action-1", "v1")
+
+
 def test_default_terminal_and_success_statuses_are_succeeded_only(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _set_required_env(monkeypatch)
-    adapter = make_idp_adapter(_ORG_ID)
-    assert adapter._terminal_statuses == {"SUCCEEDED"}
-    assert adapter._success_statuses == {"SUCCEEDED"}
+    # SUCCEEDED is terminal and success by default -- extract() returns.
+    out = _extract_against_a_single_poll_status(monkeypatch, tmp_path, "SUCCEEDED")
+    assert out["status"] == "SUCCEEDED"
+
+
+def test_default_terminal_statuses_do_not_include_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _set_required_env(monkeypatch)
+    # FAILED is not in the default {"SUCCEEDED"} terminal set, so the poll
+    # loop must keep waiting for a terminal status it never gets -- proven
+    # by a timeout, not an immediate IDPExecutionFailedError (which would
+    # mean FAILED was wrongly treated as terminal).
+    with pytest.raises(IDPPollTimeoutError):
+        _extract_against_a_single_poll_status(monkeypatch, tmp_path, "FAILED")
 
 
 def test_comma_separated_terminal_statuses_are_parsed_into_a_set(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _set_required_env(monkeypatch)
     monkeypatch.setenv("IDP_TERMINAL_STATUSES", "SUCCEEDED,FAILED,PARTIAL_SUCCESS")
     monkeypatch.setenv("IDP_SUCCESS_STATUSES", "SUCCEEDED,PARTIAL_SUCCESS")
-    adapter = make_idp_adapter(_ORG_ID)
-    assert adapter._terminal_statuses == {"SUCCEEDED", "FAILED", "PARTIAL_SUCCESS"}
-    assert adapter._success_statuses == {"SUCCEEDED", "PARTIAL_SUCCESS"}
+    # FAILED: parsed into terminal_statuses but not success_statuses -- a
+    # hard failure raised immediately (proves both sets parsed correctly;
+    # if FAILED had NOT been parsed into terminal_statuses, this would
+    # time out instead of raising).
+    with pytest.raises(IDPExecutionFailedError):
+        _extract_against_a_single_poll_status(monkeypatch, tmp_path, "FAILED")
+    # PARTIAL_SUCCESS: parsed into both sets -- extract() returns.
+    out = _extract_against_a_single_poll_status(monkeypatch, tmp_path, "PARTIAL_SUCCESS")
+    assert out["status"] == "PARTIAL_SUCCESS"
 
 
 def test_whitespace_around_comma_separated_statuses_is_stripped(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     _set_required_env(monkeypatch)
     monkeypatch.setenv("IDP_TERMINAL_STATUSES", " SUCCEEDED , FAILED ")
     monkeypatch.setenv("IDP_SUCCESS_STATUSES", "SUCCEEDED")
-    adapter = make_idp_adapter(_ORG_ID)
-    assert adapter._terminal_statuses == {"SUCCEEDED", "FAILED"}
+    # If the surrounding whitespace were NOT stripped, the set would
+    # contain " FAILED" (with a leading space), not "FAILED" -- the raw
+    # status the poll response carries would then never match, and the
+    # loop would time out instead of raising IDPExecutionFailedError.
+    with pytest.raises(IDPExecutionFailedError):
+        _extract_against_a_single_poll_status(monkeypatch, tmp_path, "FAILED")
 
 
 _TIMING_ENV_NAMES = [

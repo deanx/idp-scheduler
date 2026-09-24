@@ -171,6 +171,46 @@ def test_redact_strips_bearer_header_value() -> None:
     assert "abc.def.ghi" not in redacted
 
 
+def test_bad_url_value_error_is_not_mislabelled_as_headers_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # DEBT-25(b): `_send`'s `except ValueError` previously caught EVERY
+    # ValueError from `_urlopen` and always reported "request headers were
+    # rejected" -- but urllib also raises a bare ValueError
+    # ("unknown url type: ...") for a malformed URL, which has nothing to
+    # do with headers. Invariant: only a header-rejection ValueError may
+    # be reported as "headers were rejected"; any other ValueError must be
+    # reported as an ordinary (redacted) transport failure instead.
+    def fake_urlopen(req: urllib.request.Request, timeout: float) -> _FakeResponse:
+        raise ValueError("unknown url type: 'not-a-url'")
+
+    monkeypatch.setattr(transport, "_urlopen", fake_urlopen)
+    with pytest.raises(IDPTransportError) as excinfo:
+        transport.get_json("https://x/y", timeout_seconds=5.0)
+    assert "headers were rejected" not in str(excinfo.value)
+
+
+def test_redact_strips_lowercase_bearer_header_value() -> None:
+    # DEBT-25(a): the original _BEARER_PATTERN was case-sensitive, so a
+    # lowercase "bearer" (a real-world variant some clients/proxies emit)
+    # was missed entirely -- the token survived past the redaction
+    # boundary.
+    text = "request failed: Authorization: bearer abc.def.ghi"
+    redacted = transport.redact(text)
+    assert "abc.def.ghi" not in redacted
+
+
+def test_redact_strips_url_encoded_client_secret() -> None:
+    # DEBT-25(a): a URL-encoded query string uses `client_secret%3D...`
+    # (percent-encoded `=`), not `client_secret=...` -- the original
+    # _CLIENT_SECRET_FORM_PATTERN only matched the literal `=` form, so a
+    # secret embedded in an already-encoded query string (e.g. echoed back
+    # in an error message about a rejected request URL) was not redacted.
+    text = "GET failed for url with client_secret%3Dtopsecret%26x%3D1"
+    redacted = transport.redact(text)
+    assert "topsecret" not in redacted
+
+
 def test_redact_strips_client_secret_field() -> None:
     text = '{"client_id":"c1","client_secret":"topsecret"}'
     redacted = transport.redact(text)

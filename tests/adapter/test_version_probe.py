@@ -41,6 +41,26 @@ def test_classifies_the_captured_live_exists_response_as_exists() -> None:
     assert result is ProbeResult.EXISTS
 
 
+def test_exists_branch_is_deliberately_unbound_to_the_calling_action_id_and_version() -> None:
+    # G-2 (Wave-1 Lane B /test stamp finding): the previous version of this
+    # test passed the SAME action_id/version the capture was taken against,
+    # which reads as though EXISTS is constrained by them -- it is not. The
+    # 400 "Invalid query parameter 'file'" body carries no echo to bind
+    # against (unlike the 404 ABSENT branch's R3 fix below), so a 400 for a
+    # completely different action/version still classifies as EXISTS. This
+    # pins that as a DECISION (see the comment on the EXISTS branch in
+    # version_probe.py), not an oversight -- and is exactly the false
+    # assurance the misleading parameters gave: a wrong-org/wrong-action 400
+    # reads as "this version exists".
+    result = classify_probe_response(
+        LIVE_EXISTS_CAPTURE["status"],
+        LIVE_EXISTS_CAPTURE["detail"],
+        action_id="totally-different-action-id",
+        version="0.0.0",
+    )
+    assert result is ProbeResult.EXISTS
+
+
 def test_classifies_the_captured_live_absent_response_as_absent() -> None:
     result = classify_probe_response(
         LIVE_ABSENT_CAPTURE["status"],

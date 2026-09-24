@@ -317,6 +317,19 @@ class MuleSoftIDPAdapter:
             transport_failed = True
         if transport_failed:
             raise IDPSubmitError("IDP submit call failed or timed out") from None
+        if status in (401, 403):
+            # DEBT-21 leg 2 (QA S-01.2 F-5): a credential problem is
+            # `auth_failure`, never a generic `hard_failure` -- the
+            # orchestrator maps IDPAuthenticationError to `auth_failure`
+            # (facade.py) but IDPSubmitError to `hard_failure`, and a
+            # wrong/expired credential aborting as "hard failure" is the
+            # wrong diagnosis for an operator to act on. No retry: unlike
+            # the mid-poll 401/403 path (`_poll_get_with_auth_retry`),
+            # submit is a non-idempotent POST (ADR-0004 #1/#4), so a
+            # refresh-and-retry here would risk a duplicate execution.
+            raise IDPAuthenticationError(
+                f"IDP submit call was rejected as unauthenticated (status={status})"
+            )
         if status == 404:
             # ADR-0004 A10 companion item (2026-09-22): the executions URL
             # is composed entirely from (org, action, version) --

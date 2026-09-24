@@ -52,6 +52,29 @@ def test_live_capture_fixture_shape_is_the_real_top_level_wire_contract() -> Non
         "test in this file stays green"
     )
     assert {"fields", "tables"} <= set(LIVE_FIXTURE)
+    # G-1 (Wave-1 Lane B): the envelope assertion above pins the SHAPE but
+    # not the confidence SCALE -- a "tidy up the fixture" pass that
+    # mechanically rewrites every real `"confidenceScore": 99.0` (0-100)
+    # cell key back into the legacy hand-authored `"confidence": 0.99`
+    # (0-1) key left the whole suite green (found during the S-01.2 /test
+    # stamp): every value-pinning test below reads normalize()'s OUTPUT
+    # (already converted to the 0-1 scale), never the fixture's INPUT key,
+    # so that rewrite is invisible to them. That is REG-11 D2's exact wire
+    # assumption with no fixture-shape pin. Assert the input key directly.
+    sample_cell = LIVE_FIXTURE["fields"]["bill_to"]
+    assert "confidenceScore" in sample_cell, (
+        "the live capture must keep the real wire confidence key "
+        "'confidenceScore' (0-100) -- silently rewriting it back to the "
+        "legacy 'confidence' (0-1) key deletes the only live evidence of "
+        "REG-11 D2's wire contract, and every value-pinning test in this "
+        "file stays green because they assert normalize()'s output, not "
+        "this input key"
+    )
+    assert "confidence" not in sample_cell, (
+        "a legacy 0-1 'confidence' key alongside the real 'confidenceScore' "
+        "key would be ambiguous input -- the live capture must carry only "
+        "the real wire key"
+    )
 
 
 def test_normalize_over_the_live_capture_does_not_raise() -> None:

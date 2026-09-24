@@ -29,16 +29,25 @@ from idp_regression.adapter.errors import IDPTransportError
 
 logger = logging.getLogger(__name__)
 
-_BEARER_PATTERN = re.compile(r"Bearer\s+\S+")
+#: DEBT-25(a): case-insensitive -- "Bearer" is the canonical RFC 6750
+#: casing, but a lowercase "bearer" (seen from some clients/proxies) must
+#: be redacted identically; the scheme name's case carries no security
+#: meaning, so an exact-case-only pattern is a redaction gap, not a
+#: deliberate narrowing.
+_BEARER_PATTERN = re.compile(r"Bearer\s+\S+", re.IGNORECASE)
 # JSON string values: `(?:[^"\\]|\\.)*` consumes an escaped quote (`\"`)
 # instead of stopping at it — a naive `[^"]*` leaves the remainder of the
 # secret (after the escaped quote) unredacted (/test Scenario B item 4).
 _CLIENT_SECRET_JSON_PATTERN = re.compile(r'"client_secret"\s*:\s*"(?:[^"\\]|\\.)*"')
 _ACCESS_TOKEN_JSON_PATTERN = re.compile(r'"access_token"\s*:\s*"(?:[^"\\]|\\.)*"')
 # Form-encoded (application/x-www-form-urlencoded) bodies: value runs until
-# the next `&`, whitespace, or end of string.
-_CLIENT_SECRET_FORM_PATTERN = re.compile(r"client_secret=[^&\s]*")
-_ACCESS_TOKEN_FORM_PATTERN = re.compile(r"access_token=[^&\s]*")
+# the next `&`, whitespace, or end of string. DEBT-25(a): also match the
+# percent-encoded `=` (`%3D`) form -- an already-URL-encoded query string
+# (e.g. echoed back inside a rejected-request error message) uses
+# `client_secret%3D...`, not the literal `client_secret=...`, and the
+# original patterns only covered the literal form.
+_CLIENT_SECRET_FORM_PATTERN = re.compile(r"client_secret(?:=|%3D)[^&\s]*", re.IGNORECASE)
+_ACCESS_TOKEN_FORM_PATTERN = re.compile(r"access_token(?:=|%3D)[^&\s]*", re.IGNORECASE)
 
 #: Bounded default — never block indefinitely on a hung connection (ADR-0004 #1).
 DEFAULT_TIMEOUT_SECONDS = 30.0
@@ -292,14 +301,26 @@ def _send(req: urllib.request.Request, timeout_seconds: float) -> tuple[int, Any
     # as idp_client.py's _fetch_token/_submit).
     invalid_header_value = False
     unexpected_redirect = False
+    other_value_error: str | None = None
     response_headers: dict[str, str] = {}
     try:
         with _urlopen(req, timeout_seconds) as resp:
             raw_bytes = _read_bounded(resp)
             status = resp.status
             response_headers = _response_headers(resp)
-    except ValueError:
-        invalid_header_value = True
+    except ValueError as exc:
+        # DEBT-25(b): a bare ValueError from `_urlopen` is not always a
+        # rejected header -- `http.client.HTTPConnection.putheader` raises
+        # "Invalid header name/value %r" for that case, but urllib also
+        # raises an unrelated bare ValueError ("unknown url type: ...")
+        # for a malformed URL. Only the header-rejection message is
+        # reported as "headers were rejected"; anything else is an
+        # ordinary transport failure with its (redacted) message included,
+        # same as any other transport-level error.
+        if str(exc).startswith("Invalid header"):
+            invalid_header_value = True
+        else:
+            other_value_error = str(exc)
         raw_bytes = b""
         status = 0
     except urllib.error.HTTPError as exc:
@@ -330,6 +351,8 @@ def _send(req: urllib.request.Request, timeout_seconds: float) -> tuple[int, Any
         _log_and_raise_transport_error(req, str(exc))
     if invalid_header_value:
         _log_and_raise_transport_error_without_detail(req, "request headers were rejected")
+    if other_value_error is not None:
+        _log_and_raise_transport_error(req, other_value_error)
     if unexpected_redirect:
         _log_and_raise_transport_error_without_detail(req, "unexpected redirect response")
 

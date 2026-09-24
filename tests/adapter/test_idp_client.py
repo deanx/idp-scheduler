@@ -479,9 +479,48 @@ def test_auth_failure_at_run_start_is_fail_closed_no_retry(
     assert len(calls) == 1  # no retry
 
 
+def test_fetch_token_directly_converts_huge_expires_in_overflow_to_typed_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # DEBT-25(c): calling through `extract()`/`TokenCache` makes the
+    # `except OverflowError` arm in `_fetch_token` an EQUIVALENT mutant --
+    # `TokenCache._refresh` has its own `except Exception` safety net that
+    # would wrap a raw escaping OverflowError into IDPAuthenticationError
+    # anyway, so the outer assertion can't tell the two apart. This test
+    # calls `_fetch_token` directly (bypassing TokenCache) so removing the
+    # `OverflowError` arm is observable: a raw OverflowError would escape
+    # `_fetch_token` itself, undetected by the through-TokenCache test
+    # below.
+    adapter = _adapter(
+        monkeypatch,
+        fetch_token_result=(200, {"access_token": "tok-1", "expires_in": 10**400}),
+    )
+    with pytest.raises(IDPAuthenticationError) as excinfo:
+        adapter._fetch_token()
+    assert str(10**400) not in str(excinfo.value)
+
+
 @pytest.mark.parametrize(
     "bad_expires_in",
-    [float("nan"), float("inf"), float("-inf"), -1.0, 0.0, "not-a-number", 10**20],
+    [
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        -1.0,
+        0.0,
+        "not-a-number",
+        10**20,
+        # DEBT-25(c): the OverflowError arm of `_fetch_token`'s
+        # `except (TypeError, ValueError, OverflowError)` was an
+        # equivalent mutant -- 10**20 is large but still representable as
+        # a float, so it never exercised that branch. 10**400 is an int
+        # too large to represent as a float at all; `float(10**400)`
+        # raises a raw OverflowError, which must be caught here too. (This
+        # case alone is STILL an equivalent mutant through this
+        # through-TokenCache path -- see the direct test above, which is
+        # the one that actually kills it.)
+        10**400,
+    ],
 )
 def test_invalid_expires_in_raises_typed_auth_error_fail_closed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_expires_in: object
@@ -546,6 +585,36 @@ def test_submit_rejected_status_raises_typed_error(
     adapter = _adapter(monkeypatch, submit_result=(400, {"error": "bad request"}))
     with pytest.raises(IDPSubmitError):
         adapter.extract(str(doc), "action-1", "v1")
+
+
+@pytest.mark.parametrize("status_code", [401, 403])
+def test_submit_401_or_403_raises_auth_error_not_submit_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status_code: int
+) -> None:
+    # DEBT-21 leg 2 (QA S-01.2 F-5): a 401/403 on the SUBMIT call must
+    # raise IDPAuthenticationError, not IDPSubmitError -- the orchestrator
+    # (facade.py) maps IDPAuthenticationError to abort reason
+    # `auth_failure` and IDPSubmitError to `hard_failure`, and a credential
+    # problem aborting as `hard_failure` is the wrong diagnosis. Invariant:
+    # any 401/403 IDP returns, at submit or at poll, must abort as
+    # `auth_failure` -- never as a generic hard failure. Submit is
+    # deliberately NOT retried here (ADR-0004 #1/#4: the POST is not
+    # idempotent for a given document) -- this differs from the mid-poll
+    # 401/403 path (`_poll_get_with_auth_retry`), which does refresh-and-
+    # retry once because a GET is safe to repeat.
+    doc = tmp_path / "invoice.pdf"
+    doc.write_bytes(b"%PDF")
+    calls: list[int] = []
+
+    def rejecting_submit(*args: object, **kwargs: object) -> tuple[int, dict[str, Any]]:
+        calls.append(1)
+        return status_code, {"error": "unauthorized"}
+
+    adapter = _adapter(monkeypatch)
+    monkeypatch.setattr(transport, "post_multipart_file", rejecting_submit)
+    with pytest.raises(IDPAuthenticationError):
+        adapter.extract(str(doc), "action-1", "v1")
+    assert len(calls) == 1  # not retried -- submit POST is non-idempotent
 
 
 def test_poll_returns_on_configured_success_status(
