@@ -115,9 +115,13 @@ def test_start_uses_the_retry_budget(
         time.sleep(0.02)
 
     budget = captured.get("budget")
-    assert isinstance(budget, float) and budget > 0.0, (
-        f"start() acquired the workspace lock with retry_budget_seconds={budget!r}; "
-        "a passing is_busy() probe can then refuse a genuine run"
+    # The EXACT budget, not merely "> 0" (Atchim /test F-3): a mutant
+    # passing 1e-6 satisfies "positive" while retrying past nothing at
+    # all, which is the defect with extra steps.
+    assert budget == jobs.START_LOCK_RETRY_SECONDS, (
+        f"start() acquired the workspace lock with retry_budget_seconds={budget!r}, "
+        f"not the declared {jobs.START_LOCK_RETRY_SECONDS}; a passing is_busy() "
+        "probe can then refuse a genuine run"
     )
 
 
@@ -188,3 +192,53 @@ def test_is_busy_reports_true_while_a_job_holds_the_workspace(
     finally:
         held.release()
     assert registry.is_busy() is False
+
+
+def test_is_busy_probes_with_a_single_non_blocking_attempt(
+    isolated_workspace: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`is_busy()` must NOT retry -- pinned structurally, not by timing.
+
+    `acquire`'s own docstring makes this a requirement: the UI polls this
+    answer, so a probe that retried would block for the whole budget on
+    every poll against a genuinely busy workspace.
+
+    Atchim's `/test` gate (F-3) found this unpinned, and found it was a
+    coverage REGRESSION I introduced: at `5ab2f41` the default-budget
+    path happened to be exercised by the genuinely-held test, and the
+    N-1 fix correctly moved that test onto the budget path without
+    replacing what it had been covering incidentally. Two mutants then
+    survived -- a 30-second DEFAULT budget, and `is_busy()` opting into
+    the budget -- because the only consequence is slowness, and no test
+    asserts on speed.
+
+    Asserted on the call and on the signature rather than on elapsed
+    time: a timing assertion here would be exactly the flaky, machine-
+    dependent shape this file exists to get away from.
+    """
+    import inspect
+
+    assert (
+        inspect.signature(jobs._WorkspaceLock.acquire)
+        .parameters["retry_budget_seconds"]
+        .default
+        == 0.0
+    ), "acquire()'s default budget must stay 0.0 -- is_busy() relies on it"
+
+    seen: list[float] = []
+    original = jobs._WorkspaceLock.acquire
+
+    def _recording_acquire(
+        self: jobs._WorkspaceLock, *, retry_budget_seconds: float = 0.0
+    ) -> None:
+        seen.append(retry_budget_seconds)
+        original(self, retry_budget_seconds=retry_budget_seconds)
+
+    monkeypatch.setattr(jobs._WorkspaceLock, "acquire", _recording_acquire)
+    jobs.JobRegistry().is_busy()
+
+    assert seen == [0.0], (
+        f"is_busy() probed with retry_budget_seconds={seen!r}; it must be a "
+        "single non-blocking attempt or every poll against a busy workspace "
+        "blocks for the whole budget"
+    )

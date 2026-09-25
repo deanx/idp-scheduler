@@ -86,10 +86,19 @@ def test_a_regular_file_is_still_read_normally(
     assert b"%PDF-1.4 real bytes" in body
 
 
-def test_a_document_over_the_size_cap_is_refused_before_it_is_read_into_memory(
+def test_a_document_over_the_size_cap_is_refused_by_the_cap(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """DEBT-54 A-2: `fh.read()` was unbounded.
+
+    ⚠️ Renamed 2026-09-25 (Atchim /test F-1). This was called
+    `..._is_refused_before_it_is_read_into_memory`, and the "before" was
+    a claim it cannot make: a mutant moving the check AFTER `fh.read()`
+    (measuring `len(file_bytes)`) still passes. The ordering is correct
+    in the shipped code -- `os.fstat` on the open fd precedes the read --
+    but a test name should state what the test PROVES, which is that an
+    over-cap document is refused by the cap rather than by anything
+    else.
 
     The whole file was pulled into memory and then COPIED again into the
     multipart body -- so peak usage is twice the file size, and a large

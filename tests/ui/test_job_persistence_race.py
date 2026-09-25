@@ -10,6 +10,7 @@ problem.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from collections.abc import Iterator
@@ -252,3 +253,53 @@ def test_a_planning_record_left_by_a_dead_console_is_also_interrupted(
     )
     assert recovered.summary["verdict"] == "INTERRUPTED"
     assert "not restarted automatically" in recovered.summary["note"]
+
+
+def test_the_record_is_written_by_rename_and_never_truncated_in_place(
+    space: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The invariant, pinned STRUCTURALLY rather than by timing.
+
+    Atchim's `/test` gate (F-2) showed the timing-based test above is
+    narrower than its own docstring: a mutant that serializes FIRST and
+    then truncates-and-writes in one syscall survives it 3/3, because
+    the slowed `json.dumps` no longer widens anything. That mutant is
+    still broken -- the window is one syscall instead of two, and
+    `load_history` still skips a reader who lands in it silently -- so
+    the timing test alone would let it ship.
+
+    Write-then-rename IS the invariant, so assert exactly that: the real
+    record path is never opened for writing, and `os.replace` lands on
+    it. No sleeps, no widened window, nothing machine-dependent.
+    """
+    registry = jobs.JobRegistry()
+    job = jobs.Job(id="d00d", kind="compare-versions", argv=["/bin/true", "--yes"])
+    record_path = space / jobs.HISTORY_DIR_NAME / f"{job.id}.json"
+
+    opened_for_write: list[str] = []
+    replaced_onto: list[str] = []
+    real_open, real_replace = os.open, os.replace
+
+    def _watch_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        if str(path) == str(record_path) and flags & (os.O_WRONLY | os.O_RDWR | os.O_TRUNC):
+            opened_for_write.append(str(path))
+        return real_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
+
+    def _watch_replace(src: object, dst: object, *args: object, **kwargs: object) -> None:
+        replaced_onto.append(str(dst))
+        real_replace(src, dst, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "open", _watch_open)
+    monkeypatch.setattr(os, "replace", _watch_replace)
+    registry._persist(job)
+    monkeypatch.undo()
+
+    assert opened_for_write == [], (
+        f"the live record was opened for writing ({opened_for_write}); a reader "
+        "landing between truncate and flush sees a torn record, and load_history "
+        "skips what it cannot parse SILENTLY"
+    )
+    assert str(record_path) in replaced_onto, (
+        f"os.replace never landed on {record_path}; the write is not atomic"
+    )
+    assert json.loads(record_path.read_text(encoding="utf-8"))["id"] == "d00d"
