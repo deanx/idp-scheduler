@@ -818,7 +818,20 @@ Also lagging: **DEBT-48's FO-7 row** says "Third leg now confirmed open … CARD
 
 **Interest:** grows with each new platform test written under a checker that never looks at it, and at the next Langfuse version bump.
 
-## DEBT-84 — `JobRegistry.is_busy()` briefly holds the exclusive lock it is probing
+## ~~DEBT-84~~ — `JobRegistry.is_busy()` briefly holds the exclusive lock it is probing — ✅ **CLOSED 2026-09-25**
+
+> ✅ **CLOSED (Lane F).** See the Lanes D & F section above. Two corrections to this row, both
+> found by measuring rather than reasoning: the contention is **`is_busy()`-vs-`start()`**, not
+> start-vs-start (the UI *polls* `is_busy()`), at **64 spurious 409s per 5000 acquires (~1.3%)**;
+> and **the fix prescribed below does not close it** — when a job runs locally `start()` would
+> correctly fail anyway, and when none runs (the spurious case) `is_busy()` still probes. Fixed
+> instead with an opt-in bounded retry only `start()` passes: a probe holds the lock for
+> microseconds, a real job for minutes. Measured **0 per 5000**, genuine conflict still refused in
+> ~0.26s. Pinned by `tests/ui/test_workspace_lock_race.py`; mutants for the budget (×100, 1e-6,
+> ignored, default-changed) and for `is_busy()` all redden.
+>
+> **Original row preserved below, including its wrong prescription**, because the reasoning error
+> is the useful part: it was derived from the clause shape rather than from a measurement.
 
 **Found:** 2026-09-25, Zangado QA final round on Epic E tickets 5–7.
 **Where:** `src/idp_regression/ui/jobs.py::JobRegistry.is_busy` (and `_WorkspaceLock`).
