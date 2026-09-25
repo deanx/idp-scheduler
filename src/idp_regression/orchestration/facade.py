@@ -47,6 +47,7 @@ import contextlib
 import logging
 import os
 import time
+from collections.abc import Sequence
 from typing import Any, cast
 
 from idp_regression.adapter.errors import (
@@ -59,7 +60,8 @@ from idp_regression.adapter.errors import (
 )
 from idp_regression.adapter.idp_client import MuleSoftIDPAdapter, make_idp_adapter
 from idp_regression.adapter.transport import sanitize_for_log
-from idp_regression.classifier.gate import classify, overall_gate
+from idp_regression.classifier.registry import UnknownClassifierError
+from idp_regression.classifier.registry import resolve as resolve_classifier
 from idp_regression.classifier.types import MalformedActualError, MalformedGoldenError, VerdictMap
 from idp_regression.orchestration.bootstrap import (
     MissingCredentialError,
@@ -89,7 +91,13 @@ from idp_regression.platform.errors import (
 )
 from idp_regression.platform.hashing import hash_dataset
 from idp_regression.platform.scoring import build_score_inputs
-from idp_regression.platform.types import DocumentRecord, PlatformAdapter, RunMetadata, RunStatus
+from idp_regression.platform.types import (
+    DatasetItem,
+    DocumentRecord,
+    PlatformAdapter,
+    RunMetadata,
+    RunStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +190,61 @@ def _resolve_document_path(document_dir: str, document_id: str) -> str:
     if not candidate.startswith(root + os.sep):
         raise _PathContainmentViolation(document_id)
     return candidate
+
+
+class _DocumentSelectionError(Exception):
+    """A `--document` selector matched no item, or matched ambiguously.
+
+    A pre-run refusal, like the quota ceiling above it: raised before any
+    submit, so it costs zero quota, and carries only `document_id`-shaped
+    text the caller must still route through `sanitize_for_log`
+    (INV-02) -- selectors are operator input, not golden content, but
+    they are echoed back into a log line and get the same treatment.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+def select_items(
+    items: list[DatasetItem], selectors: Sequence[str] | None
+) -> list[DatasetItem]:
+    """The subset of `items` a `--document` selector names, in dataset
+    order (ADR-0004 A8/A9's spirit: what a run measured is visible in the
+    invocation that produced it).
+
+    `None`/empty selectors return `items` unchanged -- the filter is
+    strictly additive, and a run without it behaves exactly as it always
+    has.
+
+    Each selector is matched EXACTLY first, then as a substring; a
+    substring that matches more than one document is refused rather than
+    guessed, because the alternative is spending an extraction on a file
+    the operator did not name. A selector matching nothing is refused for
+    the same reason: a filtered run that silently measured zero documents
+    would exit 0 and read as a pass.
+    """
+    if not selectors:
+        return items
+    by_id = {item["document_id"]: item for item in items}
+    chosen: dict[str, DatasetItem] = {}
+    for selector in selectors:
+        if selector in by_id:
+            chosen[selector] = by_id[selector]
+            continue
+        matches = [document_id for document_id in by_id if selector in document_id]
+        if not matches:
+            raise _DocumentSelectionError(f"no dataset item matches {selector!r}")
+        if len(matches) > 1:
+            raise _DocumentSelectionError(
+                f"{selector!r} matches {len(matches)} items ({', '.join(sorted(matches)[:5])}"
+                f"{', ...' if len(matches) > 5 else ''}) -- name one exactly"
+            )
+        chosen[matches[0]] = by_id[matches[0]]
+    # Dataset order, not selector order: the run's per-document sequence
+    # must not depend on how the flags were typed.
+    return [item for item in items if item["document_id"] in chosen]
 
 
 def _validate_dataset_shape(dataset: object) -> None:
@@ -277,6 +340,23 @@ def _mark_run_status_best_effort(
 #: the value actually in force.
 DEFAULT_MAX_DOCUMENTS_PER_RUN = 1000
 
+#: What a run tells the evaluation platform (DEBT-18 REVERSED 2026-09-25,
+#: user decision -- "we need to have as much information as possible at
+#: [the platform], as [it] is the information point here"; PII is handled
+#: at the IDP action, which can be configured not to parse it, and by a
+#: filter or a later deletion pass over the platform).
+#:
+#:   ``full``           verdicts AND the expected/actual/confidence behind
+#:                      them -- score comments, the trace span's `detail`,
+#:                      and the experiment item's `expected_output`.
+#:   ``verdicts-only``  the pre-reversal payload (DEBT-18 option B,
+#:                      2026-09-19): verdict literals, `document_id` and
+#:                      run metadata, and nothing else. Kept reachable so
+#:                      the stricter posture is one flag away, not a
+#:                      rewrite.
+PLATFORM_VALUE_MODES = ("full", "verdicts-only")
+DEFAULT_PLATFORM_VALUES = "full"
+
 
 def run_eval(
     action_id: str,
@@ -285,6 +365,9 @@ def run_eval(
     dataset_name: str,
     org_id: str,
     max_documents_per_run: int = DEFAULT_MAX_DOCUMENTS_PER_RUN,
+    documents: Sequence[str] | None = None,
+    classifier: str | None = None,
+    platform_values: str = DEFAULT_PLATFORM_VALUES,
 ) -> int:
     """Run the baseline regression for `action_id` at `version` over the
     named golden set (`dataset_name`), writing per-field + gate scores to
@@ -423,6 +506,21 @@ def run_eval(
             _log_run_end("aborted", 1)
             return 1
 
+        # Resolved before the platform is even constructed: an unknown
+        # `--classifier` must cost nothing, and a run may never silently
+        # fall back to a comparison nobody asked for.
+        comparison = resolve_classifier(classifier)
+
+        if platform_values not in PLATFORM_VALUE_MODES:
+            logger.error(
+                "run_eval: unknown platform_values %s (expected: %s)",
+                sanitize_for_log(platform_values),
+                ", ".join(sorted(PLATFORM_VALUE_MODES)),
+            )
+            _log_run_end("aborted", 1)
+            return 1
+        record_values = platform_values == "full"
+
         platform: PlatformAdapter = make_platform()
 
         dataset = platform.get_dataset(dataset_name)
@@ -458,7 +556,35 @@ def run_eval(
         # derived from the org's real IDP allotment and must never be
         # presented as one. B-3 (`/signoff`, N27) stays OPEN as a
         # validation point, not closed by this default.
-        item_count = len(dataset["items"])
+        # Filtered AFTER the whole golden set has been fetched, shape-checked,
+        # drift-checked and N28-validated: a `--document` run must not be able
+        # to skip a validation the unfiltered run performs, or a broken golden
+        # set could be worked around one document at a time.
+        try:
+            selected_items = select_items(dataset["items"], documents)
+        except _DocumentSelectionError as exc:
+            # Pre-run refusal, same shape as the quota ceiling below: log,
+            # run_end outcome=aborted, return 1, NO run_status marker (no
+            # run exists yet, ADR-0004 A7). Never exit 0 -- a filtered run
+            # that measured nothing must not read as a pass.
+            logger.error(
+                "run_eval: document_filter_no_match %s", sanitize_for_log(exc.detail)
+            )
+            _log_run_end("aborted", 1)
+            return 1
+        
+        if documents:
+            logger.info(
+                "run_eval: document filter selected %d of %d item(s): %s",
+                len(selected_items),
+                len(dataset["items"]),
+                sanitize_for_log(", ".join(i["document_id"] for i in selected_items)),
+            )
+
+        # The ceiling guards QUOTA, so it counts what will actually be
+        # submitted -- the selected items, not the whole dataset. With no
+        # filter the two are identical and this is unchanged.
+        item_count = len(selected_items)
         if item_count > max_documents_per_run:
             logger.error(
                 "run_eval: quota_ceiling_exceeded item_count=%d max_documents_per_run=%d",
@@ -475,6 +601,11 @@ def run_eval(
         # verbatim, no opinion on item shape -- see its own docstring);
         # `DatasetItem` is structurally a dict, so this is a
         # shape-preserving cast, not an unsafe one.
+        # Over the FULL item set, never the selection: `golden_version`
+        # identifies the state of the GOLDEN SET (INV-04), so a filtered run
+        # and a full run of the same golden set must report the same version.
+        # What the run actually covered is the `document filter` log line
+        # above plus `items=` below.
         golden_version = hash_dataset(cast(list[dict[str, Any]], dataset["items"]))
         run_id = generate_run_id()
         experiment_name = compose_experiment_name(run_name, run_id)
@@ -482,16 +613,29 @@ def run_eval(
         logger.info(
             "run_eval: pre-run checks passed run=%s experiment=%s action=%s "
             "version=%s golden_version=%s golden_dataset_name=%s items=%d "
-            "max_documents_per_run=%d",
+            "max_documents_per_run=%d classifier=%s platform_values=%s",
             sanitize_for_log(run_name),
             sanitize_for_log(experiment_name),
             sanitize_for_log(action_id),
             sanitize_for_log(version),
             sanitize_for_log(golden_version),
             sanitize_for_log(dataset_name),
-            len(dataset["items"]),
+            len(selected_items),
             max_documents_per_run,
+            comparison.name,
+            platform_values,
         )
+    except UnknownClassifierError as exc:
+        # Pre-run refusal: log, run_end outcome=aborted, exit 1, no status
+        # marker (no run exists yet, ADR-0004 A7). The valid names are
+        # printed because a typo is the likely cause.
+        logger.error(
+            "run_eval: unknown_classifier %s (available: %s)",
+            sanitize_for_log(exc.name),
+            ", ".join(exc.available),
+        )
+        _log_run_end("aborted", 1)
+        return 1
     except MissingCredentialError as exc:
         logger.error("run_eval: missing required env var %s", exc.variable_name)
         _log_run_end("aborted", 1)
@@ -620,7 +764,7 @@ def run_eval(
     failed_count = 0
     submits_made = 0
     try:
-        for item in dataset["items"]:
+        for item in selected_items:
             document_started_at = time.monotonic()
             document_id = item["document_id"]
             golden = item["golden"]
@@ -685,8 +829,8 @@ def run_eval(
                 raise _abort("hard_failure", document_id, str(exc)) from None
 
             try:
-                verdicts = classify(golden, actual)
-                gate = overall_gate(verdicts)
+                verdicts = comparison.classify(golden, actual)
+                gate = comparison.gate(verdicts)
             except MalformedGoldenError as exc:  # pragma: no cover
                 # Coverage audit gap 2 (2026-09-21): provably unreachable,
                 # not merely untested -- `validate_golden_set` (N28,
@@ -725,9 +869,19 @@ def run_eval(
                 gate=gate,
                 run_id=run_id,
                 document_id=document_id,
+                include_values=record_values,
             )
+            # DEBT-18 REVERSED 2026-09-25 (user decision): the ORCHESTRATOR
+            # decides what the platform is told, in this one place -- the
+            # adapter only renders what it is handed. `verdicts=None`
+            # reproduces option B's payload exactly.
             records.append(
-                {"item_id": item["item_id"], "document_id": document_id, "scores": scores}
+                {
+                    "item_id": item["item_id"],
+                    "document_id": document_id,
+                    "scores": scores,
+                    "verdicts": verdicts if record_values else None,
+                }
             )
             # T-01.4.8: elapsed for THIS document, on the SAME log line
             # that already carries its document_id (Zangado's S-01.2 note

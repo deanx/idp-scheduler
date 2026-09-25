@@ -219,7 +219,14 @@ def test_happy_path_extracts_classifies_gates_and_records_once(
     records = call["records"]
     assert isinstance(records, list)
     assert [r["document_id"] for r in records] == document_ids
-    assert all(set(r.keys()) == {"item_id", "document_id", "scores"} for r in records)
+    # DEBT-18 REVERSED 2026-09-25: a record now also carries the verdict
+    # map, which is what lets the adapter put expected/actual/confidence on
+    # the span and in the score comments. `verdicts` is None under
+    # `--platform-values verdicts-only`, which restores the old payload.
+    assert all(
+        set(r.keys()) == {"item_id", "document_id", "scores", "verdicts"} for r in records
+    )
+    assert all(r["verdicts"] for r in records)
 
     # INV-04 (widened to four fields, A6/DEBT-48): action_id/
     # action_version/golden_version/golden_dataset_name in run metadata.

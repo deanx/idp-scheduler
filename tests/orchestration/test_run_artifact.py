@@ -36,6 +36,7 @@ _SAMPLE_VERDICT_MAPS: dict[str, VerdictMap] = {
             actual="1250.01",
             confidence=0.87,
             critical=True,
+            format_critical=False,
             type="number",
         )
     },
@@ -46,6 +47,7 @@ _SAMPLE_VERDICT_MAPS: dict[str, VerdictMap] = {
             actual="999.00",
             confidence=0.99,
             critical=True,
+            format_critical=False,
             type="number",
         )
     },

@@ -57,7 +57,7 @@ from dotenv import load_dotenv as _load_dotenv
 
 _ENV_FILE_NAME = ".env"
 
-__all__ = ["load_dotenv"]
+__all__ = ["load_dotenv", "load_dotenv_file"]
 
 
 def load_dotenv() -> None:
@@ -65,4 +65,18 @@ def load_dotenv() -> None:
 
     A missing `.env` is not an error — CI supplies credentials directly.
     """
-    _load_dotenv(dotenv_path=Path.cwd() / _ENV_FILE_NAME, override=False)
+    load_dotenv_file(Path.cwd() / _ENV_FILE_NAME)
+
+
+def load_dotenv_file(path: Path) -> None:
+    """Load one named `.env` file, without touching the process's
+    working directory.
+
+    `load_dotenv()` above is the CLI's shape: one shell, one directory,
+    `./.env`. A SERVER has neither — it serves concurrent requests from a
+    threadpool, and `os.chdir` there is a process-global race against any
+    other request resolving a relative path in the same window. So a
+    caller that already knows which file it wants says so, and nothing
+    chdirs (Zangado QA F-4, 2026-09-25).
+    """
+    _load_dotenv(dotenv_path=path, override=False)

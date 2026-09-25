@@ -131,7 +131,9 @@ def test_malformed_version_exits_nonzero_without_calling_run_eval(
 def test_valid_args_call_run_eval_with_the_resolved_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[str, str, str, str, str, int]] = []
+    calls: list[
+        tuple[str, str, str, str, str, int, list[str] | None, str | None, str]
+    ] = []
 
     def _record(
         action_id: str,
@@ -140,8 +142,23 @@ def test_valid_args_call_run_eval_with_the_resolved_values(
         dataset_name: str,
         org_id: str,
         max_documents_per_run: int,
+        documents: list[str] | None = None,
+        classifier: str | None = None,
+        platform_values: str = "full",
     ) -> int:
-        calls.append((action_id, version, run_name, dataset_name, org_id, max_documents_per_run))
+        calls.append(
+            (
+                action_id,
+                version,
+                run_name,
+                dataset_name,
+                org_id,
+                max_documents_per_run,
+                documents,
+                classifier,
+                platform_values,
+            )
+        )
         return 7
 
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
@@ -171,6 +188,13 @@ def test_valid_args_call_run_eval_with_the_resolved_values(
             "idp-regression-golden",
             "org-test-0000",
             DEFAULT_MAX_DOCUMENTS_PER_RUN,
+            # `--document` and `--classifier` absent: the run covers the whole
+            # dataset and compares with the default classifier, exactly as it
+            # did before either flag existed.
+            None,
+            None,
+            # DEBT-18 reversed: `full` is the default posture now.
+            "full",
         )
     ]
 
@@ -223,10 +247,13 @@ def test_load_dotenv_is_called_before_parse_args(monkeypatch: pytest.MonkeyPatch
                 dataset="idp-regression-golden",
                 org="org-test-0000",
                 max_documents_per_run=1000,
+                documents=None,
+                classifier=None,
+                platform_values="full",
             )
 
     monkeypatch.setattr(cli, "_build_parser", lambda: _RecordingParser())
-    monkeypatch.setattr(cli, "run_eval", lambda a, v, r, d, o, m: 0)
+    monkeypatch.setattr(cli, "run_eval", lambda a, v, r, d, o, m, **_: 0)
 
     exit_code = cli.main([])
 
@@ -369,6 +396,9 @@ def test_main_converts_an_unexpected_exception_from_run_eval_into_a_nonzero_exit
         dataset_name: str,
         org_id: str,
         max_documents_per_run: int,
+        documents: list[str] | None = None,
+        classifier: str | None = None,
+        platform_values: str = "full",
     ) -> int:
         raise RuntimeError("unexpected\nfailure with embedded newline")
 
@@ -415,6 +445,9 @@ def test_main_never_logs_the_raw_message_of_an_unexpected_exception_from_run_eva
         dataset_name: str,
         org_id: str,
         max_documents_per_run: int,
+        documents: list[str] | None = None,
+        classifier: str | None = None,
+        platform_values: str = "full",
     ) -> int:
         raise RuntimeError(sentinel)
 
@@ -459,6 +492,9 @@ def test_main_never_escapes_on_a_cancelled_error_from_run_eval(
         dataset_name: str,
         org_id: str,
         max_documents_per_run: int,
+        documents: list[str] | None = None,
+        classifier: str | None = None,
+        platform_values: str = "full",
     ) -> int:
         raise asyncio.CancelledError()
 
@@ -493,7 +529,7 @@ def test_version_at_the_64_char_cap_is_accepted(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(
         cli,
         "run_eval",
-        lambda a, v, r, d, o, m: calls.append((a, v, r, d)) or 0,  # type: ignore[func-returns-value]
+        lambda a, v, r, d, o, m, **_: calls.append((a, v, r, d)) or 0,  # type: ignore[func-returns-value]
     )
     version = "a" * 64
 
@@ -870,7 +906,7 @@ def test_org_flag_value_is_passed_through_to_run_eval(
     monkeypatch.setattr(
         cli,
         "run_eval",
-        lambda a, v, r, d, o, m: calls.append(o) or 0,  # type: ignore[func-returns-value]
+        lambda a, v, r, d, o, m, **_: calls.append(o) or 0,  # type: ignore[func-returns-value]
     )
 
     exit_code = cli.main(
@@ -906,7 +942,7 @@ def test_max_documents_per_run_defaults_when_omitted(
     monkeypatch.setattr(
         cli,
         "run_eval",
-        lambda a, v, r, d, o, m: calls.append(m) or 0,  # type: ignore[func-returns-value]
+        lambda a, v, r, d, o, m, **_: calls.append(m) or 0,  # type: ignore[func-returns-value]
     )
 
     exit_code = cli.main(
@@ -936,7 +972,7 @@ def test_max_documents_per_run_flag_value_is_passed_through(
     monkeypatch.setattr(
         cli,
         "run_eval",
-        lambda a, v, r, d, o, m: calls.append(m) or 0,  # type: ignore[func-returns-value]
+        lambda a, v, r, d, o, m, **_: calls.append(m) or 0,  # type: ignore[func-returns-value]
     )
 
     exit_code = cli.main(

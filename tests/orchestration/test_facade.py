@@ -25,6 +25,10 @@ from typing import cast
 
 import pytest
 
+from idp_regression.classifier.gate import overall_gate
+from idp_regression.classifier.registry import Classifier
+from idp_regression.classifier.scorers import regression_scorer
+from idp_regression.classifier.types import Golden, NormalizedOutput, VerdictMap
 from idp_regression.orchestration import facade
 from idp_regression.orchestration.bootstrap import MissingCredentialError
 from idp_regression.orchestration.facade import run_eval
@@ -1946,10 +1950,23 @@ def test_run_eval_writes_the_aborted_marker_on_an_untyped_in_loop_exception(
     monkeypatch.setattr(facade, "make_platform", lambda: platform)
     _stub_make_idp_adapter_success(monkeypatch)
 
-    def _boom(golden: object, actual: object) -> None:
+    def _boom(golden: Golden, actual: NormalizedOutput) -> VerdictMap:
         raise ValueError("unexpected classify failure")
 
-    monkeypatch.setattr(facade, "classify", _boom)
+    # The comparison is resolved from the classifier registry now
+    # (`--classifier`, 2026-09-25); injecting the failure there is the same
+    # test -- an untyped exception out of the comparison, mid-loop.
+    monkeypatch.setattr(
+        facade,
+        "resolve_classifier",
+        lambda name: Classifier(
+            name="boom",
+            classify=_boom,
+            gate=overall_gate,
+            description="test double",
+            scorer=regression_scorer,
+        ),
+    )
 
     with caplog.at_level(logging.INFO):
         exit_code = run_eval(
@@ -2303,10 +2320,23 @@ def test_run_eval_never_escapes_on_a_cancelled_error_in_loop(
 
     import asyncio
 
-    def _boom(golden: object, actual: object) -> None:
+    def _boom(golden: Golden, actual: NormalizedOutput) -> VerdictMap:
         raise asyncio.CancelledError()
 
-    monkeypatch.setattr(facade, "classify", _boom)
+    # The comparison is resolved from the classifier registry now
+    # (`--classifier`, 2026-09-25); injecting the failure there is the same
+    # test -- an untyped exception out of the comparison, mid-loop.
+    monkeypatch.setattr(
+        facade,
+        "resolve_classifier",
+        lambda name: Classifier(
+            name="boom",
+            classify=_boom,
+            gate=overall_gate,
+            description="test double",
+            scorer=regression_scorer,
+        ),
+    )
 
     with caplog.at_level(logging.INFO):
         exit_code = run_eval(
@@ -2381,6 +2411,7 @@ def test_run_eval_writes_the_full_verdict_map_to_the_local_run_artifact_on_succe
         "confidence": 0.99,
         "critical": True,
         "type": "number",
+        "format_critical": False,
     }
 
 

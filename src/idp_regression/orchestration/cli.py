@@ -84,9 +84,19 @@ import uuid
 from collections.abc import Sequence
 
 from idp_regression.adapter.transport import sanitize_for_log
+from idp_regression.classifier.registry import CLASSIFIERS, DEFAULT_CLASSIFIER
 from idp_regression.orchestration.dotenv_support import load_dotenv
-from idp_regression.orchestration.facade import DEFAULT_MAX_DOCUMENTS_PER_RUN, run_eval
+from idp_regression.orchestration.facade import (
+    DEFAULT_MAX_DOCUMENTS_PER_RUN,
+    DEFAULT_PLATFORM_VALUES,
+    PLATFORM_VALUE_MODES,
+    run_eval,
+)
 from idp_regression.orchestration.log_sanitize import frame_location
+from idp_regression.orchestration.scorer_store import (
+    SCORER_DIR,
+    register_custom_classifiers,
+)
 
 #: ⚠️ NOT `logging.getLogger(__name__)` -- item 1's own gate fix
 #: (2026-09-23, live-reproduced by running the DOCUMENTED entry point,
@@ -221,6 +231,47 @@ def _build_parser() -> argparse.ArgumentParser:
     # an action is addressed by (org, action, version), and the org id is
     # not derivable from the credential (see the module docstring above).
     parser.add_argument("--org", dest="org", required=True)
+    # Additive and optional: absent, the run covers the whole dataset
+    # exactly as it always has. Repeatable, so a handful of files can be
+    # re-validated in one run. Matched exactly first, then as a unique
+    # substring -- an ambiguous or unmatched selector is refused before
+    # any submit rather than guessed (facade.select_items).
+    # Additive: absent, a run compares exactly as it always has
+    # (`registry.DEFAULT_CLASSIFIER`). A name, never an import path -- see
+    # `classifier/registry.py`'s note on why.
+    parser.add_argument(
+        "--platform-values",
+        dest="platform_values",
+        default=DEFAULT_PLATFORM_VALUES,
+        choices=list(PLATFORM_VALUE_MODES),
+        help=(
+            f"what this run tells the platform (default: {DEFAULT_PLATFORM_VALUES}). "
+            "full: verdicts AND the expected/actual/confidence behind them. "
+            "verdicts-only: verdict literals and document_id only (DEBT-18 option B, "
+            "the pre-2026-09-25 posture)."
+        ),
+    )
+    parser.add_argument(
+        "--classifier",
+        dest="classifier",
+        default=None,
+        choices=sorted(CLASSIFIERS),
+        help=(
+            f"comparison strategy (default: {DEFAULT_CLASSIFIER}). "
+            + " · ".join(f"{name}: {c.description}" for name, c in sorted(CLASSIFIERS.items()))
+        ),
+    )
+    parser.add_argument(
+        "--document",
+        dest="documents",
+        action="append",
+        default=None,
+        metavar="DOCUMENT_ID",
+        help=(
+            "restrict the run to this dataset item (repeatable; exact document_id, "
+            "or a substring that matches exactly one). Default: every item."
+        ),
+    )
     # ADR-0004 A10 (2026-09-22), MVP override of A10's own required-no-
     # default text (user decision): OPTIONAL, with a deliberately
     # arbitrary high default -- an MVP guard rail against a runaway loop,
@@ -273,6 +324,38 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
 
+    # Custom scorers (Epic E). Registered BEFORE the parser is built:
+    # `--classifier`'s `choices` are frozen at parser-construction time,
+    # so a spec registered after this point would be rejected by argparse
+    # before `registry.resolve()` ever saw it.
+    #
+    # A broken spec file does NOT fail the run here -- `load_specs`
+    # reports it and skips it, and a run that never names it must not be
+    # held hostage by a half-edited file someone left in the directory.
+    # What IS refused, below, is naming the broken one.
+    try:
+        custom_specs, spec_errors = register_custom_classifiers()
+    except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 - same posture as load_dotenv
+        # Same reasoning as the `.env` catch-all above: an unreadable
+        # scorer directory must not escape `main()` as a raw traceback
+        # carrying its path (INV-02).
+        logger.error(
+            "cli: unexpected error loading custom scorers: %s at %s",
+            type(exc).__name__,
+            frame_location(exc),
+        )
+        return 1
+    for message in spec_errors:
+        # Named, never silent: a spec that does not load is a gate the
+        # author believes they configured and does not have.
+        logger.warning("custom_scorer_not_loaded detail=%s", sanitize_for_log(message))
+    if custom_specs:
+        logger.info(
+            "custom_scorers_registered dir=%s names=%s",
+            SCORER_DIR,
+            ",".join(sorted(custom_specs)),
+        )
+
     parser = _build_parser()
     try:
         args = parser.parse_args(argv)
@@ -289,6 +372,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         # a crafted value containing "\nERROR:root:run_eval: gate PASSED"
         # must not render as a believable extra log entry.
         logger.error("run_eval: invalid arguments: %s", sanitize_for_log(str(exc)))
+        if spec_errors:
+            # `--classifier my-rule` reads as a typo when argparse says
+            # "invalid choice", and the real cause is a spec file that
+            # did not load. Point at it rather than letting the operator
+            # hunt for a name they can see in the directory.
+            logger.error(
+                "run_eval: note -- %d custom scorer spec(s) in %s failed to load and are "
+                "therefore NOT valid --classifier names; see the custom_scorer_not_loaded "
+                "warning(s) above",
+                len(spec_errors),
+                SCORER_DIR,
+            )
         return 2
 
     action_id = args.action
@@ -329,6 +424,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         logger.error("run_eval: --max-documents-per-run must be a positive integer")
         return 1
 
+    if args.classifier in custom_specs:
+        # Run identity (INV-04's reasoning, applied to the comparison
+        # rather than the golden set): a spec file can be edited between
+        # two runs that both name `--classifier my-rule`, and without the
+        # digest nothing in either run's output would say they compared
+        # differently.
+        logger.info(
+            "custom_scorer_selected name=%s base=%s spec_digest=%s",
+            args.classifier,
+            custom_specs[args.classifier].base,
+            custom_specs[args.classifier].digest(),
+        )
+
     try:
         return run_eval(
             action_id,
@@ -337,6 +445,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             dataset_name,
             org_id,
             max_documents_per_run,
+            documents=args.documents,
+            classifier=args.classifier,
+            platform_values=args.platform_values,
         )
     except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 - defense in depth
         # `run_eval`'s own contract (facade.py, `orchestration/errors.py`)
