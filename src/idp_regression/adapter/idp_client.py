@@ -631,7 +631,17 @@ def make_idp_adapter(org_id: str) -> MuleSoftIDPAdapter:
         client_secret=_require("IDP_CLIENT_SECRET"),
         region=_require("IDP_REGION"),
         org_id=org_id,
-        terminal_statuses=_statuses("IDP_TERMINAL_STATUSES", "SUCCEEDED"),
+        # DEBT-22 leg 2 / ASM-01, probed live 2026-09-25: `FAILED` is a real
+        # IDP terminal status (a truncated PDF reached it in 3.2s; the body is
+        # captured at `tests/fixtures/live/failed-execution.raw.json`). It must
+        # be TERMINAL but not SUCCESS: ADR-0004 #5 calls a non-success terminal
+        # status a hard IDP failure. With `FAILED` absent from this default the
+        # poll loop waited out the whole execution budget and aborted as a
+        # TIMEOUT -- telling the operator "IDP was slow" about a document IDP
+        # had already rejected. Still deliberately narrow: `PARTIAL_SUCCESS`
+        # stays out until ASM-01 confirms this org emits it, so an unknown
+        # status remains non-terminal and fails closed.
+        terminal_statuses=_statuses("IDP_TERMINAL_STATUSES", "SUCCEEDED,FAILED"),
         success_statuses=_statuses("IDP_SUCCESS_STATUSES", "SUCCEEDED"),
         submit_timeout_seconds=_timing_env(
             "IDP_SUBMIT_TIMEOUT_SECONDS", DEFAULT_SUBMIT_TIMEOUT_SECONDS

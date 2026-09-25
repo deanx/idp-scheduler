@@ -176,3 +176,50 @@ def test_a_normalized_output_is_accepted_by_classify_without_a_shape_error() -> 
     unmatched_rows = [row for row in line_items["rows"] if row["match_key"] == "B-200"]
     assert len(unmatched_rows) == 1
     assert unmatched_rows[0]["verdict"] == "new_line"
+
+
+# ---------------------------------------------------------------------------
+# SR-1: the FAILED terminal shape, pinned against a live capture.
+#
+# Probed live 2026-09-25 (DEBT-22 leg 2 / ASM-01) by submitting a truncated
+# PDF. IDP reached `status: "FAILED"` in 3.2s. IDP discards a result after 24
+# hours, so this capture is the only durable copy of that response and these
+# tests are the only thing that can falsify a claim about its shape.
+# ---------------------------------------------------------------------------
+
+FAILED_FIXTURE = json.loads(
+    (
+        pathlib.Path(__file__).parent.parent / "fixtures" / "live" / "failed-execution.raw.json"
+    ).read_text()
+)
+
+
+def test_the_live_failed_body_carries_status_failed_and_empty_containers() -> None:
+    """The shape a hard IDP failure actually has on the wire.
+
+    Note what it is NOT: there is no error object, no message, no reason
+    code -- `fields` and `tables` are present and EMPTY, and `status` is
+    the only thing distinguishing this from a document where the
+    extractor legitimately found nothing. That is precisely why `status`
+    has to be load-bearing, and why a FAILED execution must never reach
+    `normalize()` as if it were a result (see the next test).
+    """
+    assert FAILED_FIXTURE["status"] == "FAILED"
+    assert FAILED_FIXTURE["fields"] == {}
+    assert FAILED_FIXTURE["tables"] == {}
+    assert "pages" not in FAILED_FIXTURE
+
+
+def test_normalize_raises_on_the_live_failed_body_and_never_returns_empty() -> None:
+    """REG-11's defect class, on the failure path.
+
+    REG-11 was `normalize()` returning an empty-but-successful
+    `NormalizedOutput` for a real body instead of raising. This body is
+    the shape most likely to reproduce it -- well-formed, with every
+    container present and empty -- so the pin is that it RAISES, never
+    that it returns something falsy a caller might treat as "no fields
+    extracted" and gate as a pass.
+    """
+    with pytest.raises(Exception) as excinfo:
+        normalize(FAILED_FIXTURE, {"SUCCEEDED"})
+    assert type(excinfo.value).__name__ == "MalformedIDPOutputError"

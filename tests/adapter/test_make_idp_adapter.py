@@ -89,16 +89,51 @@ def test_default_terminal_and_success_statuses_are_succeeded_only(
     assert out["status"] == "SUCCEEDED"
 
 
-def test_default_terminal_statuses_do_not_include_failed(
+def test_default_terminal_statuses_include_failed_so_a_hard_failure_is_not_a_timeout(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """DEBT-22 leg 2 / ASM-01 -- pinned against a LIVE capture, per SR-1.
+
+    `FAILED` is a real IDP terminal status: probed live 2026-09-25 by
+    submitting a truncated PDF, which reached `status: "FAILED"` in 3.2s.
+    The captured body is `tests/fixtures/live/failed-execution.raw.json`.
+
+    **This test previously asserted the opposite** (`IDPPollTimeoutError`,
+    on the ground that FAILED "is not in the default terminal set") --
+    describing the mechanism rather than arguing for it, and thereby
+    cementing the defect: with `FAILED` absent from the default terminal
+    set, a hard IDP failure is not terminal, so the poll loop waits out
+    the ENTIRE execution budget and then aborts with the WRONG reason.
+    ADR-0004 #5 calls a non-success terminal status a hard IDP failure;
+    the orchestrator maps `IDPExecutionFailedError` to `hard_failure` and
+    `IDPPollTimeoutError` to a timeout, so the operator was told "IDP was
+    slow" for a document IDP had already rejected -- after burning the
+    full budget (120s as configured) waiting for it.
+
+    `success_statuses` is unchanged and stays `{"SUCCEEDED"}`: FAILED is
+    terminal, never successful.
+    """
     _set_required_env(monkeypatch)
-    # FAILED is not in the default {"SUCCEEDED"} terminal set, so the poll
-    # loop must keep waiting for a terminal status it never gets -- proven
-    # by a timeout, not an immediate IDPExecutionFailedError (which would
-    # mean FAILED was wrongly treated as terminal).
-    with pytest.raises(IDPPollTimeoutError):
+    with pytest.raises(IDPExecutionFailedError) as excinfo:
         _extract_against_a_single_poll_status(monkeypatch, tmp_path, "FAILED")
+    assert excinfo.value.status == "FAILED"
+
+
+def test_a_status_outside_the_default_terminal_set_still_polls_to_the_deadline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The half of the old test that was worth keeping.
+
+    Broadening the default to `{"SUCCEEDED", "FAILED"}` must not make the
+    loop treat *any* status as terminal -- a genuinely unknown status is
+    still non-terminal and still polls to the deadline (fail-closed).
+    `PARTIAL_SUCCESS` is the realistic one: ASM-01 records that whether
+    this org's IDP emits it is still unconfirmed, so it must NOT be
+    silently assumed terminal.
+    """
+    _set_required_env(monkeypatch)
+    with pytest.raises(IDPPollTimeoutError):
+        _extract_against_a_single_poll_status(monkeypatch, tmp_path, "PARTIAL_SUCCESS")
 
 
 def test_comma_separated_terminal_statuses_are_parsed_into_a_set(
