@@ -57,6 +57,15 @@ happens to use. Since `inv-002-format-variance.pdf` prints its date as
 likely to surface the regression: v1.0.0 should still normalize to
 `2026-01-22`, while v1.0.1 is likely to return `22/01/2026` or `01/22/2026`
 verbatim — a `wrong_value` against the golden's `2026-01-22`. `invoice_date`
-is marked `critical: true` in every golden entry (see `README.md`), so this
-degradation should flip `overall_gate` from `PASS` to `FAIL` — exactly the
-regression-catching behavior UC-01 exists to verify.
+is marked `critical: true` **and `format_critical: true`** in every golden
+entry (see `README.md`), so this degradation flips `overall_gate` from `PASS`
+to `FAIL` — exactly the regression-catching behavior UC-01 exists to verify.
+
+> **Corrected 2026-09-24.** This paragraph used to claim the flip on
+> `critical: true` alone. That was wrong, and the live run proved it: the
+> degradation produced `22/01/2026` against a golden of `2026-01-22`, which
+> is the same calendar date in another format, so the verdict was
+> `wrong_format` — and under BR3 that did **not** fail the gate. The run
+> returned `exit_code=0` on a genuine prompt regression. `format_critical`
+> (ADR-0003 Amendment 2026-09-24, DEBT-80) is what makes the claim above
+> true; without it on this field, this degradation is still a green build.

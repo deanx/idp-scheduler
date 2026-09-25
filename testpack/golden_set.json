@@ -20,7 +20,8 @@
       "invoice_date": {
         "value": "2026-01-15",
         "type": "date",
-        "critical": true
+        "critical": true,
+        "format_critical": true
       },
       "currency": {
         "value": "USD",
@@ -106,7 +107,8 @@
       "invoice_date": {
         "value": "2026-01-22",
         "type": "date",
-        "critical": true
+        "critical": true,
+        "format_critical": true
       },
       "currency": {
         "value": "USD",
@@ -192,7 +194,8 @@
       "invoice_date": {
         "value": "2026-02-03",
         "type": "date",
-        "critical": true
+        "critical": true,
+        "format_critical": true
       },
       "currency": {
         "value": "USD",
@@ -341,7 +344,8 @@
       "invoice_date": {
         "value": "2026-02-20",
         "type": "date",
-        "critical": true
+        "critical": true,
+        "format_critical": true
       },
       "currency": {
         "value": "USD",
@@ -497,7 +501,8 @@
       "invoice_date": {
         "value": "2026-03-01",
         "type": "date",
-        "critical": true
+        "critical": true,
+        "format_critical": true
       },
       "currency": {
         "value": "USD",

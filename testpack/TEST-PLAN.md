@@ -288,8 +288,20 @@ known false-negative risk, and worth recording.
 ### 7.3 Run the regression against `1.0.1`
 Paste the command the watcher printed.
 
-**Expect exit non-zero and `gate=FAIL`**, with the degraded field showing `wrong_value` or
-`wrong_format` while the rest stay `match`.
+**Expect exit non-zero and `gate=FAIL`**, with `inv-002-format-variance.pdf`'s `invoice_date`
+showing `wrong_format` while the rest stay `match`.
+
+> **Corrected 2026-09-24 — this step failed the first time it was run, and the plan was wrong, not
+> the code.** As originally written it said to expect `gate=FAIL` "with the degraded field showing
+> `wrong_value` **or** `wrong_format`". Those cannot both hold: under BR3 a `wrong_format` verdict
+> never failed the gate, even on a `critical` field. The live `1.1.0` run did exactly what the
+> degradation intended — `invoice_date` went `2026-01-22` → `22/01/2026`, the only changed cell of
+> 45 — and the tool returned **`exit_code=0`**, because `_format_date` parses both to the same
+> calendar date. The fix was a decision, not a patch: `format_critical` is now a per-field opt-in
+> (ADR-0003 Amendment 2026-09-24, DEBT-80), set on `invoice_date` in the golden, so a format
+> regression on *that* field fails the gate while BR3's default holds everywhere else. **If you are
+> re-running this plan from scratch, the dataset must carry the re-provisioned schema and goldens
+> (Phase 3) or this step aborts `schema_drift` instead of failing the gate.**
 
 ### 7.4 Read it in Langfuse
 Open the dataset's compare view. You should see `1.0.0` and `1.0.1` side by side with the per-field

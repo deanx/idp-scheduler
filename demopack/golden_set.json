@@ -1,0 +1,242 @@
+{
+  "demo-001-clean": {
+    "document_id": "demo-001-clean.pdf",
+    "fields": {
+      "vendor_name": {
+        "value": "Acme Robotics Ltd",
+        "type": "text",
+        "critical": true
+      },
+      "bill_to": {
+        "value": "Northwind Traders Inc.",
+        "type": "text",
+        "critical": false
+      },
+      "invoice_number": {
+        "value": "INV-2001",
+        "type": "id",
+        "critical": true
+      },
+      "invoice_date": {
+        "value": "2026-03-04",
+        "type": "date",
+        "critical": true,
+        "format_critical": true
+      },
+      "currency": {
+        "value": "USD",
+        "type": "text",
+        "critical": true
+      },
+      "subtotal": {
+        "value": "900.00",
+        "type": "number",
+        "critical": true
+      },
+      "total": {
+        "value": "972.00",
+        "type": "number",
+        "critical": true
+      },
+      "po_number": {
+        "value": "PO-7781",
+        "type": "id",
+        "critical": false
+      },
+      "tax": {
+        "value": "72.00",
+        "type": "number",
+        "critical": false
+      }
+    },
+    "tables": {
+      "line_items": {
+        "match_key": "sku",
+        "critical": true,
+        "rows": [
+          {
+            "sku": "SKU-100",
+            "description": "Widget Assembly Kit",
+            "quantity": "10",
+            "unit_price": "25.00",
+            "amount": "250.00"
+          },
+          {
+            "sku": "SKU-200",
+            "description": "Precision Bearing",
+            "quantity": "20",
+            "unit_price": "12.50",
+            "amount": "250.00"
+          },
+          {
+            "sku": "SKU-300",
+            "description": "Servo Motor",
+            "quantity": "5",
+            "unit_price": "80.00",
+            "amount": "400.00"
+          }
+        ]
+      }
+    }
+  },
+  "demo-002-intl-date": {
+    "document_id": "demo-002-intl-date.pdf",
+    "fields": {
+      "vendor_name": {
+        "value": "Britannia Components PLC",
+        "type": "text",
+        "critical": true
+      },
+      "bill_to": {
+        "value": "Northwind Traders Inc.",
+        "type": "text",
+        "critical": false
+      },
+      "invoice_number": {
+        "value": "INV-2002",
+        "type": "id",
+        "critical": true
+      },
+      "invoice_date": {
+        "value": "2026-03-19",
+        "type": "date",
+        "critical": true,
+        "format_critical": true
+      },
+      "currency": {
+        "value": "USD",
+        "type": "text",
+        "critical": true
+      },
+      "subtotal": {
+        "value": "211.00",
+        "type": "number",
+        "critical": true
+      },
+      "total": {
+        "value": "227.88",
+        "type": "number",
+        "critical": true
+      },
+      "po_number": {
+        "value": "PO-7782",
+        "type": "id",
+        "critical": false
+      },
+      "tax": {
+        "value": "16.88",
+        "type": "number",
+        "critical": false
+      }
+    },
+    "tables": {
+      "line_items": {
+        "match_key": "sku",
+        "critical": true,
+        "rows": [
+          {
+            "sku": "SKU-410",
+            "description": "Hydraulic Seal",
+            "quantity": "12",
+            "unit_price": "7.25",
+            "amount": "87.00"
+          },
+          {
+            "sku": "SKU-420",
+            "description": "Copper Fitting",
+            "quantity": "40",
+            "unit_price": "3.10",
+            "amount": "124.00"
+          }
+        ]
+      }
+    }
+  },
+  "demo-003-split-shipment": {
+    "document_id": "demo-003-split-shipment.pdf",
+    "fields": {
+      "vendor_name": {
+        "value": "Global Parts Supply Co",
+        "type": "text",
+        "critical": true
+      },
+      "bill_to": {
+        "value": "Meridian Manufacturing",
+        "type": "text",
+        "critical": false
+      },
+      "invoice_number": {
+        "value": "INV-2003",
+        "type": "id",
+        "critical": true
+      },
+      "invoice_date": {
+        "value": "2026-03-11",
+        "type": "date",
+        "critical": true,
+        "format_critical": true
+      },
+      "currency": {
+        "value": "USD",
+        "type": "text",
+        "critical": true
+      },
+      "subtotal": {
+        "value": "22.00",
+        "type": "number",
+        "critical": true
+      },
+      "total": {
+        "value": "23.76",
+        "type": "number",
+        "critical": true
+      },
+      "po_number": {
+        "value": "PO-7783",
+        "type": "id",
+        "critical": false
+      },
+      "tax": {
+        "value": "1.76",
+        "type": "number",
+        "critical": false
+      }
+    },
+    "tables": {
+      "line_items": {
+        "match_key": "sku",
+        "critical": true,
+        "rows": [
+          {
+            "sku": "SKU-500",
+            "description": "Bolt M6x20",
+            "quantity": "100",
+            "unit_price": "0.10",
+            "amount": "10.00"
+          },
+          {
+            "sku": "SKU-501",
+            "description": "Nut M6",
+            "quantity": "100",
+            "unit_price": "0.05",
+            "amount": "5.00"
+          },
+          {
+            "sku": "SKU-500",
+            "description": "Bolt M6x20 (back-order)",
+            "quantity": "50",
+            "unit_price": "0.10",
+            "amount": "5.00"
+          },
+          {
+            "sku": "SKU-502",
+            "description": "Washer M6",
+            "quantity": "100",
+            "unit_price": "0.02",
+            "amount": "2.00"
+          }
+        ]
+      }
+    }
+  }
+}

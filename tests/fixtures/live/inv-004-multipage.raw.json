@@ -1,0 +1,434 @@
+{
+  "documentName": "inv-004-multipage.pdf",
+  "fields": {
+    "bill_to": {
+      "confidenceScore": 99.0,
+      "geometry": null,
+      "value": "Harbor Point Distribution"
+    },
+    "currency": {
+      "confidenceScore": 99.0,
+      "geometry": null,
+      "value": "USD"
+    },
+    "invoice_date": {
+      "confidenceScore": 99.0,
+      "geometry": null,
+      "value": "2026-02-20"
+    },
+    "invoice_number": {
+      "confidenceScore": 99.0,
+      "geometry": null,
+      "value": "INV-1004"
+    },
+    "po_number": {
+      "confidenceScore": 99.0,
+      "geometry": null,
+      "value": "PO-4522"
+    },
+    "subtotal": {
+      "confidenceScore": 99.0,
+      "geometry": null,
+      "value": "1431.25"
+    },
+    "tax": {
+      "confidenceScore": 99.0,
+      "geometry": null,
+      "value": "114.50"
+    },
+    "total": {
+      "confidenceScore": 99.0,
+      "geometry": null,
+      "value": "1545.75"
+    },
+    "vendor_name": {
+      "confidenceScore": 99.0,
+      "geometry": null,
+      "value": "Continental Freight & Logistics"
+    }
+  },
+  "id": "REDACTED-EXECUTION-ID",
+  "status": "SUCCEEDED",
+  "tables": {
+    "line_items": [
+      {
+        "amount": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "108.00"
+        },
+        "description": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "Freight Item 1"
+        },
+        "quantity": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "12"
+        },
+        "sku": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "SKU-700"
+        },
+        "unit_price": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "9.00"
+        }
+      },
+      {
+        "amount": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "116.00"
+        },
+        "description": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "Freight Item 2"
+        },
+        "quantity": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "8"
+        },
+        "sku": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "SKU-701"
+        },
+        "unit_price": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "14.50"
+        }
+      },
+      {
+        "amount": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "65.00"
+        },
+        "description": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "Freight Item 3"
+        },
+        "quantity": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "20"
+        },
+        "sku": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "SKU-702"
+        },
+        "unit_price": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "3.25"
+        }
+      },
+      {
+        "amount": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "200.00"
+        },
+        "description": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "Freight Item 4"
+        },
+        "quantity": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "5"
+        },
+        "sku": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "SKU-703"
+        },
+        "unit_price": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "40.00"
+        }
+      },
+      {
+        "amount": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "108.00"
+        },
+        "description": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "Freight Item 5"
+        },
+        "quantity": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "16"
+        },
+        "sku": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "SKU-704"
+        },
+        "unit_price": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "6.75"
+        }
+      },
+      {
+        "amount": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "110.00"
+        },
+        "description": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "Freight Item 6"
+        },
+        "quantity": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "10"
+        },
+        "sku": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "SKU-705"
+        },
+        "unit_price": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "11.00"
+        }
+      },
+      {
+        "amount": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "60.00"
+        },
+        "description": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "Freight Item 7"
+        },
+        "quantity": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "25"
+        },
+        "sku": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "SKU-706"
+        },
+        "unit_price": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "2.40"
+        }
+      },
+      {
+        "amount": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "108.00"
+        },
+        "description": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "Freight Item 8"
+        },
+        "quantity": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "6"
+        },
+        "sku": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "SKU-707"
+        },
+        "unit_price": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "18.00"
+        }
+      },
+      {
+        "amount": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "67.50"
+        },
+        "description": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "Freight Item 9"
+        },
+        "quantity": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "9"
+        },
+        "sku": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "SKU-708"
+        },
+        "unit_price": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "7.50"
+        }
+      },
+      {
+        "amount": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "70.00"
+        },
+        "description": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "Freight Item 10"
+        },
+        "quantity": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "14"
+        },
+        "sku": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "SKU-709"
+        },
+        "unit_price": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "5.00"
+        }
+      },
+      {
+        "amount": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "54.00"
+        },
+        "description": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "Freight Item 11"
+        },
+        "quantity": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "18"
+        },
+        "sku": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "SKU-710"
+        },
+        "unit_price": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "3.00"
+        }
+      },
+      {
+        "amount": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "154.00"
+        },
+        "description": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "Freight Item 12"
+        },
+        "quantity": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "7"
+        },
+        "sku": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "SKU-711"
+        },
+        "unit_price": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "22.00"
+        }
+      },
+      {
+        "amount": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "90.75"
+        },
+        "description": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "Freight Item 13"
+        },
+        "quantity": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "11"
+        },
+        "sku": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "SKU-712"
+        },
+        "unit_price": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "8.25"
+        }
+      },
+      {
+        "amount": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "120.00"
+        },
+        "description": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "Freight Item 14"
+        },
+        "quantity": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "4"
+        },
+        "sku": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "SKU-713"
+        },
+        "unit_price": {
+          "confidenceScore": 99.0,
+          "geometry": null,
+          "value": "30.00"
+        }
+      }
+    ]
+  }
+}

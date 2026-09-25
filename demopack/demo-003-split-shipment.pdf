@@ -1,0 +1,76 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [5 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 1852 >>
+stream
+BT /F2 16 Tf 50.00 740.00 Td (Global Parts Supply Co) Tj ET
+BT /F2 12 Tf 50.00 718.00 Td (INVOICE) Tj ET
+BT /F1 10 Tf 50.00 698.00 Td (Bill To: Meridian Manufacturing) Tj ET
+BT /F1 10 Tf 50.00 683.00 Td (Invoice Number: INV-2003) Tj ET
+BT /F1 10 Tf 50.00 668.00 Td (Invoice Date: 2026-03-11) Tj ET
+BT /F1 10 Tf 50.00 653.00 Td (PO Number: PO-7783) Tj ET
+BT /F1 10 Tf 50.00 638.00 Td (Currency: USD) Tj ET
+BT /F2 9 Tf 50.00 615.50 Td (SKU) Tj ET
+BT /F2 9 Tf 115.00 615.50 Td (Description) Tj ET
+BT /F2 9 Tf 330.00 615.50 Td (Qty) Tj ET
+BT /F2 9 Tf 390.00 615.50 Td (Unit Price) Tj ET
+BT /F2 9 Tf 470.00 615.50 Td (Amount) Tj ET
+0.50 w 50.00 609.50 m 560.00 609.50 l S
+BT /F1 9 Tf 50.00 594.50 Td (SKU-500) Tj ET
+BT /F1 9 Tf 115.00 594.50 Td (Bolt M6x20) Tj ET
+BT /F1 9 Tf 330.00 594.50 Td (100) Tj ET
+BT /F1 9 Tf 390.00 594.50 Td (0.10) Tj ET
+BT /F1 9 Tf 470.00 594.50 Td (10.00) Tj ET
+BT /F1 9 Tf 50.00 579.50 Td (SKU-501) Tj ET
+BT /F1 9 Tf 115.00 579.50 Td (Nut M6) Tj ET
+BT /F1 9 Tf 330.00 579.50 Td (100) Tj ET
+BT /F1 9 Tf 390.00 579.50 Td (0.05) Tj ET
+BT /F1 9 Tf 470.00 579.50 Td (5.00) Tj ET
+BT /F1 9 Tf 50.00 564.50 Td (SKU-500) Tj ET
+BT /F1 9 Tf 115.00 564.50 Td (Bolt M6x20 \(back-order\)) Tj ET
+BT /F1 9 Tf 330.00 564.50 Td (50) Tj ET
+BT /F1 9 Tf 390.00 564.50 Td (0.10) Tj ET
+BT /F1 9 Tf 470.00 564.50 Td (5.00) Tj ET
+BT /F1 9 Tf 50.00 549.50 Td (SKU-502) Tj ET
+BT /F1 9 Tf 115.00 549.50 Td (Washer M6) Tj ET
+BT /F1 9 Tf 330.00 549.50 Td (100) Tj ET
+BT /F1 9 Tf 390.00 549.50 Td (0.02) Tj ET
+BT /F1 9 Tf 470.00 549.50 Td (2.00) Tj ET
+0.50 w 380.00 528.50 m 560.00 528.50 l S
+BT /F1 10 Tf 390.00 513.50 Td (Subtotal:) Tj ET
+BT /F1 10 Tf 470.00 513.50 Td (22.00) Tj ET
+BT /F1 10 Tf 390.00 498.50 Td (Tax:) Tj ET
+BT /F1 10 Tf 470.00 498.50 Td (1.76) Tj ET
+BT /F2 10 Tf 390.00 483.50 Td (Total:) Tj ET
+BT /F2 10 Tf 470.00 483.50 Td (23.76) Tj ET
+endstream
+endobj
+xref
+0 7
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000191 00000 n 
+0000000266 00000 n 
+0000000402 00000 n 
+trailer
+<< /Size 7 /Root 1 0 R >>
+startxref
+2306
+%%EOF
