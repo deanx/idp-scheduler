@@ -13,7 +13,12 @@ from typing import cast, get_args
 
 import pytest
 
-from idp_regression.classifier import MalformedActualError, classify, overall_gate
+from idp_regression.classifier import (
+    MalformedActualError,
+    MalformedGoldenError,
+    classify,
+    overall_gate,
+)
 from idp_regression.classifier.gate import _VALID_VERDICTS
 from idp_regression.classifier.types import (
     FieldValue,
@@ -233,3 +238,111 @@ def test_all_legitimate_row_verdicts_inside_critical_detail_gate_correctly(
     verdicts: VerdictMap = {"line_items": table}
     expected = "FAIL" if verdict in ("missing", "wrong_value") else "PASS"
     assert overall_gate(verdicts) == expected
+
+# --- DEBT-80: `format_critical`, the per-field opt-in on wrong_format ------
+#
+# BR3's default is unchanged and deliberate: a value that is semantically
+# right but formatted differently is not a regression, and `wrong_format`
+# stays informational. `format_critical: true` is the declared exception,
+# for a field whose FORMAT is itself the contract.
+#
+# Why it exists, recorded because the default looked obviously right until a
+# live run proved otherwise: on 2026-09-24 the TEST-PLAN Phase 7 regression
+# run (action 1.1.0, the `invoice_date` prompt stripped of its ISO-8601
+# instruction) changed exactly one cell across 45 --
+# `inv-002-format-variance.pdf`'s `invoice_date`, `2026-01-22` ->
+# `22/01/2026` -- and the tool returned `exit_code=0`. `_format_date` parses
+# both to the same calendar date, so the verdict was `wrong_format`, and BR3
+# does not fail the gate on it even when the field is `critical`. A real
+# prompt regression, on the exact field the fixture was built to regress,
+# produced a GREEN build. That is the fail-open class CLAUDE.md's ## Rigor
+# section names as the worst this system can produce.
+_FMT_GOLDEN: Golden = {
+    "fields": {
+        "invoice_date": {
+            "value": "2026-01-22",
+            "type": "date",
+            "critical": True,
+            "format_critical": True,
+        },
+    },
+}
+
+
+def test_wrong_format_fails_the_gate_when_the_field_is_format_critical() -> None:
+    # The live 1.1.0 regression, reproduced as a unit test.
+    v = classify(_FMT_GOLDEN, _actual({"invoice_date": {"value": "22/01/2026"}}))
+    assert v["invoice_date"]["verdict"] == "wrong_format"
+    assert v["invoice_date"]["format_critical"] is True
+    assert overall_gate(v) == "FAIL"
+
+
+def test_wrong_format_still_passes_when_format_critical_is_absent() -> None:
+    # BR3's default is untouched: the SAME values, on a field that does not
+    # opt in, still PASS. Guards against the fix being applied globally.
+    golden: Golden = {
+        "fields": {"invoice_date": {"value": "2026-01-22", "type": "date", "critical": True}}
+    }
+    v = classify(golden, _actual({"invoice_date": {"value": "22/01/2026"}}))
+    assert v["invoice_date"]["verdict"] == "wrong_format"
+    assert v["invoice_date"]["format_critical"] is False
+    assert overall_gate(v) == "PASS"
+
+
+def test_format_critical_does_not_fail_the_gate_on_a_match() -> None:
+    # The opt-in must gate on the VERDICT, not merely on the flag being set.
+    v = classify(_FMT_GOLDEN, _actual({"invoice_date": {"value": "2026-01-22"}}))
+    assert v["invoice_date"]["verdict"] == "match"
+    assert overall_gate(v) == "PASS"
+
+
+def test_format_critical_is_independent_of_critical() -> None:
+    # A format-critical field that is NOT `critical` still fails on
+    # wrong_format: the two flags gate different verdicts and neither
+    # implies the other.
+    golden: Golden = {
+        "fields": {
+            "invoice_date": {
+                "value": "2026-01-22",
+                "type": "date",
+                "critical": False,
+                "format_critical": True,
+            }
+        }
+    }
+    v = classify(golden, _actual({"invoice_date": {"value": "22/01/2026"}}))
+    assert overall_gate(v) == "FAIL"
+
+
+def test_overall_gate_tolerates_a_verdict_map_without_format_critical() -> None:
+    # overall_gate is public API over a caller-supplied VerdictMap. A map
+    # built before this key existed (or by an external caller) must keep the
+    # old behaviour, not raise KeyError -- hence `.get`, not `[...]`.
+    legacy: VerdictMap = {
+        "invoice_date": cast(
+            Verdict,
+            {
+                "verdict": "wrong_format",
+                "expected": "2026-01-22",
+                "actual": "22/01/2026",
+                "confidence": 0.99,
+                "critical": True,
+                "type": "date",
+            },
+        )
+    }
+    assert overall_gate(legacy) == "PASS"
+
+
+def test_non_bool_format_critical_is_a_malformed_golden() -> None:
+    golden: Golden = {
+        "fields": {
+            "invoice_date": {
+                "value": "2026-01-22",
+                "type": "date",
+                "format_critical": cast(bool, "yes"),
+            }
+        }
+    }
+    with pytest.raises(MalformedGoldenError, match="format_critical must be bool"):
+        classify(golden, _actual({"invoice_date": {"value": "2026-01-22"}}))

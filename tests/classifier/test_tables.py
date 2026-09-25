@@ -180,33 +180,62 @@ def test_table_verdict_carries_critical_and_type_none() -> None:
     assert table["type"] is None
 
 
-# --- DEBT-09: duplicate `match_key` behavior (decided, pinned) ------------
+# --- DEBT-09: duplicate `match_key` behavior (decided 2026-09-24, pinned) ---
 #
-# Decision: a duplicate normalized `match_key` in the *actual* is a
-# LEGITIMATE COLLAPSE, not a reportable defect. The classifier cannot tell
-# "two invoice lines that genuinely share the same SKU" (ordinary business
-# data under DATA-MODEL-01's `match_key: "sku"` golden) apart from "the
-# adapter's pages[]-vs-top-level union seam doubled a row" (ADR-0002 R-2) --
-# both present as two actual rows with the same match_key and no other
-# signal. Raising `MalformedActualError` would false-fail ordinary
-# multi-line-same-SKU invoices, which is worse than the alternative for the
-# common case; there is no principled `duplicate_match_key` verdict to add
-# without a `match_key`-uniqueness contract that DATA-MODEL-01 does not make
-# today (adding one would repeat DEBT-05's "not a code-only fix" lesson).
-# So last-write-wins stays, explicit and pinned here rather than accidental,
-# and named from the classifier side in ADR-0002's R-2 bullet so the
-# coupling to the adapter's documented-load-bearing masking is discoverable
-# from both ends of the seam.
-def test_duplicate_actual_match_key_collapses_last_write_wins_not_raise() -> None:
-    # Two actual rows both normalize to "Widget A". No MalformedActualError,
-    # no synthetic new_line for the dropped duplicate, and the surviving
-    # row is the LAST one in list order (dict last-write-wins on a_index).
+# Decision: a duplicate normalized `match_key` in the *actual* is ORDINARY
+# BUSINESS DATA -- one SKU legitimately appears on two lines (a split
+# shipment). Every same-keyed actual row is kept as a candidate; a golden
+# row consumes exactly one; leftovers are `new_line` (BR3, informational).
+#
+# The previous decision (last-write-wins: keep only the final same-keyed
+# row, drop the rest silently) was reversed by live evidence. On
+# `inv-003-table-heavy.pdf` -- a fixture built to carry SKU-500 twice --
+# the collapse manufactured three `wrong_value`s (golden line 1 compared
+# against line 2's values) plus one `missing` (golden line 2 found an
+# emptied index), failing the `baseline-1.0.0` gate on a document the
+# adapter had extracted perfectly. The old rationale held that raising
+# would false-fail ordinary multi-line-same-SKU invoices; that was right,
+# but collapsing false-fails them too, just less visibly. Keeping every row
+# and pairing by content false-fails neither.
+#
+# Within a duplicate-key group the pairing is by content affinity (most
+# matching non-key columns), NOT by position -- see
+# test_duplicate_match_key_rows_pair_by_content_not_position -- so BR8's
+# "row reordering is not a diff" stays true inside the group as well as
+# across keys.
+#
+# ADR-0002 R-2's "tables" bullet named this collapse as load-bearing
+# masking for the pages[]-vs-top-level row doubling. That justification was
+# retired by ADR-0002's own Correction 2026-09-24 (b): live 1-page and
+# 3-page captures carry no `pages` key, so the doubling seam is
+# unreachable. Were it ever reachable, a doubled row now shows up as
+# `new_line`, which never fails the gate.
+_DUP_GOLDEN: Golden = {
+    "fields": {"total": {"value": "1250.00", "type": "number", "critical": True}},
+    "tables": {
+        "line_items": {
+            "match_key": "description",
+            "critical": True,
+            "rows": [
+                {"description": "Widget A", "qty": "10", "unit_price": "50.00"},
+                {"description": "Widget A", "qty": "5", "unit_price": "20.00"},
+            ],
+        }
+    },
+}
+
+
+def test_duplicate_actual_match_key_keeps_every_row_instead_of_collapsing() -> None:
+    # One golden Widget A line, two actual Widget A rows. The golden row
+    # pairs with the row that actually matches it; the surplus row is
+    # reported as new_line rather than silently overwriting the other.
+    # Under the old last-write-wins this asserted "999.00" and no new_line.
     actual = _actual(
         {"invoice_number": {"value": "INV-1"}, "total": {"value": "1250.00"}},
         {
             "line_items": [
-                _row("Widget A", "10", "50.00"),  # first duplicate: correct price
-                _row("Widget A", "10", "999.00"),  # second duplicate: wins (last)
+                _row("Widget A", "10", "50.00"),  # the golden line
+                _row("Widget A", "10", "999.00"),  # a second, surplus line
                 _row("Widget B", "2", "20.00"),
             ]
         },
@@ -214,12 +243,85 @@ def test_duplicate_actual_match_key_collapses_last_write_wins_not_raise() -> Non
     v = classify(GOLDEN, actual)
     rows = _table(v, "line_items")["rows"]
     up = [r for r in rows if r["column"] == "unit_price" and r["match_key"] == "Widget A"]
-    # Exactly one unit_price sub-verdict for Widget A -- the first duplicate
-    # was silently dropped, not surfaced as a second row or a new_line.
     assert len(up) == 1
-    assert up[0]["actual"] == "999.00"
-    assert up[0]["verdict"] == "wrong_value"
-    assert not any(r["verdict"] == "new_line" for r in rows)
+    assert up[0]["actual"] == "50.00"
+    assert up[0]["verdict"] == "match"
+    # The unconsumed duplicate is surfaced, not dropped.
+    new_lines = [r for r in rows if r["verdict"] == "new_line"]
+    assert len(new_lines) == 1
+    assert new_lines[0]["match_key"] == "Widget A"
+    assert overall_gate(v) == "PASS"  # new_line never fails the gate (BR3)
+
+
+def test_duplicate_match_key_on_both_sides_pairs_each_line_independently() -> None:
+    # REGRESSION PIN for the `baseline-1.0.0` false FAIL on
+    # inv-003-table-heavy.pdf. Golden declares the same key twice (a split
+    # shipment) and the actual carries both lines, correctly extracted.
+    # Every column must match: no `missing`, no `wrong_value`, gate PASS.
+    actual = _actual(
+        {"total": {"value": "1250.00"}},
+        {"line_items": [_row("Widget A", "10", "50.00"), _row("Widget A", "5", "20.00")]},
+    )
+    v = classify(_DUP_GOLDEN, actual)
+    rows = _table(v, "line_items")["rows"]
+    assert {r["verdict"] for r in rows} == {"match"}
+    assert overall_gate(v) == "PASS"
+
+
+def test_duplicate_match_key_rows_pair_by_content_not_position() -> None:
+    # The same two lines, arriving in the opposite order. BR8 says row
+    # reordering is not a diff; that must hold inside a duplicate-key group
+    # too. Pairing the group positionally would report four wrong_values
+    # here and fail the gate on a correct extraction.
+    actual = _actual(
+        {"total": {"value": "1250.00"}},
+        {"line_items": [_row("Widget A", "5", "20.00"), _row("Widget A", "10", "50.00")]},
+    )
+    v = classify(_DUP_GOLDEN, actual)
+    rows = _table(v, "line_items")["rows"]
+    assert {r["verdict"] for r in rows} == {"match"}
+    assert overall_gate(v) == "PASS"
+
+
+def test_duplicate_match_key_still_fails_on_a_genuine_regression() -> None:
+    # Fail-CLOSED guard on the pairing change: content-affinity pairing must
+    # not become a search for the reading that makes the run look green. One
+    # of the two same-keyed lines has a wrong unit_price; that must still be
+    # exactly one wrong_value and still fail the critical block.
+    actual = _actual(
+        {"total": {"value": "1250.00"}},
+        {"line_items": [_row("Widget A", "10", "50.00"), _row("Widget A", "5", "777.00")]},
+    )
+    v = classify(_DUP_GOLDEN, actual)
+    rows = _table(v, "line_items")["rows"]
+    wrong = [r for r in rows if r["verdict"] == "wrong_value"]
+    assert len(wrong) == 1
+    assert wrong[0]["column"] == "unit_price"
+    assert wrong[0]["expected"] == "20.00"
+    assert wrong[0]["actual"] == "777.00"
+    assert not any(r["verdict"] == "missing" for r in rows)
+    assert overall_gate(v) == "FAIL"
+
+
+def test_triplicate_actual_match_key_consumes_one_per_golden_row() -> None:
+    # Three same-keyed actual rows against two golden lines: two pair, the
+    # third is a single new_line. Guards the candidate list against both
+    # over-consumption (a spurious missing) and under-reporting.
+    actual = _actual(
+        {"total": {"value": "1250.00"}},
+        {
+            "line_items": [
+                _row("Widget A", "10", "50.00"),
+                _row("Widget A", "5", "20.00"),
+                _row("Widget A", "99", "99.00"),
+            ]
+        },
+    )
+    v = classify(_DUP_GOLDEN, actual)
+    rows = _table(v, "line_items")["rows"]
+    assert [r["verdict"] for r in rows].count("new_line") == 1
+    assert not any(r["verdict"] in ("missing", "wrong_value") for r in rows)
+    assert overall_gate(v) == "PASS"
 
 
 def test_duplicate_golden_match_key_second_row_is_missing() -> None:

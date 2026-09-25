@@ -42,7 +42,15 @@ _DATE_FORMATS = (
 )
 
 
-def _is_empty(value: object) -> bool:
+def is_empty(value: object) -> bool:
+    """A value that was not read: ``None``, or blank after stripping.
+
+    The single definition. `gate.py` and every scorer use this one --
+    there were three identical private copies before 2026-09-25, and a
+    rule about what "nothing was read" means is exactly the kind of thing
+    that must not be able to differ between the fan-out and the scorer
+    deciding on it.
+    """
     return value is None or (isinstance(value, str) and value.strip() == "")
 
 

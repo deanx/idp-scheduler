@@ -31,7 +31,15 @@ def test_verdict_literal_is_exactly_the_six_glossary_verdicts() -> None:
 def test_verdict_typeddict_has_the_contract_keys() -> None:
     # ADR-0003 / DATA-MODEL-01 §3 / CT-02 shape.
     hints = get_type_hints(Verdict)
-    assert set(hints) == {"verdict", "expected", "actual", "confidence", "critical", "type"}
+    assert set(hints) == {
+        "verdict",
+        "expected",
+        "actual",
+        "confidence",
+        "critical",
+        "format_critical",  # DEBT-80: the per-field wrong_format gate opt-in
+        "type",
+    }
 
 
 def test_verdict_value_field_is_the_six_literal_union() -> None:

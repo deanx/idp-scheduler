@@ -10,7 +10,14 @@ from __future__ import annotations
 
 from typing import Literal, cast, get_args
 
-from idp_regression.classifier.canonical import compare_value, match_key_form
+from idp_regression.classifier.canonical import compare_value, is_empty, match_key_form
+from idp_regression.classifier.scorers import pinned_file_scorer, regression_scorer
+from idp_regression.classifier.scoring import (
+    ClassifyFn,
+    ScoreContext,
+    Scorer,
+    ScoreResult,
+)
 from idp_regression.classifier.types import (
     FIELD_TYPES,
     FieldValue,
@@ -35,8 +42,12 @@ _VALID_VERDICTS: frozenset[str] = frozenset(get_args(VerdictLiteral))
 _PROMPT_TYPE = "text"
 
 
-def _is_empty(value: object) -> bool:
-    return value is None or (isinstance(value, str) and value.strip() == "")
+def _as_result(returned: VerdictLiteral | ScoreResult) -> ScoreResult:
+    """Normalise either scorer return shape. Harness-internal: a scorer
+    author never calls this, which is why it is not in `scoring.py`."""
+    if isinstance(returned, ScoreResult):
+        return returned
+    return ScoreResult(verdict=returned)
 
 
 def _validate_golden(golden: Golden) -> None:
@@ -59,6 +70,10 @@ def _validate_golden(golden: Golden) -> None:
             raise MalformedGoldenError(f"golden field {name!r} is missing 'value'")
         if not isinstance(spec.get("critical", False), bool):
             raise MalformedGoldenError(f"golden field {name!r} critical must be bool")
+        if not isinstance(spec.get("format_critical", False), bool):
+            raise MalformedGoldenError(
+                f"golden field {name!r} format_critical must be bool"
+            )
 
     tables = golden.get("tables", {})
     if not isinstance(tables, dict):
@@ -173,38 +188,51 @@ def _validate_actual(actual: NormalizedOutput) -> None:
 
 
 def _classify_field(
-    name: str,  # noqa: ARG001 - kept for call-site symmetry/future error context
+    name: str,
     gvalue: str | None,
     ftype: str,
     critical: bool,
     acell: FieldValue | None,
+    format_critical: bool = False,
+    scorer: Scorer = regression_scorer,
+    kind: Literal["field", "prompt", "table_column"] = "field",
+    source: str | None = None,
 ) -> Verdict:
-    if acell is None:
-        return Verdict(
-            verdict="missing",
-            expected=gvalue,
-            actual=None,
-            confidence=None,
-            critical=critical,
-            type=ftype,
+    """Build one leaf `Verdict`. The verdict WORD is the `scorer`'s call
+    and nothing else here second-guesses it; this function only assembles
+    the context the scorer reads and the `Verdict` the gate reads.
+
+    `actual` on the returned Verdict is normalised to `None` when nothing
+    was read, whatever the scorer decided the verdict is -- the verdict
+    map is also what `show_run`/the run artifact display, and `""` and
+    `None` should not both appear there for "nothing".
+    """
+    avalue = acell.get("value") if acell is not None else None
+    confidence = acell.get("confidence") if acell is not None else None
+    result = _as_result(
+        scorer(
+            ScoreContext(
+                name=name,
+                kind=kind,
+                field_type=ftype,
+                expected=gvalue,
+                actual=avalue,
+                confidence=confidence,
+                critical=critical,
+                format_critical=format_critical,
+                source=source,
+            )
         )
-    avalue = acell.get("value")
-    if _is_empty(avalue):
-        return Verdict(
-            verdict="missing",
-            expected=gvalue,
-            actual=None,
-            confidence=acell.get("confidence"),
-            critical=critical,
-            type=ftype,
-        )
-    verdict = compare_value(ftype, gvalue or "", cast(str, avalue))
+    )
     return Verdict(
-        verdict=verdict,
+        verdict=result.verdict,
         expected=gvalue,
-        actual=cast(str, avalue),
-        confidence=acell.get("confidence"),
-        critical=critical,
+        actual=None if is_empty(avalue) else cast(str, avalue),
+        confidence=confidence,
+        # OR, never replace: a scorer may make a field mandatory, never
+        # make a mandatory field optional (see `scorers.ScoreResult`).
+        critical=critical or result.critical,
+        format_critical=format_critical or result.format_critical,
         type=ftype,
     )
 
@@ -214,6 +242,7 @@ def _classify_prompt(
     ganswer: str | None,
     critical: bool,
     acell: PromptValue | None,
+    scorer: Scorer = regression_scorer,
 ) -> Verdict:
     field_value: FieldValue | None = None
     if acell is not None:
@@ -221,7 +250,19 @@ def _classify_prompt(
             value=acell.get("answer"),
             confidence=acell.get("confidence"),
         )
-    return _classify_field(name, ganswer, _PROMPT_TYPE, critical, field_value)
+    return _classify_field(
+        name,
+        ganswer,
+        _PROMPT_TYPE,
+        critical,
+        field_value,
+        scorer=scorer,
+        kind="prompt",
+        # IDP's own `source` for a prompt answer: carried to the scorer
+        # (a scorer may want it), never to the Verdict, which stays the
+        # CT-02 shape.
+        source=acell.get("source") if acell is not None else None,
+    )
 
 
 # DATA-MODEL-01 §1 carries no per-column type for table rows; columns are
@@ -229,35 +270,103 @@ def _classify_prompt(
 _TABLE_COLUMN_TYPE = "text"
 
 
+def _row_affinity(
+    grow: dict[str, str],
+    arow: dict[str, FieldValue],
+    key_col: str,
+) -> int:
+    """Count the non-key columns of ``grow`` that ``arow`` matches exactly.
+
+    Used only to choose between several actual rows sharing one normalized
+    ``match_key`` (DEBT-09). Higher is a better pairing.
+    """
+    score = 0
+    for col, gval in grow.items():
+        if col == key_col:
+            continue
+        acell = arow.get(col)
+        if acell is None or is_empty(acell.get("value")):
+            continue
+        avalue = cast(str, acell.get("value"))
+        if compare_value(_TABLE_COLUMN_TYPE, gval or "", avalue) == "match":
+            score += 1
+    return score
+
+
+def _take_candidate(
+    a_index: dict[str, list[dict[str, FieldValue]]],
+    grow: dict[str, str],
+    key_col: str,
+    gmk_str: str | None,
+) -> dict[str, FieldValue] | None:
+    """Consume one actual row for ``grow``'s match_key, or return ``None``.
+
+    With a single candidate (the overwhelmingly common case, and the only
+    one the N2 perf benchmark exercises) this is a plain pop -- no column
+    comparison is done. With several -- a match_key repeated across lines,
+    e.g. a split shipment (DEBT-09) -- the candidate matching the most of
+    this golden row's non-key columns wins, earliest-in-document-order
+    breaking a tie. Choosing by content rather than by position keeps BR8's
+    "row reordering is not a diff" true *within* a duplicate-key group too;
+    pairing positionally there would report two `wrong_value`s for two rows
+    that merely arrived swapped.
+    """
+    if gmk_str is None:
+        return None
+    candidates = a_index.get(match_key_form(gmk_str))
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates.pop()
+    best = max(
+        range(len(candidates)),
+        key=lambda i: (_row_affinity(grow, candidates[i], key_col), -i),
+    )
+    return candidates.pop(best)
+
+
 def _classify_table(
     gtable: GoldenTable,
     arows: list[dict[str, FieldValue]],
+    scorer: Scorer = regression_scorer,
 ) -> TableVerdict:
     key_col = gtable["match_key"]
     critical = gtable.get("critical", False)
+    escalated = False
 
     # Index actual rows by normalized match_key (BR8: position-independent).
-    # DEBT-09 (decided): a duplicate normalized match_key here is a
-    # legitimate collapse, not a reportable defect -- last-write-wins,
-    # deliberately, pinned by tests/classifier/test_tables.py::
-    # test_duplicate_actual_match_key_collapses_last_write_wins_not_raise.
-    # This is also what masks the adapter's pages[]-vs-top-level table-row
-    # doubling (ADR-0002 R-2, "tables" bullet) -- that masking is load-
-    # bearing by ADR-0002's own decision, and this is the classifier-side
-    # half of that coupling.
-    a_index: dict[str, dict[str, FieldValue]] = {}
+    # DEBT-09 (decided 2026-09-24): a duplicate normalized match_key is
+    # ORDINARY INVOICE DATA -- one SKU can legitimately appear on two lines
+    # (a split shipment). Every same-keyed actual row is therefore KEPT, as
+    # a candidate list in document order, and a golden row consumes exactly
+    # one candidate. The previous behaviour (`a_index[key] = row`, last-
+    # write-wins) silently dropped all but the last, which manufactured
+    # both a spurious `wrong_value` (golden row 1 paired against the
+    # surviving row's values) and a spurious `missing` (golden row 2 found
+    # an empty index) on a document the adapter had extracted correctly --
+    # observed live on `inv-003-table-heavy.pdf`, run `baseline-1.0.0`.
+    #
+    # This no longer masks the adapter's pages[]-vs-top-level table-row
+    # doubling (ADR-0002 R-2, "tables" bullet). That is deliberate and
+    # safe: ADR-0002's Correction 2026-09-24 (b) established from two live
+    # captures (1-page and 3-page) that the response carries no `pages`
+    # key at all, so the seam that produced the doubling is unreachable --
+    # and were it ever reachable, a doubled row now surfaces as `new_line`,
+    # which is informational and never fails the gate (BR3), rather than
+    # vanishing silently.
+    a_index: dict[str, list[dict[str, FieldValue]]] = {}
     for row in arows:
         mk_cell = row.get(key_col)
         mk_value = mk_cell.get("value") if mk_cell else None
-        if _is_empty(mk_value):
+        if is_empty(mk_value):
             continue
-        a_index[match_key_form(cast(str, mk_value))] = row
+        a_index.setdefault(match_key_form(cast(str, mk_value)), []).append(row)
 
     rows: list[RowVerdict] = []
     for grow in gtable["rows"]:
         gmk = grow.get(key_col)
         gmk_str = gmk if isinstance(gmk, str) else None
-        arow = a_index.pop(match_key_form(gmk_str), None) if gmk_str else None
+        arow = _take_candidate(a_index, grow, key_col, gmk_str)
         if arow is None:
             rows.append(
                 RowVerdict(
@@ -274,47 +383,62 @@ def _classify_table(
             if col == key_col:
                 continue
             acell = arow.get(col)
-            if acell is None or _is_empty(acell.get("value")):
-                rows.append(
-                    RowVerdict(
-                        match_key=gmk_str,
-                        column=col,
-                        verdict="missing",
+            avalue = acell.get("value") if acell is not None else None
+            # The same scorer the fields use, so a classifier's rule holds
+            # for a line-item cell as well as a top-level field -- one
+            # comparison policy per run, not two.
+            cell_result = _as_result(
+                scorer(
+                    ScoreContext(
+                        name=col,
+                        kind="table_column",
+                        field_type=_TABLE_COLUMN_TYPE,
                         expected=gval,
-                        actual=None,
+                        actual=avalue,
                         confidence=acell.get("confidence") if acell else None,
+                        critical=critical,
+                        match_key=gmk_str,
                     )
                 )
-                continue
-            avalue = acell.get("value")
-            verdict = compare_value(_TABLE_COLUMN_TYPE, gval or "", cast(str, avalue))
+            )
+            verdict = cell_result.verdict
+            # A `RowVerdict` carries no `critical` of its own -- the gate
+            # reads the BLOCK's. So a scorer escalating one cell escalates
+            # the block it is in, which is the only place that decision
+            # can be expressed.
+            escalated = escalated or cell_result.critical
             rows.append(
                 RowVerdict(
                     match_key=gmk_str,
                     column=col,
                     verdict=verdict,
                     expected=gval,
-                    actual=cast(str, avalue),
-                    confidence=acell.get("confidence"),
+                    actual=None if is_empty(avalue) else cast(str, avalue),
+                    confidence=acell.get("confidence") if acell else None,
                 )
             )
 
     # Leftover actual rows (no golden counterpart) -> new_line (BR3, informational).
-    for row in a_index.values():
-        mk_cell = row.get(key_col)
-        mk_value = mk_cell.get("value") if mk_cell else None
-        rows.append(
-            RowVerdict(
-                match_key=mk_value,
-                column=None,
-                verdict="new_line",
-                expected=None,
-                actual=None,
-                confidence=mk_cell.get("confidence") if mk_cell else None,
+    # Includes an unconsumed same-keyed duplicate (DEBT-09): the golden
+    # declares one line for that key, the actual carried two.
+    for candidates in a_index.values():
+        for row in candidates:
+            mk_cell = row.get(key_col)
+            mk_value = mk_cell.get("value") if mk_cell else None
+            rows.append(
+                RowVerdict(
+                    match_key=mk_value,
+                    column=None,
+                    verdict="new_line",
+                    expected=None,
+                    actual=None,
+                    confidence=mk_cell.get("confidence") if mk_cell else None,
+                )
             )
-        )
 
-    return TableVerdict(verdict="detail", critical=critical, type=None, rows=rows)
+    return TableVerdict(
+        verdict="detail", critical=critical or escalated, type=None, rows=rows
+    )
 
 
 def classify(golden: Golden, actual: NormalizedOutput) -> VerdictMap:
@@ -323,7 +447,45 @@ def classify(golden: Golden, actual: NormalizedOutput) -> VerdictMap:
     Returns a verdict map keyed by the union of golden field names, actual
     field names, table names, and prompt keys (ADR-0003 API contract). Pure:
     no I/O. Raises a typed :class:`ClassifierError` on malformed input (NFR N22).
+
+    The `regression` classifier (``registry.py``): the default, and the
+    one the watched-Action path has always used. Unchanged.
     """
+    return _classify(golden, actual, scorer=regression_scorer)
+
+
+def classify_pinned_file(golden: Golden, actual: NormalizedOutput) -> VerdictMap:
+    """The `pinned-file` classifier: identical to :func:`classify` except
+    that an empty expected value matched by an empty actual is a
+    ``match`` rather than ``missing`` (see ``_classify_field``).
+
+    Same two-argument contract, same six verdicts, same score-name
+    vocabulary (INV-03) -- it differs in one rule, which is why it shares
+    the comparison engine rather than forking it. A golden pinned from a
+    trusted Action version can therefore mark EVERY field critical,
+    including the ones that version read as empty: agreement on "nothing
+    there" passes, and invented content still fails.
+    """
+    return _classify(golden, actual, scorer=pinned_file_scorer)
+
+
+def make_classifier(scorer: Scorer) -> ClassifyFn:
+    """Turn a scorer into a classifier -- a `(golden, actual) ->
+    VerdictMap` function with the pinned CT-02 signature.
+
+    This is the whole cost of adding a classifier: write a scorer (see
+    `scorers.py`), wrap it here, add one row to `registry.CLASSIFIERS`.
+    The fan-out over fields/prompts/table rows, the validation and the
+    gate are shared and are not rewritten per classifier.
+    """
+
+    def classify_with(golden: Golden, actual: NormalizedOutput) -> VerdictMap:
+        return _classify(golden, actual, scorer=scorer)
+
+    return classify_with
+
+
+def _classify(golden: Golden, actual: NormalizedOutput, *, scorer: Scorer) -> VerdictMap:
     _validate_golden(golden)
     _validate_actual(actual)
 
@@ -338,6 +500,8 @@ def classify(golden: Golden, actual: NormalizedOutput) -> VerdictMap:
             spec["type"],
             spec.get("critical", False),
             afields.get(name),
+            spec.get("format_critical", False),
+            scorer,
         )
 
     for name, cell in afields.items():
@@ -348,6 +512,7 @@ def classify(golden: Golden, actual: NormalizedOutput) -> VerdictMap:
                 actual=cell.get("value"),
                 confidence=cell.get("confidence"),
                 critical=False,
+                format_critical=False,
                 type=None,
             )
 
@@ -360,6 +525,7 @@ def classify(golden: Golden, actual: NormalizedOutput) -> VerdictMap:
             pspec.get("answer"),
             pspec.get("critical", False),
             aprompts.get(key),
+            scorer,
         )
     for key, pcell in aprompts.items():
         if key not in gprompts:
@@ -369,6 +535,7 @@ def classify(golden: Golden, actual: NormalizedOutput) -> VerdictMap:
                 actual=pcell.get("answer"),
                 confidence=pcell.get("confidence"),
                 critical=False,
+                format_critical=False,
                 type=None,
             )
 
@@ -376,7 +543,7 @@ def classify(golden: Golden, actual: NormalizedOutput) -> VerdictMap:
     gtables = golden.get("tables", {})
     atables: dict[str, list[dict[str, FieldValue]]] = actual.get("tables", {})
     for tname, gtable in gtables.items():
-        verdicts[tname] = _classify_table(gtable, atables.get(tname, []))
+        verdicts[tname] = _classify_table(gtable, atables.get(tname, []), scorer)
 
     return verdicts
 
@@ -385,8 +552,18 @@ def overall_gate(verdicts: VerdictMap) -> Literal["PASS", "FAIL"]:
     """Aggregate a verdict map to ``"PASS"`` or ``"FAIL"`` (ADR-0003).
 
     ``FAIL`` iff a ``missing`` or ``wrong_value`` verdict is ``critical: True``
-    (BR2). ``wrong_format``, ``new_field``, ``new_line``, and any non-critical
-    difference do not fail the gate (BR3).
+    (BR2), **or** a ``wrong_format`` verdict is ``format_critical: True``
+    (DEBT-80). ``new_field``, ``new_line``, and any non-critical difference do
+    not fail the gate (BR3).
+
+    ``wrong_format`` is informational by default and that remains BR3's rule:
+    a value that is semantically right but formatted differently is not a
+    regression. ``format_critical`` is the per-field opt-out, for a field
+    whose *format* is itself the contract. It was added after a live run
+    (2026-09-24) showed the tool returning exit 0 for a real prompt
+    regression -- an ``invoice_date`` prompt that lost its ISO-8601
+    instruction and began emitting ``22/01/2026``, the same calendar date in
+    a different format, on a ``critical`` field.
 
     Raises :class:`MalformedActualError` (FO-5) on a verdict string outside
     ``VerdictLiteral`` — at the top level or inside a table's row detail —
@@ -411,5 +588,11 @@ def overall_gate(verdicts: VerdictMap) -> Literal["PASS", "FAIL"]:
         elif entry["verdict"] not in _VALID_VERDICTS:
             raise MalformedActualError(f"entry {key!r} has an unrecognised verdict")
         elif entry["verdict"] in ("missing", "wrong_value") and entry["critical"]:
+            return "FAIL"
+        elif entry["verdict"] == "wrong_format" and entry.get("format_critical", False):
+            # DEBT-80: the declared exception to BR3. `.get` with a default,
+            # not `[...]`, because overall_gate is public API over a
+            # caller-supplied VerdictMap -- a map built before this key
+            # existed must keep the old behaviour, not raise a KeyError.
             return "FAIL"
     return "PASS"

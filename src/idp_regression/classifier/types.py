@@ -34,6 +34,13 @@ class GoldenField(TypedDict):
     value: str | None
     type: FieldType
     critical: NotRequired[bool]
+    #: Opt-in: when true, a ``wrong_format`` verdict on this field fails the
+    #: gate exactly as ``wrong_value`` does (DEBT-80, decided 2026-09-24).
+    #: Defaults to false, so BR3's "format is informational" stays the rule
+    #: and this is the declared exception -- for a field whose *format* is
+    #: part of the contract, e.g. a date the extraction prompt is required
+    #: to emit as ISO-8601 because a downstream parser is strict.
+    format_critical: NotRequired[bool]
 
 
 class GoldenTable(TypedDict):
@@ -92,6 +99,11 @@ class Verdict(TypedDict):
     actual: str | None
     confidence: float | None
     critical: bool
+    #: Mirrors the golden field's ``format_critical`` opt-in so
+    #: ``overall_gate`` -- which sees only this map, never the golden --
+    #: can honour it (DEBT-80). Always false for a ``new_field``, for a
+    #: prompt, and for a table row: the opt-in is fields-only for now.
+    format_critical: bool
     type: str | None
 
 
