@@ -17,6 +17,13 @@ dependencies = [
     "python-dotenv>=1.2.3",
 ]
 
+[project.optional-dependencies]
+ui = [
+    "fastapi>=0.120",
+    "python-multipart>=0.0.20",
+    "uvicorn>=0.40",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
