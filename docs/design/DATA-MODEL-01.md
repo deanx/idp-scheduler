@@ -11,7 +11,7 @@ Lives on the evaluation platform as the `expected_output` of a dataset item. Sto
   "document_id": "invoice-007.pdf",
   "fields": {
     "invoice_number": { "value": "INV-1",   "type": "id",     "critical": true },
-    "invoice_date":   { "value": "2024-03-15", "type": "date",   "critical": true },
+    "invoice_date":   { "value": "2024-03-15", "type": "date",   "critical": true, "format_critical": true },
     "total":          { "value": "1250.00", "type": "number", "critical": true }
   },
   "tables": {
@@ -34,6 +34,7 @@ Lives on the evaluation platform as the `expected_output` of a dataset item. Sto
 - `fields.<name>.value` — the expected value (string; canonicalisation is the classifier's job).
 - `fields.<name>.type` — one of `number`, `date`, `id`, `text` (drives canonical comparison, ADR-0003).
 - `fields.<name>.critical` — bool; if `true`, a `missing`/`wrong_value` verdict fails the gate (ADR-0003, BR2).
+- `fields.<name>.format_critical` — bool, **optional, default `false`** (added 2026-09-24, DEBT-80). If `true`, a `wrong_format` verdict on this field fails the gate as well, the declared exception to BR3's "format is informational". Use it where the *format* is itself the contract — e.g. an `invoice_date` whose extraction prompt is required to emit ISO-8601. It is independent of `critical`: neither implies the other, and they gate different verdicts. **Fields only** for now; `tables`/`prompts` have no equivalent. **Migration:** golden items that opt in do change, and the committed schema's canonical hash changes either way, so the dataset's `expectedOutputSchema` must be re-provisioned in the same change (ADR-0005 #8) or every run aborts `schema_drift`.
 - `tables.<name>.match_key` — the column used to pair actual rows to golden rows (BR8). Required for any table block.
 - `tables.<name>.critical` — bool; if `true`, a `missing` row or `wrong_value` column fails the gate.
 - `tables.<name>.columns` — **optional** `{column_name: type}` map, types `number|date|id|text` (added 2026-09-24, ADR-0003 Amendment A1, closes DEBT-04). Drives the classifier's per-column canonical comparison. **Absent, or a column absent from the map, means `text`** — byte-identical to the pre-amendment behaviour, so every existing golden stays valid and compares identically. Two fail-closed rules (`MalformedGoldenError`, abort `malformed_golden`): a key that is **not a column of any golden row** in that table is rejected (a typo must be loud, not an inert no-op that quietly restores the false FAIL), and a key equal to that table's **`match_key`** is rejected (row pairing uses `match_key_form`, so typing the key column would declare nothing). **The map drives comparison only — it adds NO per-type `value` pattern to cells.** The asymmetry with flat fields is deliberate: cell patterns would invalidate goldens storing `"$50.00"` and turn an additive change into an expand/contract migration, and the classifier canonicalizes anyway.
@@ -119,8 +120,8 @@ Per-field map; one entry per (golden field ∪ actual field ∪ table ∪ prompt
 
 ```json
 {
-  "invoice_number": { "verdict": "match",        "expected": "INV-1", "actual": "INV-1", "confidence": 0.99, "critical": true,  "type": "id" },
-  "total":          { "verdict": "wrong_value",  "expected": "1250.00", "actual": "1150.00", "confidence": 0.80, "critical": true, "type": "number" },
+  "invoice_number": { "verdict": "match",        "expected": "INV-1", "actual": "INV-1", "confidence": 0.99, "critical": true,  "format_critical": false, "type": "id" },
+  "total":          { "verdict": "wrong_value",  "expected": "1250.00", "actual": "1150.00", "confidence": 0.80, "critical": true, "format_critical": false, "type": "number" },
   "discount":       { "verdict": "new_field",    "expected": null, "actual": "5.00", "confidence": 0.70, "critical": false, "type": null },
   "line_items":     { "verdict": "detail", "critical": true,
                       "rows": [ { "match_key": "Widget A", "column": "unit_price", "verdict": "match" } ] }

@@ -68,6 +68,16 @@ Line items (`golden.tables[name]` vs `actual.tables[name]`, with `match_key`):
 - Each actual row is a `dict[str, FieldValue]` keyed by column name (post-revision ADR-0002 `tables: dict[str, list[dict[str, FieldValue]]]` shape). Pair rows by `match_key` value. Matched pairs are compared column-by-column using the same per-type logic; each column emits a sub-verdict.
 - A golden row with no matching actual row → `missing` for that row (fails the gate if the table is `critical`).
 - An actual row with no matching golden row → `new_line` (informational; never fails the gate).
+- **A `match_key` repeated across rows is valid data, on either side (DEBT-09, decided 2026-09-24).**
+  One SKU legitimately appears on two lines — a split shipment, a partial back-order. Pairing is
+  therefore *many-to-many within a key group*: every same-keyed actual row is kept as a candidate,
+  and each golden row consumes exactly one. Surplus actual rows are `new_line`; surplus golden rows
+  are `missing`. **Within a group the candidate is chosen by content affinity** — the one matching
+  the most of that golden row's non-key columns, earliest row breaking a tie — **not by position**,
+  so BR8's "row reordering is not a diff" holds inside a duplicate-key group as well as across
+  keys. Affinity is computed only when a group has more than one candidate, so the ordinary
+  all-distinct-keys table costs nothing extra (N2's benchmark is unaffected: 1.85 ms against a
+  100 ms budget).
 
 `prompts` (if the golden declares them) compare `golden.prompts[key]` vs `actual.prompts[key].answer` the same way fields do.
 
@@ -301,3 +311,57 @@ prevents a collision.** A golden declaring a field `line_items` *and* a table `l
 scored with the literal `"detail"`. This predates all three amendments and is **out of scope for
 this design pass**; it needs its own DEBT row and a fail-closed fix (reject the collision in
 `_validate_golden`). Recorded here so it is not lost.
+
+---
+
+## Amendment 2026-09-24 — `format_critical`: a per-field opt-in on `wrong_format` (DEBT-80)
+
+**Found live, not by review.** TEST-PLAN Phase 7 published action `1.1.0` with the `invoice_date`
+prompt stripped of its ISO-8601 instruction — the degradation `testpack/idp-action-definition.md`
+calls *"the single most common real-world prompt regression for date fields"*. It worked: across
+45 cells in five documents, exactly one changed —
+
+```
+inv-002-format-variance.pdf  invoice_date:  2026-01-22  ->  22/01/2026
+```
+
+**And the gate returned `exit_code=0`, `pass_count=5`.** `_format_date` parses both strings to the
+same calendar date, so `compare_value` returned `wrong_format`, and BR3 does not fail the gate on
+`wrong_format` — not even on a `critical: true` field. Nothing misbehaved; the classifier did
+exactly what this ADR specified. The specification was what did not match the product's purpose.
+
+**The decision (user, 2026-09-24): a per-field opt-in, not a change to BR3's default.**
+
+- `GoldenField.format_critical: bool`, optional, default `false`. When `true`, `overall_gate`
+  fails on a `wrong_format` verdict for that field exactly as it does on `wrong_value`.
+- **BR3's default is unchanged and still right.** A value that is semantically correct but
+  formatted differently is not a regression, and making every format difference red would be the
+  noise BR3 was written to prevent. The opt-in is the declared exception, for a field whose
+  *format* is itself the contract — a date the prompt is *required* to emit as ISO-8601 because a
+  downstream parser is strict.
+- **Independent of `critical`.** Neither flag implies the other and they gate different verdicts;
+  a field may be format-critical without being critical. Pinned by
+  `test_format_critical_is_independent_of_critical`.
+- **`Verdict` carries the flag**, because `overall_gate` is given only the verdict map and never
+  the golden. `overall_gate` reads it with `.get(..., False)`, not `[...]`: it is public API over a
+  caller-supplied `VerdictMap`, so a map built before this key existed must keep the old behaviour
+  rather than raise `KeyError` (pinned by
+  `test_overall_gate_tolerates_a_verdict_map_without_format_critical`).
+
+**Rejected alternatives.** *(a) Make `wrong_format` fail whenever the field is `critical`* — one
+line, no schema change, but it turns every cosmetic difference on a critical field red and
+discards BR3's distinction wholesale. *(b) Leave BR3 alone and correct the test plan* — cheapest,
+and defensible on the argument that the extraction was semantically right; rejected because this
+tool's entire value is being a CI gate on prompt changes, and a prompt that stops honouring its own
+stated output format is exactly the change a reviewer needs to see.
+
+**Scope: fields only.** `tables` and `prompts` have no equivalent opt-in. Row/column comparison
+uses the `text` type, whose format tier only normalises whitespace, so the same fail-open is far
+narrower there; extending the opt-in is a separate decision, deliberately not taken here.
+
+**Migration.** The committed golden schema gains `format_critical` under
+`fields.additionalProperties.properties` (Ajv `strict:true` clean — no new `if`/`then`, no new
+`required` key, 1,935 minified chars against CT-05's 10,000 cap). Its canonical hash therefore
+changes, so the dataset's `expectedOutputSchema` **must be re-provisioned in the same change**, or
+every run aborts `schema_drift` (ADR-0005 #8) — the same migration note DATA-MODEL-01 already
+carries for the `columns` addition.
