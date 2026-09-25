@@ -1,0 +1,399 @@
+"""Shared machinery for the two batch operator tools (2026-09-24).
+
+    scripts/bootstrap_golden_set.py   PDFs -> a DRAFT golden set      (#1)
+    scripts/noise_floor.py            PDFs -> a self-consistency report (#2)
+
+Both walk a directory of documents, spend real IDP extraction quota, and
+must survive a mid-batch failure without losing what they already paid
+for. That shared shape lives here so the two scripts differ only in what
+they do with each result.
+
+Three rules this module exists to enforce
+-----------------------------------------
+1. **Quota is spent only on an explicit `--yes`.** Every entry point
+   prints the exact number of extractions it is about to spend and
+   refuses to start without the flag. A typo in `--glob` that widens a
+   batch from 5 documents to 5,000 should cost a re-run, not an invoice.
+2. **Nothing paid for is lost.** Captures and partial results are
+   flushed after every document, so a crash at document 700 of 1,000
+   leaves 699 usable results on disk, not an empty file.
+3. **Outputs are owner-only.** These files carry the same extracted
+   financial values `CLAUDE.md ## Domain` calls sensitive, so they are
+   written `0700`/`0600`, the same posture as
+   `orchestration/run_artifact.py`.
+
+Run identity (`--org` / `--action` / `--version`) is always a flag, never
+an environment fallback (ADR-0004 A8/A9): what a batch measured must be
+visible in the invocation that produced it.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+import zipfile
+from pathlib import Path
+from typing import Any, Protocol
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT / "src"))
+
+#: Same posture, and for the same reason, as `run_artifact._DIR_MODE` /
+#: `_FILE_MODE`: local disk is only a narrower disclosure surface than
+#: the platform if it is actually private to the invoking user.
+DIR_MODE = 0o700
+FILE_MODE = 0o600
+
+
+class SupportsExtract(Protocol):
+    """The slice of the IDP adapter these tools consume. Declared as a
+    Protocol so the tests can drive the whole batch loop with a fake and
+    never touch the network."""
+
+    def extract(self, document_path: str, action_id: str, version: str) -> dict[str, Any]: ...
+
+
+# ── document discovery ────────────────────────────────────────────────
+
+#: What a customer's document folder actually contains. IDP takes images
+#: as readily as PDFs, and a scanned-invoice corpus is usually TIFFs or
+#: JPEGs, so defaulting to `*.pdf` alone would silently process a handful
+#: of files out of a zip of thousands and report success. Comma-separated
+#: so `--glob` can narrow it without a new flag.
+DEFAULT_DOCUMENT_PATTERNS = "*.pdf,*.png,*.jpg,*.jpeg,*.tif,*.tiff,*.webp,*.bmp"
+
+
+def discover_documents(document_dir: Path, pattern: str, limit: int) -> list[Path]:
+    """Documents to process, sorted, capped at `limit`.
+
+    Sorted so two runs over an unchanged directory process the same
+    documents in the same order -- a noise-floor number computed over a
+    different sample each time is not a baseline. Capped because `limit`
+    is the last line of defence between a wrong `--glob` and the org's
+    extraction quota.
+
+    Only regular files are returned, and a symlink pointing outside
+    `document_dir` is skipped: these tools are pointed at customer
+    document directories, and a batch tool should not follow a link out
+    of the directory the operator named.
+    """
+    resolved_dir = document_dir.resolve()
+    found: list[Path] = []
+    seen: set[Path] = set()
+    # Several patterns, because one glob cannot describe "the documents in
+    # this folder" -- and a file matching two of them is still one file.
+    for one in (p.strip() for p in pattern.split(",") if p.strip()):
+        for candidate in document_dir.glob(one):
+            if candidate in seen or not candidate.is_file():
+                continue
+            if not candidate.resolve().is_relative_to(resolved_dir):
+                print(
+                    f"  skipping {candidate.name}: resolves outside --document-dir",
+                    file=sys.stderr,
+                )
+                continue
+            seen.add(candidate)
+            found.append(candidate)
+    return sorted(found)[:limit]
+
+
+# ── cost guard ────────────────────────────────────────────────────────
+
+
+class QuotaRefusedError(Exception):
+    """The batch would spend quota and `--yes` was not passed."""
+
+
+def confirm_cost(*, documents: int, extractions_each: int, approved: bool) -> int:
+    """Return the number of extractions this batch will spend, or raise
+    `QuotaRefusedError` if the operator has not approved it.
+
+    Deliberately a flag and not an interactive prompt: these tools are
+    also run from a scheduler, where a prompt is a hang, and an approval
+    that lives in the invocation is an approval a reviewer can see.
+    """
+    total = documents * extractions_each
+    # One caller (the pipeline) has already summed its stages and passes
+    # the total with `extractions_each=1`; printing "12 documents x 1"
+    # there would misdescribe what was counted.
+    breakdown = (
+        f"{documents} document(s) x {extractions_each} extraction(s) = "
+        if extractions_each > 1
+        else ""
+    )
+    print(f"  {breakdown}{total} real IDP extraction(s) to be spent", file=sys.stderr)
+    if not approved:
+        raise QuotaRefusedError(
+            f"this batch would spend {total} real IDP extraction(s) against your org's "
+            "quota and process real documents. Re-run with --yes once that number is "
+            "the number you meant."
+        )
+    return total
+
+
+# ── owner-only output ─────────────────────────────────────────────────
+
+
+def ensure_private_dir(path: Path) -> None:
+    """Create `path` (and parents) owner-only, tightening it if it
+    already exists world-readable -- `makedirs` does not chmod an
+    existing directory, so an operator who created it by hand would
+    otherwise keep a world-readable copy of extracted values."""
+    path.mkdir(parents=True, exist_ok=True)
+    os.chmod(path, DIR_MODE)
+
+
+def write_private_json(path: Path, payload: object) -> None:
+    """Write `payload` as JSON, owner-only, via a same-directory temp
+    file and an atomic rename -- so a crash mid-write leaves the previous
+    good file, never a truncated one a later `--resume` would fail to
+    parse."""
+    ensure_private_dir(path.parent)
+    tmp = path.with_name(f".{path.name}.partial")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    os.chmod(tmp, FILE_MODE)
+    os.replace(tmp, path)
+
+
+def read_json_if_present(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with path.open(encoding="utf-8") as fh:
+        loaded = json.load(fh)
+    if not isinstance(loaded, dict):
+        raise ValueError(f"{path} is not a JSON object")
+    return loaded
+
+
+# ── the batch loop ────────────────────────────────────────────────────
+
+
+class DocumentFailedError(Exception):
+    """One document failed; the batch continues. Carries only the
+    exception TYPE name -- never `str(exc)`, which on this seam can
+    carry a token, a path or an extracted value (INV-02)."""
+
+    def __init__(self, document_id: str, attempt: int, error_type: str) -> None:
+        self.document_id = document_id
+        self.attempt = attempt
+        self.error_type = error_type
+        super().__init__(f"{document_id} (attempt {attempt}): {error_type}")
+
+    def as_record(self) -> dict[str, Any]:
+        return {
+            "document_id": self.document_id,
+            "attempt": self.attempt,
+            "error_type": self.error_type,
+        }
+
+
+def extract_with_containment(
+    adapter: SupportsExtract,
+    document: Path,
+    *,
+    action_id: str,
+    version: str,
+    attempt: int = 1,
+) -> dict[str, Any]:
+    """`adapter.extract`, with every failure converted to a typed
+    `DocumentFailedError` so one bad document cannot end a 1,000-document
+    batch."""
+    try:
+        return adapter.extract(str(document), action_id, version)
+    except Exception as exc:  # noqa: BLE001 - INV-02: type name only, never str(exc)
+        raise DocumentFailedError(document.name, attempt, type(exc).__name__) from None
+
+
+def progress(index: int, total: int, document_id: str, started: float) -> None:
+    """One line per document. A 1,000-document batch runs for hours; an
+    operator watching it needs to know it is alive and roughly when it
+    ends, without any extracted value appearing in the terminal."""
+    elapsed = time.monotonic() - started
+    rate = elapsed / index if index else 0.0
+    remaining = rate * (total - index)
+    print(
+        f"  [{index}/{total}] {document_id}  "
+        f"({elapsed / 60:.1f} min elapsed, ~{remaining / 60:.1f} min left)",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+# ── zip input ─────────────────────────────────────────────────────────
+#
+# An operator hands over a zip, not a mounted folder -- that is how a
+# corpus of customer documents actually arrives. Unpacking it is
+# therefore part of the tool, and unpacking an archive from outside the
+# trust boundary is a security surface, not a convenience: the caps and
+# checks below are the point of this section, not overhead on it.
+
+#: Whole-archive refusals. Generous enough that no honest corpus trips
+#: them, tight enough that a decompression bomb cannot fill the disk of
+#: whoever was handed the zip.
+ZIP_MAX_ENTRIES = 20_000
+ZIP_MAX_TOTAL_BYTES = 4 * 1024 * 1024 * 1024
+#: Per-entry compression ratio. Real PDFs and images are already
+#: compressed and sit near 1:1; 200:1 is a file that exists to expand.
+ZIP_MAX_RATIO = 200
+
+#: Archive metadata every macOS/Windows zip carries and no corpus wants.
+#: Matched by exact name or the AppleDouble `._` prefix -- NOT by a bare
+#: leading dot, which would swallow a `..` traversal component into the
+#: "junk" bucket and report a zip-slip attempt as ordinary noise (caught
+#: by `test_zip_rejects_a_path_traversal_entry`, 2026-09-25).
+_JUNK_NAMES = frozenset({"__MACOSX", ".DS_Store", "Thumbs.db", "desktop.ini"})
+
+
+def _is_junk(member_name: str) -> bool:
+    parts = [part for part in member_name.split("/") if part]
+    return any(part in _JUNK_NAMES or part.startswith("._") for part in parts)
+
+
+class ZipRejectedError(Exception):
+    """The archive as a whole is refused -- unreadable, or past a cap.
+    Distinct from a skipped entry, which is reported and survivable."""
+
+
+def _flatten_name(member_name: str, taken: dict[str, str]) -> str:
+    """One flat filename per document.
+
+    The golden's `document_id` is resolved by `run_eval` against
+    `IDP_DOCUMENT_DIR` (`facade._resolve_document_path`), and a flat
+    filename is the shape that survives every later step unambiguously:
+    the capture file, the golden key, and the dataset item all key off
+    it. So a nested `invoices/2024/a.pdf` becomes `a.pdf` -- unless that
+    name is already taken by a DIFFERENT entry, in which case the parent
+    path is folded into the name (`invoices__2024__a.pdf`) rather than
+    one document silently overwriting another.
+    """
+    base = os.path.basename(member_name)
+    if taken.get(base) in (None, member_name):
+        return base
+    folded = member_name.replace("/", "__").replace("\\", "__")
+    return folded
+
+
+def _is_symlink(member: zipfile.ZipInfo) -> bool:
+    return (member.external_attr >> 16) & 0o170000 == 0o120000
+
+
+def extract_documents_from_zip(
+    archive: Path,
+    destination: Path,
+    *,
+    patterns: str = DEFAULT_DOCUMENT_PATTERNS,
+    dry_run: bool = False,
+) -> tuple[list[Path], list[str]]:
+    """Unpack the document files from `archive` into `destination`, flat.
+
+    Returns `(extracted_paths, skipped_notes)`. Refuses the whole archive
+    (`ZipRejectedError`) when it is unreadable or past a cap; skips a
+    single entry, with a note, when that entry is not a document this
+    tool should write:
+
+    * **path traversal** -- an absolute name, a `..` component, or
+      anything that resolves outside `destination` (zip-slip). Checked on
+      the RESOLVED path, not on the name, so a name that only looks safe
+      is still caught.
+    * **symlinks** -- a zip can carry one, and a link is a way to make a
+      later read escape `destination` even though the extraction did not.
+      Never written.
+    * **archive junk** -- `__MACOSX/`, `.DS_Store`, AppleDouble `._`
+      files. Real entries, never documents.
+    * **non-documents** -- anything not matching `patterns`. A zip of a
+      customer's records carries spreadsheets and notes; spending an IDP
+      extraction on a `.xlsx` is a paid-for failure.
+
+    `dry_run` runs every check and reports what WOULD be written without
+    creating a file, so `--plan` can size a zip without unpacking it.
+    """
+    try:
+        zf = zipfile.ZipFile(archive)
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise ZipRejectedError(
+            f"{archive.name} is not a readable zip archive ({type(exc).__name__})"
+        ) from None
+
+    skipped: list[str] = []
+    extracted: list[Path] = []
+    with zf:
+        members = zf.infolist()
+        if len(members) > ZIP_MAX_ENTRIES:
+            raise ZipRejectedError(
+                f"{archive.name} holds {len(members)} entries, over the "
+                f"{ZIP_MAX_ENTRIES} cap. Split it, or raise the cap deliberately."
+            )
+        declared = sum(m.file_size for m in members)
+        if declared > ZIP_MAX_TOTAL_BYTES:
+            raise ZipRejectedError(
+                f"{archive.name} declares {declared / 1e9:.1f} GB uncompressed, over the "
+                f"{ZIP_MAX_TOTAL_BYTES / 1e9:.1f} GB cap."
+            )
+
+        if not dry_run:
+            ensure_private_dir(destination)
+        root = destination.resolve()
+        wanted = [p.strip() for p in patterns.split(",") if p.strip()]
+        taken: dict[str, str] = {}
+
+        for member in sorted(members, key=lambda m: m.filename):
+            name = member.filename
+            if member.is_dir():
+                continue
+            # Traversal FIRST: a rejected entry must be reported as
+            # rejected, never quietly filed under "junk" or "not a
+            # document" -- the operator needs to know the archive tried.
+            if os.path.isabs(name) or ".." in Path(name).parts or name.startswith("/"):
+                skipped.append(f"{name}: path traversal (rejected)")
+                continue
+            if _is_symlink(member):
+                skipped.append(f"{name}: symlink (never extracted)")
+                continue
+            if _is_junk(name):
+                continue
+            base = os.path.basename(name)
+            if not any(Path(base).match(one) for one in wanted):
+                skipped.append(f"{name}: not a document ({patterns})")
+                continue
+            if member.compress_size and member.file_size / member.compress_size > ZIP_MAX_RATIO:
+                raise ZipRejectedError(
+                    f"{archive.name}: entry {name!r} expands "
+                    f"{member.file_size // max(member.compress_size, 1)}x, over the "
+                    f"{ZIP_MAX_RATIO}x cap -- treated as a decompression bomb."
+                )
+
+            flat = _flatten_name(name, taken)
+            taken[os.path.basename(name)] = name
+            target = (destination / flat).resolve()
+            if not target.is_relative_to(root) or target == root:
+                # Belt and braces: the name checks above should already
+                # have caught this, and a zip-slip that survives them is
+                # exactly the case this line exists for.
+                skipped.append(f"{name}: resolves outside the extraction directory")
+                continue
+            if dry_run:
+                extracted.append(destination / flat)
+                continue
+
+            written = 0
+            with zf.open(member) as src, open(target, "wb") as dst:
+                while chunk := src.read(1024 * 1024):
+                    written += len(chunk)
+                    if written > member.file_size:
+                        dst.close()
+                        target.unlink(missing_ok=True)
+                        raise ZipRejectedError(
+                            f"{archive.name}: entry {name!r} is larger than its header "
+                            "declares -- refusing the archive."
+                        )
+                    dst.write(chunk)
+            # Owner-only, like every other file these tools write: this is
+            # a customer document now sitting on local disk.
+            os.chmod(target, FILE_MODE)
+            extracted.append(target)
+
+    return sorted(extracted), skipped
