@@ -70,6 +70,33 @@ Filed and fixed here as **DEBT-85**.
   an intermediate directory *on the root's path*, i.e. an attacker who already owns the corpus
   location, so the `Low` severity stands on its own reasoning rather than on the deferral.
 
+### `/test` stamp — PASS, and what it found that two reviews had not
+
+`docs/qa/TEST-LANE-D-F-2026-09-25.md`. Independence: implementer Opus 5 · APPROVE by
+Atchim/Sonnet · gate by a **fresh Atchim instance on Fable 5.1** that did not issue the APPROVE
+(**DEBT-44** honoured). It wrote its own mutants rather than reusing mine: **27 killed, 8
+survived**.
+
+Three findings, all non-blocking, **all since closed and mutation-verified**:
+
+- **F-3 (Med) — a coverage REGRESSION introduced by my own N-1 fix.** At `5ab2f41` the
+  default-budget path was exercised incidentally by the genuinely-held test; N-1 correctly moved
+  that test onto the budget path and nothing replaced what it had been covering. A 30-second
+  DEFAULT budget, and `is_busy()` opting into the budget, both survived — the only symptom is
+  slowness, and no test asserted on speed. Now pinned structurally via `inspect.signature` and a
+  recording `acquire`, not by timing.
+- **F-2 (Low-Med) — the torn-write test was narrower than its own docstring.** A mutant that
+  serializes first then truncates-in-place survived 3/3: the window shrinks to one syscall, so the
+  slowed `json.dumps` no longer widens anything, yet `load_history` would still silently skip a
+  reader landing in it. Write-then-rename **is** the invariant and is now asserted directly.
+- **F-1 (Low) — a test name claiming an ordering it cannot prove.** Renamed to what it proves.
+
+**Register correction it produced:** DEBT-59's Wave-0 "genuinely unpinned" text was **already
+false at `358f16b~1`** — `3bff5f0` had pinned `KeyboardInterrupt` at the tail marker. Lane D's
+real contribution there is the `SystemExit` parameter. Four mutants are accepted as unobservable
+from a unit test (`del file_bytes`, `os.fsync`, the temp-cleanup `raise`, the per-writer
+`mkstemp`) and recorded so they are not re-discovered as gaps.
+
 ### Process note, recorded because it is the point
 
 Three of the defects above were found by review, not by the suite: the vacuous size-cap pin
@@ -87,6 +114,14 @@ by re-running the mutants after fixing, never by the tests passing. The rule thi
 re-learning, stated once more: **a green test is evidence of nothing until the mutation it claims
 to kill has been run against it** — and that includes the mutation run against the fix for a
 vacuous test.
+
+**A fourth was then found by the `/test` gate, and it was of a different kind:** not a test that
+passed for the wrong reason, but a test that stopped covering something when a *neighbouring* test
+was correctly fixed (F-3). Fixing N-1 moved the only test exercising the default-budget path onto
+the budget path. Nothing went red, no assertion became false, and two mutants quietly started
+surviving. The lesson generalises past "mutate after fixing": **when a fix moves what a test
+exercises, check what that test used to cover incidentally** — coverage can be lost by a correct
+change to a correct test.
 
 ## ✅ STEP-0 REGISTER RE-AUDIT — 2026-09-25, every open row re-verified against HEAD `d14789d`
 
