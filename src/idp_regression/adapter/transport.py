@@ -218,8 +218,12 @@ def post_multipart_file(
         with os.fdopen(fd, "rb") as fh:
             # DEBT-54 A-2 -- bound the read.
             # `fh.read()` was unbounded, and the bytes are then COPIED
-            # into the multipart body below, so peak memory is twice the
-            # file size. A large or hostile document raised `MemoryError`
+            # into the multipart body below. Peak memory is ~2x the file
+            # size, and only because the `del` below drops the first copy
+            # before `bytes(body)` makes the third -- without it, review
+            # (Atchim, 2026-09-25) measured THREE live copies at the
+            # `Request(...)` call: `file_bytes`, `body`, and `bytes(body)`.
+            # A large or hostile document raised `MemoryError`
             # inside the escaping class GAP-1 hardened — the one
             # exception shape that does not behave like the typed errors
             # every caller here is written against.
@@ -253,6 +257,11 @@ def post_multipart_file(
     ).encode()
     body += f"Content-Type: {content_type}\r\n\r\n".encode()
     body += file_bytes
+    # Drop the first copy as soon as it is in the body: `bytes(body)` at the
+    # `Request(...)` below copies again, and holding all three at once is
+    # what made peak memory 3x the file size rather than the 2x the cap
+    # above is chosen against.
+    del file_bytes
     body += f"\r\n--{boundary}--\r\n".encode()
 
     req = urllib.request.Request(  # noqa: S310 - configured host, no-redirect (ADR-0002)

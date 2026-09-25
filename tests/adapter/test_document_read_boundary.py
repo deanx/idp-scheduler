@@ -87,7 +87,7 @@ def test_a_regular_file_is_still_read_normally(
 
 
 def test_a_document_over_the_size_cap_is_refused_before_it_is_read_into_memory(
-    tmp_path: pathlib.Path,
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """DEBT-54 A-2: `fh.read()` was unbounded.
 
@@ -105,10 +105,25 @@ def test_a_document_over_the_size_cap_is_refused_before_it_is_read_into_memory(
     document = tmp_path / "huge.pdf"
     document.write_bytes(b"x" * (transport.MAX_DOCUMENT_BYTES + 1))
 
-    with pytest.raises(IDPTransportError):
+    # Independent review (Atchim, 2026-09-25) caught this test vacuous in
+    # its first form: it asserted only `pytest.raises(IDPTransportError)`
+    # against an unresolvable host, and `_send`'s transport catch-all
+    # turns the DNS failure into that same exception type -- so it passed
+    # with the size cap deleted entirely. The identical defect had been
+    # found and fixed for the symlink test one function above and not
+    # carried across to this sibling. Both halves of the fix matter: the
+    # marker proves the read was refused BEFORE the network, and the
+    # `match` proves it was refused by the CAP rather than by any other
+    # read failure.
+    def _marker_urlopen(req: object, timeout: float) -> object:
+        raise IDPTransportError("MARKER: the read was allowed and we reached the network")
+
+    monkeypatch.setattr(transport, "_urlopen", _marker_urlopen)
+    with pytest.raises(IDPTransportError, match="exceeds the maximum size") as excinfo:
         transport.post_multipart_file(
             "https://example.invalid/submit", "file", str(document), 5.0
         )
+    assert "MARKER" not in str(excinfo.value)
 
 
 def test_a_document_exactly_at_the_size_cap_is_accepted(

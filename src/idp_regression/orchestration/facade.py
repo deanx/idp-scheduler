@@ -291,7 +291,7 @@ def _validate_dataset_shape(dataset: object) -> None:
     #     the one that failed, the artifact disagrees with the exit code:
     #     a red build whose own evidence shows nothing wrong. The Epic E
     #     console reads that artifact as the authoritative job result.
-    #   * `_select_documents`' `by_id` comprehension -- `--document <id>`
+    #   * `select_items`' `by_id` comprehension -- `--document <id>`
     #     silently resolves to whichever item happened to come last.
     # Refused rather than de-duplicated: two items sharing a document_id
     # carry DIFFERENT goldens (that is the only reason to have two), so
