@@ -11,7 +11,7 @@ run over the single `get_dataset()` fetch and before any IDP call::
                       -> hash_dataset(dataset["items"]) + generate_run_id()  (T-01.4.6)
                            -> first IDP call
 
-Each guard raises `RunAborted` (`errors.py`) and writes NO platform
+Each guard raises `RunAbortedError` (`errors.py`) and writes NO platform
 marker: ADR-0004 #14's `run_status=aborted` marker only makes sense once
 a run exists, and the kickoff is explicit that "a pre-run abort writes
 no run_status marker, because no run exists yet." `facade.py` is the
@@ -29,7 +29,7 @@ from typing import Any
 from idp_regression.adapter.transport import sanitize_for_log
 from idp_regression.classifier.gate import validate_golden_structure
 from idp_regression.classifier.types import MalformedGoldenError
-from idp_regression.orchestration.errors import RunAborted
+from idp_regression.orchestration.errors import RunAbortedError
 from idp_regression.platform.schema import load_golden_schema
 from idp_regression.platform.types import Dataset
 
@@ -61,7 +61,7 @@ def check_schema_drift(dataset: Dataset) -> None:
     actual_schema = dataset.get("expected_output_schema")
     if actual_schema is None:
         logger.error("schema_drift committed=%s actual=absent", committed_hash)
-        raise RunAborted("schema_drift", "golden dataset schema is absent")
+        raise RunAbortedError("schema_drift", "golden dataset schema is absent")
 
     actual_hash = _canonical_hash(actual_schema)
     if actual_hash != committed_hash:
@@ -70,7 +70,7 @@ def check_schema_drift(dataset: Dataset) -> None:
             committed_hash,
             actual_hash,
         )
-        raise RunAborted(
+        raise RunAbortedError(
             "schema_drift", "golden dataset schema does not match the committed schema"
         )
 
@@ -81,7 +81,7 @@ def check_empty_set(dataset: Dataset) -> None:
     itself never reaches this function; `facade.py` maps that directly).
     Runs AFTER `check_schema_drift` (TP-40 ordering)."""
     if not dataset["items"]:
-        raise RunAborted("empty_set", "golden dataset has no items")
+        raise RunAbortedError("empty_set", "golden dataset has no items")
 
 
 def _first_structural_issue_path(golden: object) -> str:
@@ -159,6 +159,6 @@ def validate_golden_set(dataset: Dataset) -> None:
                 sanitize_for_log(str(document_id)),
                 sanitize_for_log(path),
             )
-            raise RunAborted(
+            raise RunAbortedError(
                 "malformed_golden", "a golden item failed N28 structural validation"
             ) from None

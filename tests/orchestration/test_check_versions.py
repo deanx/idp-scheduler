@@ -25,8 +25,8 @@ from idp_regression.orchestration.check_versions import (
     OUTCOME_NO_NEW_VERSIONS,
     OUTCOME_REFUSED_UNINITIALISED,
     OUTCOME_REFUSED_UNPARSEABLE_VERSION_SCHEME,
-    CheckVersionsRefused,
-    StateFileLocked,
+    CheckVersionsRefusedError,
+    StateFileLockedError,
     TickState,
     _lock_path_for,
     _reject_state_file_inside_repo,
@@ -91,14 +91,14 @@ def _controls_ok(anchor: str) -> dict[str, ProbeResult]:
 
 
 def test_no_anchor_at_all_refuses_to_run() -> None:
-    with pytest.raises(CheckVersionsRefused) as exc:
+    with pytest.raises(CheckVersionsRefusedError) as exc:
         check_once(probe=FakeProbe({}), **_base_kwargs(state=TickState(), known_version=None))
     assert exc.value.outcome == OUTCOME_REFUSED_UNINITIALISED
 
 
 @pytest.mark.parametrize("bad_anchor", ["v2-draft", "1.0", "", "1.0.0-beta"])
 def test_an_unparseable_anchor_refuses_to_run(bad_anchor: str) -> None:
-    with pytest.raises(CheckVersionsRefused) as exc:
+    with pytest.raises(CheckVersionsRefusedError) as exc:
         check_once(
             probe=FakeProbe({}),
             **_base_kwargs(state=TickState(known_versions=[bad_anchor]), known_version=None),
@@ -454,7 +454,7 @@ def test_state_round_trips_through_json(tmp_path: Path) -> None:
 def test_an_unrecognised_schema_version_is_a_fail_closed_halt(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
     path.write_text(json.dumps({"schema_version": 999}))
-    with open(path) as fh, pytest.raises(CheckVersionsRefused) as exc:
+    with open(path) as fh, pytest.raises(CheckVersionsRefusedError) as exc:
         load_state(fh)
     assert exc.value.outcome == OUTCOME_REFUSED_UNINITIALISED
 
@@ -479,7 +479,7 @@ def test_deleting_the_state_file_costs_only_a_redundant_walk(tmp_path: Path) -> 
 def test_state_file_inside_the_repo_is_rejected(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     inside = repo_root / "docs" / "state" / "check-versions-state.json"
-    with pytest.raises(CheckVersionsRefused):
+    with pytest.raises(CheckVersionsRefusedError):
         _reject_state_file_inside_repo(inside)
 
 
@@ -752,7 +752,7 @@ def test_open_state_file_locked_raises_when_already_locked(tmp_path: Path) -> No
     fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     try:
-        with pytest.raises(StateFileLocked):
+        with pytest.raises(StateFileLockedError):
             open_state_file_locked(path)
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)

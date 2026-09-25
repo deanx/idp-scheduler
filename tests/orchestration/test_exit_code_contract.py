@@ -9,9 +9,9 @@ logged for observability and never fragments the exit-code namespace
 This suite is parametrized over the WHOLE `AbortReason` taxonomy read
 from `orchestration/errors.py` itself (not hardcoded). ⚠️ Corrected
 2026-09-21 (S-1 gate finding): the parametrized tests below fabricate
-`RunAborted(reason, ...)` through a monkeypatch of `check_schema_drift`,
+`RunAbortedError(reason, ...)` through a monkeypatch of `check_schema_drift`,
 so on their own they only re-prove the ONE generic
-`except RunAborted` catch every abort funnels through -- adding a new
+`except RunAbortedError` catch every abort funnels through -- adding a new
 `AbortReason` member to the `Literal` with no real raise site anywhere
 in `src/` still passes every test in this file, because `get_args`
 would simply hand the new member to the same fabricated-raise
@@ -32,7 +32,7 @@ from typing import get_args
 import pytest
 
 from idp_regression.orchestration import facade
-from idp_regression.orchestration.errors import AbortReason, RunAborted
+from idp_regression.orchestration.errors import AbortReason, RunAbortedError
 from idp_regression.orchestration.facade import run_eval
 
 ALL_ABORT_REASONS: tuple[AbortReason, ...] = get_args(AbortReason)
@@ -139,14 +139,14 @@ def test_every_abort_reason_exits_non_zero(
     caplog: pytest.LogCaptureFixture,
     tmp_path: object,
 ) -> None:
-    """Force `RunAborted(reason, ...)` to be raised inside the pre-run
+    """Force `RunAbortedError(reason, ...)` to be raised inside the pre-run
     `try: check_schema_drift(...) / check_empty_set(...) /
-    validate_golden_set(...) except RunAborted` block -- the earliest
-    point in `run_eval` that catches `RunAborted` generically, by any
+    validate_golden_set(...) except RunAbortedError` block -- the earliest
+    point in `run_eval` that catches `RunAbortedError` generically, by any
     `.reason` -- by monkeypatching `check_schema_drift` to raise it for
     each taxonomy member in turn. `run_eval` never dispatches on
     `.reason` to decide 0 vs non-zero (CT-04: no per-reason exit codes;
-    every `except RunAborted` block simply returns 1), so this exercises
+    every `except RunAbortedError` block simply returns 1), so this exercises
     the SAME generic catch that every real abort site -- pre-run and
     in-loop alike -- ultimately funnels through. If a future refactor
     ever narrows that catch to a subset of reasons (e.g. an `if exc.reason
@@ -159,7 +159,7 @@ def test_every_abort_reason_exits_non_zero(
     monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(_well_formed_dataset()))
 
     def _raise(dataset: object) -> None:
-        raise RunAborted(reason, f"forced for reason={reason}")
+        raise RunAbortedError(reason, f"forced for reason={reason}")
 
     monkeypatch.setattr(facade, "check_schema_drift", _raise)
 
@@ -197,7 +197,7 @@ def test_taxonomy_is_read_from_errors_module_not_hardcoded() -> None:
 
 def _abort_reason_string_literals_at_real_sites(source: str) -> set[str]:
     """Collect every string-literal `AbortReason` that appears as an
-    argument to a REAL raise/log call: `_abort(...)`, `RunAborted(...)`,
+    argument to a REAL raise/log call: `_abort(...)`, `RunAbortedError(...)`,
     or a `<logger-name>.error(...)`/`.warning(...)` call. AST-based, not
     a text grep -- a reason spelled only in a comment or a bare
     docstring statement can never satisfy this (comments aren't even in
@@ -224,7 +224,10 @@ def _abort_reason_string_literals_at_real_sites(source: str) -> set[str]:
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        is_abort_or_raised = isinstance(func, ast.Name) and func.id in {"_abort", "RunAborted"}
+        is_abort_or_raised = isinstance(func, ast.Name) and func.id in {
+            "_abort",
+            "RunAbortedError",
+        }
         is_logger_call = isinstance(func, ast.Attribute) and func.attr in {
             "error",
             "warning",
@@ -242,7 +245,7 @@ def test_every_abort_reason_has_a_real_raise_site() -> None:
     """S-1: the ONLY test in this file that would fail if a new
     `AbortReason` member were added to the `Literal` with no real raise
     site under `src/idp_regression/` -- every other test here fabricates
-    `RunAborted(reason, ...)` via a monkeypatch, so it re-proves nothing
+    `RunAbortedError(reason, ...)` via a monkeypatch, so it re-proves nothing
     about whether `reason` is ever actually raised by production code.
 
     Scans every `.py` file under `src/idp_regression/` EXCEPT
@@ -251,7 +254,7 @@ def test_every_abort_reason_has_a_real_raise_site() -> None:
     declaration, not evidence of a raise site, and including it would
     make this test pass vacuously for a brand-new, never-raised member).
     A reason must appear as a string-literal argument to a real
-    `_abort(...)`/`RunAborted(...)`/`logger.error(...)`/`logger.warning(...)`
+    `_abort(...)`/`RunAbortedError(...)`/`logger.error(...)`/`logger.warning(...)`
     call (AST, see `_abort_reason_string_literals_at_real_sites` --
     coverage audit gap 3, 2026-09-21: the prior version substring-grepped
     the raw source TEXT, including comments and docstrings, so a reason
@@ -279,14 +282,16 @@ def test_a_reason_named_only_in_a_comment_or_docstring_does_not_satisfy_the_chec
     added (proving the collector isn't just vacuously empty)."""
     reason = ALL_ABORT_REASONS[0]
     prose_only = (
-        f'# TODO: someday raise RunAborted("{reason}", "...")\n'
+        f'# TODO: someday raise RunAbortedError("{reason}", "...")\n'
         "def f() -> None:\n"
         f'    """docstring mentioning {reason} too."""\n'
         "    pass\n"
     )
     assert reason not in _abort_reason_string_literals_at_real_sites(prose_only)
 
-    with_real_site = prose_only + f'\n\ndef g() -> None:\n    raise RunAborted("{reason}", "x")\n'
+    with_real_site = (
+        prose_only + f'\n\ndef g() -> None:\n    raise RunAbortedError("{reason}", "x")\n'
+    )
     assert reason in _abort_reason_string_literals_at_real_sites(with_real_site)
 
 

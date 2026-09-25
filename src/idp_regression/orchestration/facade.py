@@ -68,7 +68,7 @@ from idp_regression.orchestration.bootstrap import (
     validate_platform_credentials,
 )
 from idp_regression.orchestration.dotenv_support import load_dotenv
-from idp_regression.orchestration.errors import AbortReason, RunAborted
+from idp_regression.orchestration.errors import AbortReason, RunAbortedError
 from idp_regression.orchestration.log_sanitize import (
     format_execution_failed_status_for_log,
     frame_location,
@@ -118,7 +118,7 @@ logger = logging.getLogger(__name__)
 IDP_DOCUMENT_DIR_VAR = "IDP_DOCUMENT_DIR"
 
 
-class _PathContainmentViolation(Exception):
+class _PathContainmentViolationError(Exception):
     """Raised by `_resolve_document_path` when `document_id` would resolve
     outside `IDP_DOCUMENT_DIR` -- an absolute `document_id`, a `..`
     traversal, or a symlink escape (security fix, 2026-09-21: N28
@@ -151,7 +151,7 @@ def _resolve_document_path(document_dir: str, document_id: str) -> str:
     NUL-containing `document_id` reached here unvalidated and escaped as
     a raw `TypeError`/`ValueError` (2026-09-21 live repro). This
     function's FIRST statement below now rejects exactly those three
-    shapes itself, as `_PathContainmentViolation`, before any `os.path`
+    shapes itself, as `_PathContainmentViolationError`, before any `os.path`
     call. Both the configured root and the candidate are then resolved
     to real absolute paths (`os.path.realpath` -- this also
     resolves a symlink to its real target, so a symlink planted *inside*
@@ -165,7 +165,7 @@ def _resolve_document_path(document_dir: str, document_id: str) -> str:
     absolute, so an unchecked absolute `document_id` would otherwise
     resolve to itself verbatim).
 
-    Raises `_PathContainmentViolation` (never returns a path outside the
+    Raises `_PathContainmentViolationError` (never returns a path outside the
     root) -- the caller (`run_eval`'s per-document loop) converts this
     into a typed `path_containment_violation` abort (CT-04: 0-vs-non-zero
     exit-code contract stays intact) and logs the `document_id` only via
@@ -176,19 +176,19 @@ def _resolve_document_path(document_dir: str, document_id: str) -> str:
         # up front -- none of these are safe to hand to `os.path.isabs`/
         # `os.path.realpath` below, which raise raw `TypeError`/
         # `ValueError` on exactly these shapes instead of the typed
-        # `_PathContainmentViolation` this function otherwise always
+        # `_PathContainmentViolationError` this function otherwise always
         # raises. `document_id` may not be a `str` at all here (the type
         # hint is aspirational, not enforced at this boundary), so no
         # f-string/`sanitize_for_log` call touches it before this check.
-        raise _PathContainmentViolation(document_id if isinstance(document_id, str) else "")
+        raise _PathContainmentViolationError(document_id if isinstance(document_id, str) else "")
 
     if os.path.isabs(document_id):
-        raise _PathContainmentViolation(document_id)
+        raise _PathContainmentViolationError(document_id)
 
     root = os.path.realpath(document_dir)
     candidate = os.path.realpath(os.path.join(document_dir, document_id))
     if not candidate.startswith(root + os.sep):
-        raise _PathContainmentViolation(document_id)
+        raise _PathContainmentViolationError(document_id)
     return candidate
 
 
@@ -281,6 +281,33 @@ def _validate_dataset_shape(dataset: object) -> None:
             raise DatasetFetchFailedError("a dataset item has a missing/non-string item_id")
         if not isinstance(item.get("document_id"), str) or not item["document_id"]:
             raise DatasetFetchFailedError("a dataset item has a missing/non-string document_id")
+
+    # DEBT-83: a duplicate `document_id` is individually valid on every
+    # per-item guard above and collapses TWO structures downstream, both
+    # last-write-wins and both silent:
+    #   * `verdict_maps[document_id] = verdicts` -- the run artifact keeps
+    #     only the LAST occurrence. The artifact is the only local record
+    #     of the values behind a verdict, so if an EARLIER occurrence was
+    #     the one that failed, the artifact disagrees with the exit code:
+    #     a red build whose own evidence shows nothing wrong. The Epic E
+    #     console reads that artifact as the authoritative job result.
+    #   * `_select_documents`' `by_id` comprehension -- `--document <id>`
+    #     silently resolves to whichever item happened to come last.
+    # Refused rather than de-duplicated: two items sharing a document_id
+    # carry DIFFERENT goldens (that is the only reason to have two), so
+    # there is no correct one to pick and guessing measures something
+    # nobody asked for. Pre-run, before any submit, at zero IDP quota --
+    # the same posture as every other guard in this chain.
+    seen: set[str] = set()
+    for item in items:
+        document_id = item["document_id"]
+        if document_id in seen:
+            raise DatasetFetchFailedError(
+                "the dataset has more than one item with document_id "
+                f"{sanitize_for_log(document_id)} -- each document must appear once "
+                "(a run artifact and a --document selector are both keyed by it)"
+            )
+        seen.add(document_id)
 
 
 def _mark_run_status_best_effort(
@@ -542,7 +569,7 @@ def run_eval(
         # happened yet, so a refusal here costs ZERO quota. Deliberately
         # placed BEFORE golden_version/run_id below (no run exists yet),
         # so this is a pre-run guard per A7: log, run_end outcome=aborted,
-        # return 1, NO run_status marker -- not a RunAborted/`_abort()`
+        # return 1, NO run_status marker -- not a RunAbortedError/`_abort()`
         # call, which both require a `run_id` to mark.
         #
         # ⚠️ User override of A10's own text (2026-09-22, MVP decision):
@@ -678,7 +705,7 @@ def run_eval(
         logger.error("run_eval: dataset_fetch_failed: %s", sanitize_for_log(str(exc)))
         _log_run_end("aborted", 1)
         return 1
-    except RunAborted as exc:
+    except RunAbortedError as exc:
         logger.error("run_eval: %s: %s", exc.reason, sanitize_for_log(str(exc)))
         _log_run_end("aborted", 1)
         return 1
@@ -703,15 +730,15 @@ def run_eval(
         _log_run_end("aborted", 1)
         return 1
 
-    def _abort(reason: AbortReason, document_id: str | None, detail: str) -> RunAborted:
+    def _abort(reason: AbortReason, document_id: str | None, detail: str) -> RunAbortedError:
         """Write the best-effort `run_status=aborted` marker (a run now
         exists -- `run_id` was just generated above, unlike the pre-run
-        guards) then build (not raise -- see call sites) the `RunAborted`
+        guards) then build (not raise -- see call sites) the `RunAbortedError`
         to propagate, so every caller's line is `raise _abort(...)` and
         stays a single statement, consistent with the pre-run guards'
         style. `detail` MUST already be `sanitize_for_log`-clean; this
         function logs it via a `%s` placeholder, never interpolates it
-        into the exception message itself (INV-02 -- see `RunAborted`'s
+        into the exception message itself (INV-02 -- see `RunAbortedError`'s
         own docstring).
 
         DEBT-54 A-1 (Branca /harden, 2026-09-21): `detail` is
@@ -739,7 +766,7 @@ def run_eval(
             sanitize_for_log(document_id) if document_id is not None else "<none>",
             sanitize_for_log(redact_secrets_for_log(detail)),
         )
-        return RunAborted(reason, f"per-document/record-phase abort: {reason}")
+        return RunAbortedError(reason, f"per-document/record-phase abort: {reason}")
 
     # ADR-0005 #9 step 2: sequential, in-process loop. NO platform write
     # happens inside it -- every gate is computed and every DocumentRecord
@@ -770,7 +797,7 @@ def run_eval(
             golden = item["golden"]
             try:
                 document_path = _resolve_document_path(document_dir, document_id)
-            except _PathContainmentViolation as exc:
+            except _PathContainmentViolationError as exc:
                 raise _abort(
                     "path_containment_violation", exc.document_id, "containment check failed"
                 ) from None
@@ -797,7 +824,7 @@ def run_eval(
             # explicitly instead -- same fail-closed direction, same message,
             # but it cannot be optimised away.
             #
-            # Deliberately NOT a `RunAborted`/`AbortReason`: the pre-flight
+            # Deliberately NOT a `RunAbortedError`/`AbortReason`: the pre-flight
             # ceiling refusal is a different, operator-facing path with its own
             # reason (`quota_ceiling_exceeded`). Reaching here means the
             # pre-flight computation itself was wrong (A10: "a bug detector,
@@ -914,7 +941,7 @@ def run_eval(
         except (ExperimentRecordFailedError, ScoreWriteFailedError) as exc:
             # ADR-0005 #9 step 4: "any other platform error -> hard_failure".
             raise _abort("hard_failure", None, str(exc)) from None
-    except RunAborted as exc:
+    except RunAbortedError as exc:
         # ADR-0007 Option E: best-effort, whatever was classified before
         # the abort -- never affects the exit code below (INV-08/CT-04),
         # see `write_run_artifact`'s own docstring for the failure posture.

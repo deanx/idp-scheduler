@@ -217,7 +217,7 @@ def test_frame_location_is_package_relative_for_a_facade_frame() -> None:
 
     try:
         facade._resolve_document_path("/documents", "\x00")
-    except Exception as exc:  # noqa: BLE001 - deliberately triggering _PathContainmentViolation
+    except Exception as exc:  # noqa: BLE001 - deliberately triggering _PathContainmentViolationError
         location = frame_location(exc)
 
     inner = json.loads(location)

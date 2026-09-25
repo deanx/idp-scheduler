@@ -61,8 +61,8 @@ from idp_regression.orchestration.check_versions import (
     OUTCOME_NEW_VERSION_DETECTED,
     OUTCOME_NO_NEW_VERSIONS,
     OUTCOME_SKIPPED_LOCKED,
-    CheckVersionsRefused,
-    StateFileLocked,
+    CheckVersionsRefusedError,
+    StateFileLockedError,
     TickResult,
     TickState,
     _reject_state_file_inside_repo,
@@ -361,7 +361,7 @@ def run_watch_loop(
     A tick that raises an ordinary exception (a transient network error,
     a 5xx the probe didn't classify) does NOT kill the loop -- it is
     logged and the loop continues at the next interval, unchanged state.
-    `CheckVersionsRefused` (an unparseable anchor, an uninitialised
+    `CheckVersionsRefusedError` (an unparseable anchor, an uninitialised
     bootstrap) is different: it is a structurally broken setup that
     waiting out an interval cannot fix, so it halts like the named
     outcomes.
@@ -417,7 +417,7 @@ def run_watch_loop(
     # only path that reaches the summary without ever assigning it,
     # making this total over every way the loop can end:
     #   - "interrupted"            -- Ctrl-C (the ordinary quiet stop)
-    #   - "refused"                -- CheckVersionsRefused, before or
+    #   - "refused"                -- CheckVersionsRefusedError, before or
     #                                 between ticks
     #   - "tick_failures_exceeded" -- consecutive transient failures hit
     #                                 the ceiling
@@ -448,7 +448,7 @@ def run_watch_loop(
                     max_indeterminate_ticks=max_indeterminate_ticks,
                     clock=clock,
                 )
-            except CheckVersionsRefused as exc:
+            except CheckVersionsRefusedError as exc:
                 logger.error(
                     "watch: refused outcome=%s message=%s",
                     exc.outcome,
@@ -689,7 +689,7 @@ def main(argv: list[str] | None = None) -> int:
     new credential lookup, anything) is covered for free. The inner,
     per-site `except`s in `_run(...)` below are NOT removed -- they give
     a friendlier, more specific message for the failures already known
-    (`StateFileLocked`, `CheckVersionsRefused`, a missing env var) -- this
+    (`StateFileLockedError`, `CheckVersionsRefusedError`, a missing env var) -- this
     is the backstop for everything else."""
     configure_logging()
     try:
@@ -762,13 +762,13 @@ def _run(argv: list[str] | None) -> int:
     try:
         _reject_state_file_inside_repo(args.state_file)
         args.state_file.parent.mkdir(parents=True, exist_ok=True)
-    except CheckVersionsRefused as exc:
+    except CheckVersionsRefusedError as exc:
         logger.error("watch: %s", sanitize_for_log(str(exc)))
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:  # noqa: BLE001 - F-2/INV-02: never a raw traceback/path here
         # ⚠️ Fixed 2026-09-23 (`/test` gate, F-2): this try used to catch
-        # ONLY `CheckVersionsRefused` -- an `OSError` from `mkdir()` (e.g.
+        # ONLY `CheckVersionsRefusedError` -- an `OSError` from `mkdir()` (e.g.
         # a read-only parent) escaped `main()`, the outermost caller, as
         # a RAW TRACEBACK carrying the state-file path. Same shape as
         # every other catch-all in this codebase: only the type name and
@@ -799,7 +799,7 @@ def _run(argv: list[str] | None) -> int:
     # completely unlocked. See `open_state_file_locked`'s docstring.
     try:
         fd = open_state_file_locked(args.state_file)
-    except StateFileLocked:
+    except StateFileLockedError:
         logger.error(
             "watch: %s is locked by another running instance -- refusing to start",
             args.state_file,
@@ -812,7 +812,7 @@ def _run(argv: list[str] | None) -> int:
         return 0
     except Exception as exc:  # noqa: BLE001 - F-2/INV-02: never a raw traceback/path here
         # F-2: `open_state_file_locked` raising anything OTHER than
-        # `StateFileLocked` (a bare `OSError` from the sidecar's own
+        # `StateFileLockedError` (a bare `OSError` from the sidecar's own
         # `os.open`) was not caught here either.
         logger.error(
             "watch: unexpected error locking state file: %s at %s",
@@ -832,7 +832,7 @@ def _run(argv: list[str] | None) -> int:
             # tick's save). Read the data file itself through
             # `load_state_from_file`, independent of the lock.
             state = load_state_from_file(args.state_file)
-        except CheckVersionsRefused as exc:
+        except CheckVersionsRefusedError as exc:
             logger.error("watch: %s", sanitize_for_log(str(exc)))
             print(f"error: {exc}", file=sys.stderr)
             return 1

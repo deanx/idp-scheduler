@@ -1519,7 +1519,7 @@ def _dataset_with_document_id(document_id: str) -> dict[str, object]:
 def test_resolve_document_path_rejects_traversal_and_absolute_ids(
     hostile_document_id: str,
 ) -> None:
-    with pytest.raises(facade._PathContainmentViolation):
+    with pytest.raises(facade._PathContainmentViolationError):
         facade._resolve_document_path("/documents", hostile_document_id)
 
 
@@ -1533,28 +1533,28 @@ def test_resolve_document_path_rejects_a_symlink_escaping_the_root(
     escape_link = root / "escape.json"
     escape_link.symlink_to(outside)
 
-    with pytest.raises(facade._PathContainmentViolation):
+    with pytest.raises(facade._PathContainmentViolationError):
         facade._resolve_document_path(str(root), "escape.json")
 
 
 def test_resolve_document_path_rejects_a_nul_byte(tmp_path: Path) -> None:
     """R-1: `os.path.realpath` raises a raw `ValueError` on an embedded
-    NUL -- must surface as `_PathContainmentViolation`, not escape."""
+    NUL -- must surface as `_PathContainmentViolationError`, not escape."""
     root = tmp_path / "documents"
     root.mkdir()
-    with pytest.raises(facade._PathContainmentViolation):
+    with pytest.raises(facade._PathContainmentViolationError):
         facade._resolve_document_path(str(root), "a\x00.pdf")
 
 
 def test_resolve_document_path_rejects_empty_string() -> None:
-    with pytest.raises(facade._PathContainmentViolation):
+    with pytest.raises(facade._PathContainmentViolationError):
         facade._resolve_document_path("/documents", "")
 
 
 def test_resolve_document_path_rejects_non_str() -> None:
     """R-1: a non-`str` `document_id` (e.g. `5`) raises a raw `TypeError`
-    from `os.path.isabs` -- must surface as `_PathContainmentViolation`."""
-    with pytest.raises(facade._PathContainmentViolation):
+    from `os.path.isabs` -- must surface as `_PathContainmentViolationError`."""
+    with pytest.raises(facade._PathContainmentViolationError):
         facade._resolve_document_path("/documents", cast(str, 5))
 
 
@@ -2597,3 +2597,148 @@ def test_run_eval_redacts_a_credential_value_embedded_in_an_abort_detail(
     assert exit_code != 0
     assert secret not in caplog.text
     assert "auth_failure" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# DEBT-83 -- a duplicate `document_id` silently collapsed TWO structures.
+# ---------------------------------------------------------------------------
+
+
+def _duplicate_document_id_dataset() -> dict[str, object]:
+    from idp_regression.platform.schema import load_golden_schema
+
+    # Two DISTINCT items (distinct item_id, distinct golden) that name the
+    # same document. Both are individually valid; only together are they a
+    # problem, which is why every per-item guard passed them.
+    return {
+        "items": [
+            {
+                "item_id": "item-1",
+                "document_id": "doc-1",
+                "golden": {
+                    "fields": {"total": {"value": "1250.00", "type": "number", "critical": True}}
+                },
+            },
+            {
+                "item_id": "item-2",
+                "document_id": "doc-1",
+                "golden": {
+                    "fields": {"total": {"value": "9999.99", "type": "number", "critical": True}}
+                },
+            },
+        ],
+        "expected_output_schema": load_golden_schema(),
+    }
+
+
+def test_run_eval_refuses_a_dataset_with_a_duplicate_document_id_before_spending_quota(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """DEBT-83: a duplicate `document_id` collapsed the run in TWO places.
+
+    `verdict_maps[document_id] = verdicts` is last-write-wins, so the
+    run artifact recorded only the final occurrence -- and the artifact
+    is the ONLY local record of the extracted/expected/confidence values
+    behind a verdict. If the FIRST occurrence was the one that failed,
+    the artifact disagreed with the exit code: a red build whose own
+    evidence file showed nothing wrong. The Epic E console reads that
+    artifact as the authoritative job result, so it would have reported
+    the wrong per-document verdicts too.
+
+    `_select_documents`' `by_id = {item["document_id"]: item ...}` had
+    the same collapse, so `--document doc-1` silently picked whichever
+    item came last.
+
+    Refused pre-run rather than de-duplicated: the two items carry
+    DIFFERENT goldens, so there is no correct way to pick one, and
+    guessing is how a run measures something nobody asked for. This
+    fires BEFORE any submit -- zero IDP quota -- like every other
+    pre-run guard.
+    """
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+
+    # The quota boundary is `extract()`, not adapter construction:
+    # `make_idp_adapter` runs at facade.py:517, BEFORE `get_dataset` at
+    # :553, and building an adapter spends nothing. Asserting on the
+    # adapter would pin the wrong line and would go green on a refusal
+    # that had already submitted.
+    class _NeverExtractsAdapter:
+        def extract(self, *args: object, **kwargs: object) -> object:
+            raise AssertionError("extract() must not run: the refusal is pre-run, zero quota")
+
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda org_id: _NeverExtractsAdapter())
+    monkeypatch.setattr(
+        facade, "make_platform", lambda: _FakePlatform(_duplicate_document_id_dataset())
+    )
+
+    with caplog.at_level(logging.INFO):
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012",
+            "1.0",
+            "nightly",
+            "idp-regression-golden",
+            "org-t",
+        )
+
+    assert exit_code != 0
+    assert "dataset_fetch_failed" in caplog.text
+    assert "run_end" in caplog.text
+    # The message must name the offending document so it can be fixed,
+    # and must never carry a `golden` VALUE (INV-02).
+    assert "doc-1" in caplog.text
+    assert "1250.00" not in caplog.text
+    assert "9999.99" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# DEBT-59 -- the FIFTH catch-all site was proven only by reading the clause.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt(), SystemExit(2)])
+def test_keyboard_interrupt_propagates_from_the_tail_complete_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+    interrupt: BaseException,
+) -> None:
+    """DEBT-59: `_mark_run_status_best_effort` is the fifth catch-all in
+    this module, and the only one whose `KeyboardInterrupt`/`SystemExit`
+    behaviour rested on inspecting the clause shape plus a one-off
+    reviewer probe -- no repo test held it. The other four are pinned.
+
+    It matters most precisely here. This call is the LAST thing a
+    successful run does, so an operator pressing Ctrl-C during it is
+    interrupting a run that has already classified every document,
+    already written its artifact and already recorded to the platform.
+    If the catch-all swallowed the interrupt, the run would return 0 and
+    the operator would be told the run completed normally -- Ctrl-C
+    silently producing a GREEN result is the failure class `## Rigor`
+    names as this system's worst.
+
+    `SystemExit` is parametrized alongside it because the clause is
+    `except (Exception, asyncio.CancelledError)`: both interrupts are
+    `BaseException` and neither is an `Exception`, so one tuple edit
+    (widening to `BaseException`) would break both at once.
+    """
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    _stub_make_idp_adapter_success(monkeypatch)
+    platform = _RecordingPlatform(_well_formed_dataset(), mark_run_status_error=interrupt)
+    monkeypatch.setattr(facade, "make_platform", lambda: platform)
+
+    with pytest.raises(type(interrupt)):
+        run_eval(
+            "12345678-1234-1234-1234-123456789012",
+            "1.0",
+            "nightly",
+            "idp-regression-golden",
+            "org-t",
+        )
+
+    # It must have reached the TAIL marker, not aborted earlier -- proving
+    # the interrupt escaped the complete-path call this row is about and
+    # not some earlier guard that happens to re-raise.
+    assert [c["status"] for c in platform.mark_run_status_calls] == ["complete"]

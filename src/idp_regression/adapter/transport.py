@@ -19,6 +19,7 @@ import http.client
 import json
 import logging
 import mimetypes
+import os
 import re
 import urllib.error
 import urllib.request
@@ -48,6 +49,13 @@ _ACCESS_TOKEN_JSON_PATTERN = re.compile(r'"access_token"\s*:\s*"(?:[^"\\]|\\.)*"
 # original patterns only covered the literal form.
 _CLIENT_SECRET_FORM_PATTERN = re.compile(r"client_secret(?:=|%3D)[^&\s]*", re.IGNORECASE)
 _ACCESS_TOKEN_FORM_PATTERN = re.compile(r"access_token(?:=|%3D)[^&\s]*", re.IGNORECASE)
+
+#: DEBT-54 A-2: the largest local document this client will read into memory.
+#: 100 MiB — comfortably above any real invoice or scanned corpus page (the
+#: test pack's heaviest is a few hundred KiB) and far below the point where
+#: the doubled copy in the multipart body threatens the process. A document
+#: over this is refused as a typed `IDPTransportError`, never a `MemoryError`.
+MAX_DOCUMENT_BYTES = 100 * 1024 * 1024
 
 #: Bounded default — never block indefinitely on a hung connection (ADR-0004 #1).
 DEFAULT_TIMEOUT_SECONDS = 30.0
@@ -188,12 +196,50 @@ def post_multipart_file(
     headers: dict[str, str] | None = None,
 ) -> tuple[int, Any]:
     try:
-        with open(file_path, "rb") as fh:
+        # DEBT-52 -- close the TOCTOU window at the point of USE.
+        # `_resolve_document_path` proves the path is inside
+        # `IDP_DOCUMENT_DIR` with `os.path.realpath`, but that proof is
+        # about a PATH and this open happens later; anything able to
+        # write to the document directory can swap the file for a
+        # symlink in between, and the read would follow it out of the
+        # containment just verified. `O_NOFOLLOW` makes a symlink in the
+        # final position fail the open instead of being resolved, so the
+        # check and the use are bound to the same file descriptor.
+        #
+        # Residual, stated rather than implied: `O_NOFOLLOW` guards only
+        # the FINAL component. An attacker who can swap an intermediate
+        # DIRECTORY for a symlink between realpath and open is still not
+        # covered — that needs `O_PATH`/`openat` directory-fd walking,
+        # which is Linux-specific and not portable to the macOS target.
+        # The threat model here is a local trusted filesystem (DEBT-52's
+        # original acceptance); this narrows the window that was actually
+        # reachable, it does not claim to have closed the class.
+        fd = os.open(file_path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as fh:
+            # DEBT-54 A-2 -- bound the read.
+            # `fh.read()` was unbounded, and the bytes are then COPIED
+            # into the multipart body below, so peak memory is twice the
+            # file size. A large or hostile document raised `MemoryError`
+            # inside the escaping class GAP-1 hardened — the one
+            # exception shape that does not behave like the typed errors
+            # every caller here is written against.
+            #
+            # `os.fstat` on the OPEN descriptor, never `os.stat` on the
+            # path: stat-then-open is the very TOCTOU pair the line above
+            # closes, and measuring a different file than the one being
+            # read would be a guard in name only.
+            size = os.fstat(fh.fileno()).st_size
+            if size > MAX_DOCUMENT_BYTES:
+                raise IDPTransportError(
+                    "the local document file exceeds the maximum size "
+                    f"({MAX_DOCUMENT_BYTES} bytes)"
+                )
             file_bytes = fh.read()
     except (OSError, ValueError):
         # ValueError: a NUL byte embedded in the path raises this, not
         # OSError (/test Scenario B item 2). Never echo the local path —
-        # it can reveal filesystem layout (R3).
+        # it can reveal filesystem layout (R3). `OSError` now also covers
+        # `ELOOP`/`EMLINK` from the `O_NOFOLLOW` refusal above.
         raise IDPTransportError("failed to read the local document file") from None
 
     boundary = uuid.uuid4().hex

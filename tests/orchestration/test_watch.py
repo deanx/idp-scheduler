@@ -22,7 +22,7 @@ import pytest
 from idp_regression.adapter.version_probe import NEGATIVE_CONTROL_VERSION, ProbeResult
 from idp_regression.orchestration import check_versions as check_versions_module
 from idp_regression.orchestration.check_versions import (
-    StateFileLocked,
+    StateFileLockedError,
     TickState,
     _lock_path_for,
     open_state_file_locked,
@@ -329,12 +329,12 @@ def test_f7_a_refusal_before_any_tick_completes_is_not_misreported_as_no_new_ver
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """F-7 (Major, reproduced): `elif healthy_ticks == 0 and failed_ticks
-    > 0` was wrong a second way -- a `CheckVersionsRefused` halt (an
+    > 0` was wrong a second way -- a `CheckVersionsRefusedError` halt (an
     unparseable anchor) increments NEITHER counter, so a watcher that
     halts before a single tick completes fell through to the plain "no
     new versions found" `else` branch. Reproduced with an anchor that
     fails strict semver (`_run_walk` never runs; `check_once` raises
-    `CheckVersionsRefused` before the first probe)."""
+    `CheckVersionsRefusedError` before the first probe)."""
     probe = FakeProbe({})
     state = TickState(known_versions=["not-a-semver"])
 
@@ -789,7 +789,7 @@ def test_lock_survives_a_state_file_save_mid_loop(tmp_path: Path) -> None:
         assert exit_code == 0
         assert state_path.exists(), "save_state_atomic must have fired at least once"
 
-        with pytest.raises(StateFileLocked):
+        with pytest.raises(StateFileLockedError):
             open_state_file_locked(state_path)
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
@@ -906,7 +906,7 @@ def test_watch_main_the_live_repro_an_isadirectoryerror_from_load_state_is_a_con
     site-specific `except Exception` clauses above `load_state_from_file`'s
     call site): the THIRD site. `load_state_from_file` does a bare
     `os.open(...)` (`check_versions.py`); the try wrapping its call in
-    `main()` (now `_run()`) only ever caught `CheckVersionsRefused`. This
+    `main()` (now `_run()`) only ever caught `CheckVersionsRefusedError`. This
     is the exact live repro (2026-09-24): a `--state-file` path that is
     actually a directory makes that `os.open()` raise `IsADirectoryError`,
     which used to escape `main()` raw, carrying both the state-file path
@@ -942,7 +942,7 @@ def test_watch_main_the_live_repro_an_isadirectoryerror_from_load_state_is_a_con
         # or from anywhere else in main() -- escapes raw", not "these two
         # calls are guarded". Neither of these two sites was individually
         # wrapped before this fix -- `load_state_from_file`'s try only
-        # ever caught `CheckVersionsRefused` (the exact third site the
+        # ever caught `CheckVersionsRefusedError` (the exact third site the
         # coordinator's repro names), and the `MuleSoftVersionProbe(...)`
         # construction sits between two `try` blocks with no guard of its
         # own at all. The old tests only proved the two sites the PRIOR
@@ -997,7 +997,7 @@ def test_check_versions_main_an_oserror_preparing_the_state_file_is_a_controlled
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """F-2, the identical shape at `check_versions.py:765-768` -- the
-    outer `try` there only ever caught `CheckVersionsRefused`, so an
+    outer `try` there only ever caught `CheckVersionsRefusedError`, so an
     `OSError` from `mkdir` (or from anything else under it, e.g.
     `open_state_file_locked` raising a bare `OSError`) escaped
     `check_versions.main()` as a raw traceback too. Named, not

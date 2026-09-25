@@ -12,7 +12,7 @@ from typing import cast
 import pytest
 
 from idp_regression.classifier.types import Golden
-from idp_regression.orchestration.errors import RunAborted
+from idp_regression.orchestration.errors import RunAbortedError
 from idp_regression.orchestration.prerun import (
     check_empty_set,
     check_schema_drift,
@@ -45,7 +45,7 @@ def test_check_schema_drift_aborts_on_mismatch(caplog: pytest.LogCaptureFixture)
     mismatched = copy.deepcopy(load_golden_schema())
     mismatched["title"] = "a different title entirely"
 
-    with caplog.at_level(logging.ERROR), pytest.raises(RunAborted) as excinfo:
+    with caplog.at_level(logging.ERROR), pytest.raises(RunAbortedError) as excinfo:
         check_schema_drift(_dataset(schema=mismatched))
 
     assert excinfo.value.reason == "schema_drift"
@@ -57,7 +57,7 @@ def test_check_schema_drift_aborts_on_mismatch(caplog: pytest.LogCaptureFixture)
 def test_check_schema_drift_aborts_when_schema_is_absent(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    with caplog.at_level(logging.ERROR), pytest.raises(RunAborted) as excinfo:
+    with caplog.at_level(logging.ERROR), pytest.raises(RunAbortedError) as excinfo:
         check_schema_drift(_dataset(schema=None))
 
     assert excinfo.value.reason == "schema_drift"
@@ -82,7 +82,7 @@ def test_check_empty_set_passes_on_a_non_empty_dataset() -> None:
 
 
 def test_check_empty_set_aborts_on_an_empty_dataset() -> None:
-    with pytest.raises(RunAborted) as excinfo:
+    with pytest.raises(RunAbortedError) as excinfo:
         check_empty_set(_dataset(items=[]))
     assert excinfo.value.reason == "empty_set"
 
@@ -101,7 +101,7 @@ def test_an_empty_dataset_with_a_drifted_schema_reports_schema_drift_not_empty_s
     in `tests/orchestration/test_facade.py`, which drives `run_eval`
     itself and would go red if the calls were swapped."""
     empty_and_drifted = _dataset(items=[], schema={"not": "the committed schema"})
-    with pytest.raises(RunAborted) as excinfo:
+    with pytest.raises(RunAbortedError) as excinfo:
         check_schema_drift(empty_and_drifted)
     assert excinfo.value.reason == "schema_drift"
 
@@ -123,7 +123,7 @@ def test_validate_golden_set_aborts_malformed_golden_on_a_missing_fields_key(
         "document_id": "doc-42",
         "golden": cast(Golden, {}),
     }
-    with caplog.at_level(logging.ERROR), pytest.raises(RunAborted) as excinfo:
+    with caplog.at_level(logging.ERROR), pytest.raises(RunAbortedError) as excinfo:
         validate_golden_set(_dataset(items=[bad_item]))
 
     assert excinfo.value.reason == "malformed_golden"
@@ -142,7 +142,7 @@ def test_validate_golden_set_checks_every_item_before_any_idp_call_first_bad_win
         {"item_id": "i2", "document_id": "bad-2", "golden": cast(Golden, {})},
         {"item_id": "i3", "document_id": "good-3", "golden": GOOD_GOLDEN},
     ]
-    with caplog.at_level(logging.ERROR), pytest.raises(RunAborted) as excinfo:
+    with caplog.at_level(logging.ERROR), pytest.raises(RunAbortedError) as excinfo:
         validate_golden_set(_dataset(items=items))
 
     assert excinfo.value.reason == "malformed_golden"
@@ -166,7 +166,7 @@ def test_validate_golden_set_never_leaks_the_golden_value_into_the_log(
             {"fields": {"total": {"value": sensitive_value, "type": "not-a-real-type"}}},
         ),
     }
-    with caplog.at_level(logging.ERROR), pytest.raises(RunAborted):
+    with caplog.at_level(logging.ERROR), pytest.raises(RunAbortedError):
         validate_golden_set(_dataset(items=[bad_item]))
 
     assert sensitive_value not in caplog.text

@@ -97,7 +97,7 @@ _ZERO_EXIT_OUTCOMES = frozenset(
 )
 
 
-class CheckVersionsRefused(Exception):
+class CheckVersionsRefusedError(Exception):
     """A fail-closed refusal decided before (or instead of) probing —
     caught once at the CLI boundary to set the right outcome/exit code,
     never a raw escape."""
@@ -136,7 +136,7 @@ class TickState:
     def from_json(data: dict[str, Any]) -> TickState:
         schema_version = data.get("schema_version")
         if schema_version != SCHEMA_VERSION:
-            raise CheckVersionsRefused(
+            raise CheckVersionsRefusedError(
                 OUTCOME_REFUSED_UNINITIALISED,
                 f"state file schema_version {schema_version!r} is not the "
                 f"recognised {SCHEMA_VERSION!r} — refusing rather than "
@@ -390,7 +390,7 @@ def check_once(
     if known_version is not None:
         known.add(known_version)
     if not known:
-        raise CheckVersionsRefused(
+        raise CheckVersionsRefusedError(
             OUTCOME_REFUSED_UNINITIALISED,
             "no anchor available for this (org, action, dataset) — bootstrap "
             "with one `run_eval` invocation (records action_version via "
@@ -398,7 +398,7 @@ def check_once(
         )
     anchor = max(known, key=lambda v: parse_semver(v) or (-1, -1, -1))
     if parse_semver(anchor) is None:
-        raise CheckVersionsRefused(
+        raise CheckVersionsRefusedError(
             OUTCOME_REFUSED_UNPARSEABLE_VERSION_SCHEME,
             f"anchor {anchor!r} does not match strict semver ^\\d+\\.\\d+\\.\\d+$ "
             "— refusing rather than walking a grid that cannot contain the answer",
@@ -619,7 +619,7 @@ def _base_event(
 # -- State-file I/O (tier 2, §A'.6) ------------------------------------------
 
 
-class StateFileLocked(Exception):
+class StateFileLockedError(Exception):
     """Another process already holds the state file's advisory lock
     (R2, 2026-09-23) — the caller must treat this as `skipped_locked`,
     never retry-block, never proceed unlocked."""
@@ -638,7 +638,7 @@ def _lock_path_for(state_file: Path) -> Path:
 def open_state_file_locked(state_file: Path) -> int:
     """Opens (creating if absent) and takes a non-blocking exclusive
     `flock` on a SIDECAR path (`<state_file>.lock`) -- deliberately NOT
-    `state_file` itself. Raises `StateFileLocked` (fd already closed) if
+    `state_file` itself. Raises `StateFileLockedError` (fd already closed) if
     another process holds it.
 
     RQ-1 (2026-09-23 re-review, PIN): `flock` locks the INODE a path
@@ -674,7 +674,7 @@ def open_state_file_locked(state_file: Path) -> int:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         os.close(fd)
-        raise StateFileLocked(str(state_file)) from None
+        raise StateFileLockedError(str(state_file)) from None
     return fd
 
 
@@ -698,7 +698,7 @@ def _reject_state_file_inside_repo(state_file: Path) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     resolved = state_file.resolve()
     if resolved == repo_root or repo_root in resolved.parents:
-        raise CheckVersionsRefused(
+        raise CheckVersionsRefusedError(
             OUTCOME_REFUSED_UNINITIALISED,
             f"--state-file must be OUTSIDE the repository working tree "
             f"(got {resolved}, inside {repo_root}) — a git-tracked store is "
@@ -714,11 +714,11 @@ def load_state(fh: Any) -> TickState:
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise CheckVersionsRefused(
+        raise CheckVersionsRefusedError(
             OUTCOME_REFUSED_UNINITIALISED, "state file is not valid JSON"
         ) from exc
     if not isinstance(data, dict):
-        raise CheckVersionsRefused(
+        raise CheckVersionsRefusedError(
             OUTCOME_REFUSED_UNINITIALISED, "state file does not contain a JSON object"
         )
     return TickState.from_json(data)
@@ -833,7 +833,7 @@ def main(argv: list[str] | None = None) -> int:
         args.state_file.parent.mkdir(parents=True, exist_ok=True)
         try:
             fd = open_state_file_locked(args.state_file)
-        except StateFileLocked:
+        except StateFileLockedError:
             _emit(
                 {
                     "event": "check_tick",
@@ -885,14 +885,14 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
-    except CheckVersionsRefused as exc:
+    except CheckVersionsRefusedError as exc:
         _emit({"event": "check_tick", "outcome": exc.outcome, "message": str(exc)})
         return 1
     except Exception as exc:  # noqa: BLE001 - F-2/INV-02: never a raw traceback/path here
         # ⚠️ Fixed 2026-09-23 (`/test` gate, F-2): this try only ever
-        # caught `CheckVersionsRefused` -- an `OSError` from `mkdir()`
+        # caught `CheckVersionsRefusedError` -- an `OSError` from `mkdir()`
         # (or from `open_state_file_locked` raising anything other than
-        # `StateFileLocked`) escaped `main()`, the outermost caller, as a
+        # `StateFileLockedError`) escaped `main()`, the outermost caller, as a
         # RAW TRACEBACK carrying the state-file path. Identical shape and
         # identical fix to `cli.py`'s own catch-all: only the type name
         # and frame location are logged, never `str(exc)`.

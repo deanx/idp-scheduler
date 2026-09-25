@@ -61,7 +61,7 @@ instance, finding (b)): the three validation error messages this
 function writes itself (missing `--action`, malformed `--action`,
 malformed `--version`) name only the field, never the value -- they were
 already correct and are pinned that way. `argparse`'s OWN error message
-(the `_ArgumentParsingFailed` branch) is different: it is built by
+(the `_ArgumentParsingFailedError` branch) is different: it is built by
 `argparse` from raw argv tokens and DOES embed attacker-controlled text
 (e.g. an unrecognized flag's value) -- an earlier version of this
 docstring claimed "never the value" for ALL error messages, which was
@@ -211,10 +211,10 @@ class _NonExitingArgumentParser(argparse.ArgumentParser):
     `main()` can convert it into a controlled non-zero return."""
 
     def error(self, message: str) -> None:  # type: ignore[override]
-        raise _ArgumentParsingFailed(message)
+        raise _ArgumentParsingFailedError(message)
 
 
-class _ArgumentParsingFailed(Exception):
+class _ArgumentParsingFailedError(Exception):
     pass
 
 
@@ -359,7 +359,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     try:
         args = parser.parse_args(argv)
-    except _ArgumentParsingFailed as exc:
+    except _ArgumentParsingFailedError as exc:
         # DEBT-44 gate, fifth instance, finding (b) (2026-09-21, reproduced
         # live): argparse's own error() builds its message from raw argv
         # tokens (e.g. "unrecognized arguments: --x <value>"), so an

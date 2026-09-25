@@ -108,10 +108,3 @@ select = ["E", "F", "I", "UP", "B", "SIM", "S", "ARG", "BLE", "N", "RUF100"]
 # calls by position/keyword from the SDK side (ADR-0005 #9); the closure
 # doesn't consume every field the SDK may pass.
 "src/idp_regression/platform/langfuse_adapter.py" = ["ARG001", "ARG002"]
-# DEBT-73 remainder, not fixed here (owned by Lane D/orchestration):
-# five exception classes (CheckVersionsRefused, StateFileLocked,
-# _ArgumentParsingFailed, RunAborted, _PathContainmentViolation) predate
-# this rule and are referenced by name at multiple call sites; renaming
-# is a behavior-visible change outside tooling/config scope. Tracked in
-# DEBT-73's report to Lane E's caller, not swept.
-"src/idp_regression/orchestration/*.py" = ["N818"]
