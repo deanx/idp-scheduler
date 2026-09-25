@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from typing import Literal, get_args
+from typing import Literal, cast, get_args
 
 from idp_regression.classifier.types import Golden, TableVerdict, Verdict, VerdictMap
 from idp_regression.platform.types import ScoreInput
@@ -72,6 +72,47 @@ def field_score_name(field_name: str) -> str:
     return f"field:{field_name}"
 
 
+def _comment(verdict: Verdict | TableVerdict, include_values: bool) -> str | None:
+    """The score's comment: what the platform shows beside the verdict.
+
+    ``None`` unless the run is recording values (DEBT-18 option B's
+    behaviour, reproduced exactly by ``--platform-values verdicts-only``).
+    When it is, the comment is the one line a human reading a red score in
+    the UI actually wants -- what was expected and what came back -- and
+    nothing else; the full map is on the trace span.
+    """
+    if not include_values or verdict.get("verdict") == "detail":
+        return None
+    expected = verdict.get("expected")
+    actual = verdict.get("actual")
+    if verdict["verdict"] == "match":
+        return f"= {expected!r}"
+    return f"expected {expected!r} · actual {actual!r}"
+
+
+def _gate_comment(verdicts: VerdictMap, gate: GateLiteral) -> str | None:
+    """Which fields failed the gate. Field NAMES only -- never values --
+    so this is safe to emit whatever `--platform-values` says."""
+    if gate == "PASS":
+        return None
+    failing: list[str] = []
+    for name, entry in verdicts.items():
+        verdict = entry["verdict"]
+        critical = entry["critical"]
+        if verdict == "detail":
+            rows = cast("TableVerdict", entry)["rows"]
+            fails = critical and any(
+                row["verdict"] in ("missing", "wrong_value") for row in rows
+            )
+        elif verdict == "wrong_format":
+            fails = bool(cast("Verdict", entry).get("format_critical"))
+        else:
+            fails = critical and verdict in ("missing", "wrong_value")
+        if fails:
+            failing.append(name)
+    return f"FAIL on: {', '.join(sorted(failing))}" if failing else None
+
+
 def build_score_inputs(
     *,
     golden: Golden,
@@ -79,6 +120,7 @@ def build_score_inputs(
     gate: GateLiteral,
     run_id: str,
     document_id: str,
+    include_values: bool = False,
 ) -> list[ScoreInput]:
     """CT-03: one ``field:<name>`` per golden field, one ``prompt:<16-hex>``
     per golden prompt, and exactly one ``gate`` per document (NFR N9 — no
@@ -115,7 +157,7 @@ def build_score_inputs(
                 # DEBT-18 (user decision, option B): no expected/actual/
                 # confidence value leaves the app — the golden lives only
                 # in its Langfuse dataset item.
-                "comment": None,
+                "comment": _comment(verdict, include_values),
             }
         )
 
@@ -127,7 +169,7 @@ def build_score_inputs(
                 "id": score_id(run_id=run_id, document_id=document_id, score_name=name),
                 "name": name,
                 "value": _verdict_value(verdict),
-                "comment": None,  # DEBT-18 option B — see above
+                "comment": _comment(verdict, include_values),
             }
         )
 
@@ -136,7 +178,10 @@ def build_score_inputs(
             "id": score_id(run_id=run_id, document_id=document_id, score_name="gate"),
             "name": "gate",
             "value": gate,
-            "comment": None,
+            # Names the fields that caused a FAIL -- names only, so this
+            # line stays useful even under `verdicts-only`, where it is
+            # the one thing that keeps a red gate self-explanatory.
+            "comment": _gate_comment(verdicts, gate),
         }
     )
     return scores

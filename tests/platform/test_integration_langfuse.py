@@ -266,6 +266,7 @@ def _build_record_for_item(item: Any, *, run_id: str) -> DocumentRecord:
                     "actual": total_value,
                     "confidence": 0.9,
                     "critical": True,
+                    "format_critical": False,
                     "type": "number",
                 }
             },
@@ -488,6 +489,7 @@ def test_record_run_writes_readable_scores_and_is_visible_in_experiments(
                         "actual": actual_sentinel,
                         "confidence": 0.42,
                         "critical": True,
+                        "format_critical": False,
                         "type": "number",
                     }
                 },

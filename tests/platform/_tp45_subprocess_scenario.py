@@ -125,6 +125,7 @@ def main() -> None:
                     "actual": ACTUAL_SENTINEL,
                     "confidence": 0.42,
                     "critical": True,
+                    "format_critical": False,
                     "type": "number",
                 }
             },

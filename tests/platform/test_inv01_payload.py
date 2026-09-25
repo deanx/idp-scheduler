@@ -24,8 +24,9 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+from idp_regression.classifier.types import VerdictMap
 from idp_regression.platform.langfuse_adapter import LangfuseAdapter
 from idp_regression.platform.scoring import build_score_inputs, score_id
 from idp_regression.platform.tracing import ExperimentItem
@@ -94,6 +95,7 @@ def test_write_scores_payload_never_carries_a_file_path_or_bytes() -> None:
                 "actual": "1250.00",
                 "confidence": 0.9,
                 "critical": True,
+                "format_critical": False,
                 "type": "number",
             }
         },
@@ -206,6 +208,7 @@ def test_record_run_completes_and_posts_no_sentinel_value_in_any_score_body() ->
                 "actual": golden_sentinel,
                 "confidence": 0.9,
                 "critical": True,
+                "format_critical": False,
                 "type": "number",
             }
         },
@@ -271,12 +274,13 @@ def test_experiment_item_input_contains_only_document_id() -> None:
     assert item.metadata is None
 
 
-def test_experiment_item_expected_output_is_never_the_golden() -> None:
-    """DEBT-18 option B: expected_output is ALWAYS {} — the golden lives
-    only in its Langfuse dataset item, spans reference the item by id,
-    never a copy of the golden's field values. Atchim suggestion:
-    _item_cache no longer even HOLDS the golden (only dataset_id) —
-    there's nothing left to leak from that seam."""
+def test_experiment_item_expected_output_is_empty_without_verdicts() -> None:
+    """⚠️ DEBT-18 option B REVERSED 2026-09-25 (user decision): a record
+    carrying `verdicts` now puts the expected values on the item (see the
+    test below). A record WITHOUT them -- `--platform-values
+    verdicts-only`, and every caller written before the reversal -- still
+    sends `{}`, which is what makes the stricter posture one flag away
+    rather than a rewrite. This test pins that leg."""
     client = RecordingHttpClient()
     tracing_client = RecordingTracingClient()
     adapter = LangfuseAdapter(client=client, tracing_client=tracing_client)
@@ -300,12 +304,13 @@ def test_experiment_item_expected_output_is_never_the_golden() -> None:
     assert item.expected_output == {}
 
 
-def test_experiment_task_output_is_the_verdict_map_never_a_raw_value() -> None:
-    """DEBT-18 option B: output = {score_name: score_value} derived from
-    record["scores"] — score values are verdict literals ("match",
-    "wrong_value", "PASS"/"FAIL"), never a raw extracted/expected value
-    or a confidence number. On any task failure the output is the fixed
-    constant, never str(exception) (ADR-0005 #9 defense in depth)."""
+def test_experiment_task_output_is_the_verdict_map_without_verdicts() -> None:
+    """The verdict map keyed by score name is the STABLE part of the span
+    output (INV-03) and is unchanged by the DEBT-18 reversal: score values
+    are still verdict literals. Without `verdicts` on the record there is
+    no `detail` key either, so this is byte-for-byte the pre-2026-09-25
+    payload. On any task failure the output is still the fixed constant,
+    never str(exception) (ADR-0005 #9 defense in depth)."""
     client = RecordingHttpClient()
     tracing_client = RecordingTracingClient()
     adapter = LangfuseAdapter(client=client, tracing_client=tracing_client)
@@ -525,3 +530,110 @@ def test_real_sdk_span_output_is_the_task_failed_constant_via_isolated_subproces
         assert json.loads(output) == {"record_error": "task_failed"}
         assert "KeyError" not in output
         assert "scores" not in output  # the missing-key name never leaks either
+
+
+# ── DEBT-18 REVERSED 2026-09-25 (user decision) ───────────────────────
+#
+# "We need to have as much information as possible at [the platform], as
+# [it] is the information point here." PII is handled at the IDP action,
+# which can be configured not to parse it, and by a filter or a later
+# deletion pass. These tests pin what the platform is told NOW -- the
+# point of keeping them beside the ones above is that both postures stay
+# described, and switching between them is `--platform-values`.
+
+
+def _record_with_verdicts() -> dict[str, Any]:
+    verdicts: VerdictMap = {
+        "total": {
+            "verdict": "wrong_value",
+            "expected": "1250.00",
+            "actual": "1250.09",
+            "confidence": 0.71,
+            "critical": True,
+            "format_critical": False,
+            "type": "number",
+        },
+        "line_items": {
+            "verdict": "detail",
+            "critical": True,
+            "type": None,
+            "rows": [
+                {
+                    "match_key": "SKU-1",
+                    "column": "amount",
+                    "verdict": "match",
+                    "expected": "65.00",
+                    "actual": "65.00",
+                    "confidence": 0.99,
+                }
+            ],
+        },
+    }
+    return {
+        "item_id": "item-1",
+        "document_id": "doc-1",
+        "scores": [],
+        "verdicts": verdicts,
+    }
+
+
+def _record_run_with(record: dict[str, Any]) -> RecordingTracingClient:
+    tracing_client = RecordingTracingClient()
+    adapter = LangfuseAdapter(client=RecordingHttpClient(), tracing_client=tracing_client)
+    adapter._item_cache = {"item-1": "ds-1"}
+    adapter._cached_dataset_name = "ds"
+    adapter.record_run(
+        dataset_name="ds",
+        run_name="run-1",
+        run_id="run-1",
+        records=[cast("Any", record)],
+        metadata={
+            "action_id": "a",
+            "action_version": "v",
+            "golden_version": "g",
+            "golden_dataset_name": "d",
+        },
+    )
+    return tracing_client
+
+
+def test_expected_values_reach_the_item_when_the_run_records_values() -> None:
+    tracing_client = _record_run_with(_record_with_verdicts())
+
+    item = tracing_client.run_experiment_calls[0]["data"][0]
+
+    assert item.expected_output == {
+        "total": "1250.00",
+        "line_items[SKU-1].amount": "65.00",
+    }
+
+
+def test_actual_and_confidence_reach_the_span_when_the_run_records_values() -> None:
+    """The whole point of the reversal: a reader on the platform can see
+    what came back, not only that it differed."""
+    tracing_client = _record_run_with(_record_with_verdicts())
+
+    detail = tracing_client.task_outputs[0]["detail"]
+
+    assert detail["total"] == {
+        "verdict": "wrong_value",
+        "expected": "1250.00",
+        "actual": "1250.09",
+        "confidence": 0.71,
+    }
+    # Table rows are flattened the same way `scripts/show_run.py` labels
+    # them, so a span and the local run artifact read alike.
+    assert detail["line_items[SKU-1].amount"]["actual"] == "65.00"
+
+
+def test_a_record_without_verdicts_still_sends_no_values() -> None:
+    """The `verdicts-only` posture, end to end: same adapter, same call,
+    no expected_output and no `detail`."""
+    tracing_client = _record_run_with(
+        {"item_id": "item-1", "document_id": "doc-1", "scores": [], "verdicts": None}
+    )
+
+    item = tracing_client.run_experiment_calls[0]["data"][0]
+
+    assert item.expected_output == {}
+    assert "detail" not in tracing_client.task_outputs[0]

@@ -25,6 +25,7 @@ import urllib.parse
 from collections.abc import Callable
 from typing import Any, NotRequired, cast, get_args, get_origin, get_type_hints
 
+from idp_regression.classifier.types import VerdictMap
 from idp_regression.platform.errors import (
     DatasetFetchFailedError,
     ExperimentRecordFailedError,
@@ -421,6 +422,45 @@ def _body_snippet_for_error(body: Any) -> str:
     if body is None:
         return "<empty body>"
     return f"<{type(body).__name__} body, {len(str(body))} chars, redacted>"
+
+
+def _leaf_values(verdicts: VerdictMap) -> dict[str, Any]:
+    """Flatten a verdict map to `{leaf: {verdict, expected, actual,
+    confidence}}` for the trace span.
+
+    Table rows are flattened `table[key].column`, the same labelling
+    `scripts/show_run.py` prints, so a span and the local run artifact
+    read the same way.
+    """
+    flat: dict[str, Any] = {}
+    for name, entry in verdicts.items():
+        if entry["verdict"] == "detail":
+            for row in entry["rows"]:
+                column = row.get("column")
+                label = f"{name}[{row.get('match_key')}]" + (f".{column}" if column else "")
+                flat[label] = {
+                    "verdict": row["verdict"],
+                    "expected": row.get("expected"),
+                    "actual": row.get("actual"),
+                    "confidence": row.get("confidence"),
+                }
+            continue
+        flat[name] = {
+            "verdict": entry["verdict"],
+            "expected": entry.get("expected"),
+            "actual": entry.get("actual"),
+            "confidence": entry.get("confidence"),
+        }
+    return flat
+
+
+def _expected_output(record: DocumentRecord) -> dict[str, Any]:
+    """`{leaf: expected}` for the experiment item, or `{}` when the run is
+    not recording values."""
+    verdicts = record.get("verdicts")
+    if not verdicts:
+        return {}
+    return {leaf: detail["expected"] for leaf, detail in _leaf_values(verdicts).items()}
 
 
 class LangfuseAdapter:
@@ -829,17 +869,28 @@ class LangfuseAdapter:
         records_by_item_id = {record["item_id"]: record for record in records}
         task_failed = False
 
-        def task(*, item: ExperimentItem, **kwargs: Any) -> dict[str, str]:
+        def task(*, item: ExperimentItem, **kwargs: Any) -> dict[str, Any]:
             # A total function that cannot raise (ADR-0005 #9 defense in
             # depth): str(exception) must never reach a span attribute.
-            # DEBT-18 (user decision, option B): the output is the verdict
-            # map only (score name -> score value, e.g. "match"/"PASS") --
-            # never an extracted/expected value or a confidence number.
-            # The golden lives only in its Langfuse dataset item.
+            #
+            # ⚠️ DEBT-18 option B REVERSED 2026-09-25 (user decision). The
+            # span still carries the verdict map keyed by score name --
+            # that part is the stable shape (INV-03) and is unchanged --
+            # and, when the record carries `verdicts`, an additional
+            # `detail` key with the expected/actual/confidence behind
+            # every one of them. A record without `verdicts`
+            # (`--platform-values verdicts-only`) reproduces option B's
+            # payload exactly.
             nonlocal task_failed
             try:
                 record = records_by_item_id[item.id]
-                return {score["name"]: score["value"] for score in record["scores"]}
+                output: dict[str, Any] = {
+                    score["name"]: score["value"] for score in record["scores"]
+                }
+                verdicts = record.get("verdicts")
+                if verdicts:
+                    output["detail"] = _leaf_values(verdicts)
+                return output
             except Exception:  # noqa: BLE001 - intentional total catch, no exception text kept
                 task_failed = True
                 return {"record_error": "task_failed"}
@@ -849,10 +900,12 @@ class LangfuseAdapter:
                 id=item_id,
                 dataset_id=self._item_cache[item_id],
                 input={"document_id": records_by_item_id[item_id]["document_id"]},
-                # DEBT-18 option B: never copy the golden into a span --
-                # spans reference the item by id; the golden lives only in
-                # its Langfuse dataset item.
-                expected_output={},
+                # DEBT-18 REVERSED 2026-09-25: the expected values are
+                # carried here too when the record has them, so the
+                # platform UI shows input / expected / output side by side
+                # without a reader opening the dataset item. Still `{}`
+                # under `--platform-values verdicts-only`.
+                expected_output=_expected_output(records_by_item_id[item_id]),
             )
             for item_id in record_item_ids
         ]

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, Protocol, TypedDict
 
-from idp_regression.classifier.types import Golden
+from idp_regression.classifier.types import Golden, VerdictMap
 
 RunStatus = Literal["aborted", "complete"]
 
@@ -51,19 +51,31 @@ class DocumentRecord(TypedDict):
     by the orchestrator's in-process loop, with no platform write until
     ``record_run`` is called once after the loop.
 
-    DEBT-18 (user decision, option B): no extracted (actual), expected, or
-    confidence value is ever written by the adapter — the golden lives
-    only in its Langfuse dataset item, which is where it must be.
-    ``actual`` (the ``NormalizedOutput`` the classifier compared against
-    the golden) is deliberately NOT carried here: nothing on the platform
-    side reads it any more, so it's never even constructed as sensitive
-    dead weight. ``scores`` (built by ``build_score_inputs``, verdict
-    literals + no comment) is the only per-document platform-bound data.
+    ⚠️ **DEBT-18 REVERSED 2026-09-25 (user decision).** Option B (2026-09-19)
+    kept every extracted/expected/confidence value off the platform, so a
+    run recorded verdict literals and nothing else. The user has reversed
+    that: *"we need to have as much information as possible at Langfuse,
+    as Langfuse is the information point here"*, with PII handled where it
+    belongs — IDP can be configured not to parse it, and a filter or a
+    later deletion pass can run over the platform.
+
+    ``verdicts`` carries the full CT-02 map (verdict + expected + actual +
+    confidence per leaf) when the run is recording values, and is ``None``
+    when it is not (``--platform-values verdicts-only``, which reproduces
+    option B's payload exactly). The orchestrator decides; the adapter only
+    renders what it is given, so the policy lives in ONE place.
+
+    What this changes: a self-hosted platform instance now holds the same
+    sensitive financial values ``CLAUDE.md ## Domain`` names. The
+    self-hosting obligations already recorded there (encryption at rest,
+    DB access control, backup — ADR-0001/N25) stop being paperwork and
+    become the control.
     """
 
     item_id: str
     document_id: str
     scores: list[ScoreInput]
+    verdicts: NotRequired[VerdictMap | None]
 
 
 class RunMetadata(TypedDict):

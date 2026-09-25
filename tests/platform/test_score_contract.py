@@ -39,6 +39,7 @@ def _verdicts() -> VerdictMap:
             "actual": "INV-1",
             "confidence": 0.99,
             "critical": True,
+            "format_critical": False,
             "type": "id",
         },
         "total": {
@@ -47,6 +48,7 @@ def _verdicts() -> VerdictMap:
             "actual": "1150.00",
             "confidence": 0.8,
             "critical": True,
+            "format_critical": False,
             "type": "number",
         },
         "What is the vendor name?": {
@@ -55,6 +57,7 @@ def _verdicts() -> VerdictMap:
             "actual": "Acme Corp",
             "confidence": 0.9,
             "critical": False,
+            "format_critical": False,
             "type": None,
         },
     }
@@ -220,6 +223,7 @@ def test_no_sentinel_expected_or_actual_value_appears_in_any_score_input() -> No
         "actual": _ACTUAL_SENTINEL,
         "confidence": 0.42,
         "critical": True,
+        "format_critical": False,
         "type": "number",
     }
 
