@@ -57,6 +57,11 @@ def test_the_probe_does_not_refuse_a_genuine_acquire(
     def _probe() -> None:
         while not stop.is_set():
             registry.is_busy()
+            # Zangado QA N-4: yield. Without this the prober makes no
+            # syscall on a cheap `is_busy()` and starves the main thread
+            # of the GIL -- a future optimisation there would turn this
+            # into a mysteriously slow test rather than a failing one.
+            time.sleep(0)
 
     prober = threading.Thread(target=_probe, daemon=True)
     prober.start()
@@ -134,14 +139,36 @@ def test_a_genuinely_held_workspace_is_still_refused(
         started = time.monotonic()
         with pytest.raises(jobs.WorkspaceBusyError):
             second = jobs._WorkspaceLock(lock_path)
-            second.acquire()
+            # WITH the budget -- this is `start()`'s path. Zangado QA N-1:
+            # this used to call the default `acquire()`, so the retry loop
+            # broke on its first attempt and the bound below constrained
+            # nothing. A mutant multiplying the budget by 100 (a retry
+            # that waits out a REAL job) passed this whole file.
+            second.acquire(retry_budget_seconds=jobs.START_LOCK_RETRY_SECONDS)
         elapsed = time.monotonic() - started
     finally:
         held.release()
 
-    # Bounded: a refusal must stay prompt enough to answer an HTTP
-    # request, so the retry budget cannot quietly grow into a hang.
+    # Two assertions, because either alone is escapable.
+    #
+    # An ABSOLUTE wall-clock bound. Bounding against
+    # `START_LOCK_RETRY_SECONDS` was the obvious move and it is wrong:
+    # the mutant that matters inflates that very constant, so the bound
+    # moves with the thing it is supposed to bound and the test passes
+    # while taking 25 seconds. (Found by re-running Zangado's M8 after
+    # fixing N-1 -- the first fix swapped one vacuous assertion for
+    # another.) This number is the requirement itself: a 409 answers an
+    # HTTP request, so it has to be prompt in absolute terms, whatever
+    # the budget is set to.
     assert elapsed < 2.0, f"a real conflict took {elapsed:.2f}s to refuse"
+
+    # And the constant itself stays sane, so a budget large enough to
+    # wait out a real job is caught at its source rather than only when
+    # some timing assertion happens to notice.
+    assert jobs.START_LOCK_RETRY_SECONDS <= 1.0, (
+        f"the retry budget is {jobs.START_LOCK_RETRY_SECONDS}s -- long enough "
+        "to start waiting out a genuine job rather than a passing probe"
+    )
 
 
 def test_is_busy_reports_true_while_a_job_holds_the_workspace(

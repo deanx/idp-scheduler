@@ -70,9 +70,11 @@ import fcntl
 import json
 import logging
 import os
+import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -448,6 +450,17 @@ class _WorkspaceLock:
             self._fd = None
 
 
+#: Statuses that cannot survive the console that wrote them. `running` is
+#: obvious. `planning` is here because of the ordering Zangado QA (N-2)
+#: found: `_run_locked` publishes `running` in memory and persists a moment
+#: later, so a console dying inside that window leaves `planning` on disk.
+#: Once the owning process is gone the two are equally dead, and treating
+#: only one of them as interrupted is what let a killed job come back as a
+#: NON-TERMINAL status that never resolves. Remapping both makes the write
+#: ordering irrelevant to what an operator is told.
+_DEAD_ON_LOAD = frozenset({"running", "planning"})
+
+
 class JobRegistry:
     """Jobs for one console process, with a history that outlives it.
 
@@ -577,8 +590,17 @@ class JobRegistry:
             # complete one, never a torn write. The temp file is created
             # in the SAME directory to guarantee that -- a rename across
             # filesystems is not atomic and would fall back to a copy.
-            temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-            descriptor = os.open(temporary, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+            # Per-WRITER, not per-process (Zangado QA N-3): a name keyed
+            # only on the pid means two concurrent persists of one job in
+            # one process would truncate the same temp file and could
+            # `os.replace` a mixed record. Not reachable today -- a job's
+            # persists are sequential -- so this is closing it for free
+            # rather than after it bites.
+            descriptor, temporary_name = tempfile.mkstemp(
+                dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+            )
+            temporary = pathlib.Path(temporary_name)
+            os.fchmod(descriptor, 0o600)
             try:
                 with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
                     handle.write(json.dumps(record, indent=2))
@@ -620,13 +642,13 @@ class JobRegistry:
                 id=job_id,
                 kind=str(record.get("kind", "?")),
                 argv=str(record.get("command", "")).split(" "),
-                status="failed" if status == "running" else status,
+                status="failed" if status in _DEAD_ON_LOAD else status,
             )
             job.planned_extractions = record.get("planned_extractions")
             job.exit_code = record.get("exit_code")
             job.started_at = float(record.get("started_at") or 0.0)
             job.summary = dict(record.get("summary") or {})
-            if status == "running":
+            if status in _DEAD_ON_LOAD:
                 job.summary["verdict"] = "INTERRUPTED"
                 job.summary["note"] = (
                     "this job was still running when a previous console stopped; the "

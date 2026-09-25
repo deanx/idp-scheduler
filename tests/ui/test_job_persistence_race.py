@@ -48,6 +48,32 @@ def _slow_argv(seconds: float) -> list[str]:
     return ["/bin/sh", "-c", f"sleep {seconds}", "--yes"]
 
 
+def _wait_for_disk_status(
+    record_path: Path, status: str, timeout: float = 5.0
+) -> dict[str, object]:
+    """Poll the RECORD, not the in-memory job.
+
+    Zangado QA N-2: `_run_locked` publishes `running` in memory and
+    persists a moment later, so a test that waits on memory and then
+    reads disk is asserting "it reached disk before my next read" --
+    which is the very ordering the original flake came from, inherited
+    into the test written to catch it. Polling disk constrains the thing
+    that actually matters: the transition reaches the record at all.
+    """
+    deadline = time.time() + timeout
+    last: dict[str, object] = {}
+    while time.time() < deadline:
+        try:
+            last = json.loads(record_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            time.sleep(0.01)
+            continue
+        if last.get("status") == status:
+            return last
+        time.sleep(0.01)
+    return last
+
+
 def test_a_job_that_is_running_is_persisted_as_running(
     space: Path, documents: Path
 ) -> None:
@@ -70,16 +96,12 @@ def test_a_job_that_is_running_is_persisted_as_running(
         "compare-versions", _slow_argv(5), planned_extractions=2, approved_extractions=2
     )
 
-    deadline = time.time() + 5.0
-    while registry.get(job.id).status != "running" and time.time() < deadline:
-        time.sleep(0.01)
-    assert registry.get(job.id).status == "running", "the job never reached running"
-
     record_path = space / jobs.HISTORY_DIR_NAME / f"{job.id}.json"
-    on_disk = json.loads(record_path.read_text(encoding="utf-8"))
-    assert on_disk["status"] == "running", (
-        f"in-memory status is running but disk says {on_disk['status']!r} -- "
-        "a console death here would surface this job as non-terminal forever"
+    on_disk = _wait_for_disk_status(record_path, "running")
+    assert on_disk.get("status") == "running", (
+        f"the running transition never reached disk (last saw "
+        f"{on_disk.get('status')!r}) -- a console death here would surface "
+        "this job as non-terminal forever"
     )
 
 
@@ -96,10 +118,8 @@ def test_a_job_interrupted_by_a_console_death_is_named_interrupted(
     job = registry.start(
         "compare-versions", _slow_argv(5), planned_extractions=2, approved_extractions=2
     )
-    deadline = time.time() + 5.0
-    while registry.get(job.id).status != "running" and time.time() < deadline:
-        time.sleep(0.01)
-    assert registry.get(job.id).status == "running"
+    record_path = space / jobs.HISTORY_DIR_NAME / f"{job.id}.json"
+    assert _wait_for_disk_status(record_path, "running").get("status") == "running"
 
     restarted = jobs.JobRegistry()
     restarted.load_history()
@@ -186,3 +206,49 @@ def test_the_history_record_is_never_observed_half_written(
         "record disappears"
     )
     assert json.loads(record_path.read_text(encoding="utf-8"))["planned_extractions"] == 9
+
+
+def test_a_planning_record_left_by_a_dead_console_is_also_interrupted(
+    space: Path,
+) -> None:
+    """DEBT-85(b) residual (Zangado QA N-2a), pinned directly.
+
+    `_run_locked` publishes `running` in memory and persists a moment
+    later. The window is one `fsync` wide now rather than the whole run,
+    but a console dying inside it still leaves `planning` on disk — and
+    `planning` is a NON-TERMINAL status, so before this it stayed
+    unresolved forever with no note that quota had been spent.
+
+    This has to be a unit pin on `load_history`. The end-to-end tests
+    above cannot reach it: they wait for `running` to land on disk, which
+    is exactly the case where the window did NOT bite. A mutant removing
+    `planning` from `_DEAD_ON_LOAD` survived the whole UI suite until
+    this test existed.
+
+    Once the owning process is gone, `planning` and `running` are equally
+    dead — neither will ever advance, because nothing holds the job.
+    """
+    history = space / jobs.HISTORY_DIR_NAME
+    history.mkdir(parents=True, exist_ok=True)
+    (history / "c0ffee.json").write_text(
+        json.dumps({
+            "id": "c0ffee",
+            "kind": "compare-versions",
+            "status": "planning",
+            "planned_extractions": 40,
+            "command": "/bin/echo x --yes",
+            "summary": {},
+        }),
+        encoding="utf-8",
+    )
+
+    registry = jobs.JobRegistry()
+    registry.load_history()
+    recovered = registry.get("c0ffee")
+
+    assert recovered.status not in ("planning", "running"), (
+        f"a dead console's job came back as {recovered.status!r} -- a "
+        "non-terminal status that never resolves"
+    )
+    assert recovered.summary["verdict"] == "INTERRUPTED"
+    assert "not restarted automatically" in recovered.summary["note"]

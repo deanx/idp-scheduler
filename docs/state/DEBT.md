@@ -46,6 +46,30 @@ Filed and fixed here as **DEBT-85**.
   rescoped to what it actually pins, and the end-to-end path is now driven through a real
   `start()` plus a simulated console death.
 
+### QA round 2 (Zangado): N-1 … N-4, and a self-referential assertion
+
+- **N-1 — ✅ fixed.** `test_a_genuinely_held_workspace_is_still_refused` called the DEFAULT
+  `acquire()`, so the retry loop broke on its first attempt and the test's timing bound
+  constrained nothing; a mutant inflating the budget ×100 (a retry that waits out a real job)
+  passed the whole file. **The first fix was also wrong**, and instructively so: bounding
+  `elapsed` against `START_LOCK_RETRY_SECONDS` is self-referential, because that is the constant
+  the mutant changes — the bound moved with the thing it was bounding and the test passed while
+  taking 25 seconds. Now an ABSOLUTE bound (a 409 answers an HTTP request, so it must be prompt
+  whatever the budget says) plus a separate assertion that the constant itself stays ≤ 1s.
+- **N-2 — ✅ fixed, both halves.** (a) `load_history` now treats an on-disk `planning` exactly as
+  `running`: once the owning process is gone the two are equally dead, which makes the
+  publish-then-persist ordering irrelevant to what an operator is told. (b) the two
+  `start()`-driven tests poll the DISK record rather than memory, so they no longer inherit the
+  window they were written to catch. A mutant removing `planning` from the dead set survived the
+  entire UI suite until a direct unit pin was added for it.
+- **N-3 — ✅ fixed.** `_persist`'s temp file is per-writer (`tempfile.mkstemp`) rather than keyed
+  on the pid alone.
+- **N-4 — ✅ fixed.** The prober loop yields, so a future cheaper `is_busy()` cannot silently turn
+  that test into a slow one.
+- **DEBT-52 row** — Zangado's added qualification recorded: the residual requires write access to
+  an intermediate directory *on the root's path*, i.e. an attacker who already owns the corpus
+  location, so the `Low` severity stands on its own reasoning rather than on the deferral.
+
 ### Process note, recorded because it is the point
 
 Three of the defects above were found by review, not by the suite: the vacuous size-cap pin
@@ -55,6 +79,14 @@ atomicity test that passed against the broken implementation because the window 
 — and was only caught by running the mutation. It now widens the window deterministically. That
 is the eighth vacuous test this project has found, and the first one caught by its author before
 review.
+
+**And then it happened twice more in the fixes themselves** — a mutant removing the `planning`
+remap survived the whole UI suite, and N-1's *first* correction replaced one vacuous assertion
+with another by bounding a value against the constant the mutation changes. Both were caught only
+by re-running the mutants after fixing, never by the tests passing. The rule this project keeps
+re-learning, stated once more: **a green test is evidence of nothing until the mutation it claims
+to kill has been run against it** — and that includes the mutation run against the fix for a
+vacuous test.
 
 ## ✅ STEP-0 REGISTER RE-AUDIT — 2026-09-25, every open row re-verified against HEAD `d14789d`
 
