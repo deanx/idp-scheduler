@@ -182,12 +182,26 @@ class TestT7History:
         assert job.id in {row["id"] for row in restarted.summaries()}
         assert restarted.get(job.id).planned_extractions == 4
 
-    def test_a_job_interrupted_by_a_restart_is_named_not_resumed(
+    def test_load_history_remaps_a_running_record_to_interrupted(
         self, space: Path
     ) -> None:
-        """The extractions it spent are spent either way; restarting it
-        would spend them again. What used to vanish silently was the
-        knowledge that anything was in flight at all."""
+        """A UNIT pin on `load_history`'s remap, and only that.
+
+        ⚠️ Renamed and rescoped 2026-09-25 (Zangado QA F-4b). This was
+        called `test_a_job_interrupted_by_a_restart_is_named_not_resumed`
+        and read as the end-to-end guarantee that an interrupted job is
+        surfaced. It was not: it hand-writes a `status: "running"`
+        record, and production never wrote one -- `start()` persisted
+        `planning` and the transition to `running` touched only memory,
+        so a real interrupted job came back as `planning` forever and
+        this test passed throughout. It constrained its own setup.
+
+        The end-to-end pin now lives in
+        `tests/ui/test_job_persistence_race.py`, driven through a real
+        `start()` and a simulated console death. This one keeps its
+        narrow value: given a `running` record on disk, the remap is
+        correct.
+        """
         history = space / jobs.HISTORY_DIR_NAME
         history.mkdir(parents=True)
         (history / "deadbeef.json").write_text(

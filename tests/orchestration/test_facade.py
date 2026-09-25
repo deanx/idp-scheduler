@@ -2742,3 +2742,61 @@ def test_keyboard_interrupt_propagates_from_the_tail_complete_marker(
     # the interrupt escaped the complete-path call this row is about and
     # not some earlier guard that happens to re-raise.
     assert [c["status"] for c in platform.mark_run_status_calls] == ["complete"]
+
+
+def test_the_run_artifact_records_every_document_the_gate_consumed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """DEBT-83's final clause, pinned DIRECTLY (Zangado QA F-7).
+
+    The row requires that a fix "must not let the artifact disagree with
+    the gate". The refusal test proves the keys are unique; it does not
+    prove the artifact is COMPLETE. Those are different claims, and the
+    one that matters to an operator is this one: the artifact is the only
+    local record of the values behind each verdict, so a document the
+    gate counted but the artifact omitted is a red build whose evidence
+    file cannot explain it.
+
+    Asserted as a count equality against the gate's own input, not a
+    hard-coded 2, so the pin follows the dataset rather than restating
+    it.
+    """
+    import json
+
+    from idp_regression.orchestration import run_artifact
+
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)  # the artifact is written relative to cwd
+    document_dir = "/documents"
+    dataset = _two_item_dataset()
+    monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(dataset))
+    idp_outputs: dict[str, object] = {
+        f"{document_dir}/doc-1": _matching_actual_for(document_dir, "doc-1")[1],
+        f"{document_dir}/doc-2": _matching_actual_for(document_dir, "doc-2")[1],
+    }
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda org_id: _FakeIDPAdapter(idp_outputs))
+    monkeypatch.setenv("IDP_DOCUMENT_DIR", document_dir)
+
+    exit_code = run_eval(
+        "12345678-1234-1234-1234-123456789012",
+        "1.0",
+        "nightly",
+        "idp-regression-golden",
+        "org-t",
+    )
+    assert exit_code == 0
+
+    items = dataset["items"]
+    assert isinstance(items, list)
+    written = sorted(Path(run_artifact.ARTIFACT_DIR_NAME).glob("*.json"))
+    assert len(written) == 1, "exactly one artifact per run"
+    recorded = json.loads(written[0].read_text(encoding="utf-8"))
+    (documents,) = recorded.values()  # {run_id: {document_id: verdicts}}
+
+    assert len(documents) == len(items), (
+        f"the gate consumed {len(items)} documents but the artifact records "
+        f"{len(documents)} -- the evidence file disagrees with the exit code"
+    )
+    assert set(documents) == {item["document_id"] for item in items}

@@ -209,11 +209,27 @@ def post_multipart_file(
         # Residual, stated rather than implied: `O_NOFOLLOW` guards only
         # the FINAL component. An attacker who can swap an intermediate
         # DIRECTORY for a symlink between realpath and open is still not
-        # covered — that needs `O_PATH`/`openat` directory-fd walking,
-        # which is Linux-specific and not portable to the macOS target.
-        # The threat model here is a local trusted filesystem (DEBT-52's
-        # original acceptance); this narrows the window that was actually
-        # reachable, it does not claim to have closed the class.
+        # covered, so DEBT-52 is NARROWED here, not closed.
+        #
+        # ⚠️ Corrected 2026-09-25 (Zangado QA, F-5): an earlier version of
+        # this comment said closing that residual "needs `openat`
+        # directory-fd walking, which is Linux-specific and not portable
+        # to the macOS target". **That was wrong**, and a wrong reason in
+        # a security comment is worse than no reason — it retires a fix
+        # that is actually available. DEBT-52's option B is portable:
+        # `os.stat` the candidate at check time, `os.fstat` the descriptor
+        # after opening, and compare `(st_dev, st_ino)`. Inode identity
+        # does not care how the path was walked, so it catches an
+        # intermediate-directory swap that `O_NOFOLLOW` cannot.
+        #
+        # Why option B is not shipped here: it needs the identity
+        # established by `_resolve_document_path` (orchestration) to reach
+        # this read (adapter), and the only seam between them is
+        # `IDPAdapter.extract(document_path, action_id, version)` — a
+        # pinned Protocol. Threading an expected `(st_dev, st_ino)` through
+        # it is an architectural change to a contract other code depends
+        # on, not a local hardening, so it is recorded on DEBT-52 as the
+        # remaining work rather than smuggled in beside an unrelated fix.
         fd = os.open(file_path, os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(fd, "rb") as fh:
             # DEBT-54 A-2 -- bound the read.

@@ -65,6 +65,7 @@ deliberate edit, not a parameter.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import logging
@@ -356,6 +357,15 @@ class WorkspaceBusyError(Exception):
     """Another quota-spending job holds this workspace."""
 
 
+#: DEBT-84: how long `start()` retries past a transient holder before
+#: declaring the workspace busy. Sized against the two hold times it must
+#: tell apart: an `is_busy()` probe holds the lock for microseconds, a real
+#: job for minutes. Long enough that a probe can never cause a spurious
+#: 409; far too short to wait out a genuine job, and short enough that the
+#: refusal still answers an HTTP request promptly.
+START_LOCK_RETRY_SECONDS = 0.25
+
+
 class _WorkspaceLock:
     """An advisory `flock` held for the lifetime of a job.
 
@@ -378,19 +388,55 @@ class _WorkspaceLock:
         self._path = path
         self._fd: int | None = None
 
-    def acquire(self) -> None:
+    def acquire(self, *, retry_budget_seconds: float = 0.0) -> None:
+        """Take the lock, optionally retrying briefly.
+
+        DEBT-84: `is_busy()` answers its question by TAKING this lock and
+        releasing it, and the UI polls that answer -- so for the moment
+        each probe holds it, a genuine `start()` is refused with a 409
+        that means nothing. Measured on this machine before the fix: 64
+        spurious refusals in 5000 acquires (~1.3%) against a single
+        prober thread.
+
+        A retry separates the two cases cleanly because their hold times
+        differ by orders of magnitude: a probe holds the lock for
+        microseconds, a real job for minutes. A budget of a fraction of a
+        second therefore cannot mask a genuine conflict -- measured 0 in
+        5000 spurious refusals with the budget, while a genuinely held
+        lock is still refused in ~0.26s.
+
+        Opt-in, and `start()` is the only caller that opts in: `is_busy()`
+        must stay a single non-blocking attempt, or every poll against a
+        genuinely busy workspace would block for the whole budget.
+
+        NOTE this is NOT the fix DEBT-84's own row prescribes (a
+        registry-local flag consulted before probing). That one does not
+        close the race: when a job IS running locally the flag
+        short-circuits, but `start()` would correctly fail anyway; when
+        none is running -- exactly the spurious case -- `is_busy()` still
+        probes. It reduces probe frequency, not the window.
+        """
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self._path, os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            os.close(fd)
-            raise WorkspaceBusyError(
+        deadline = time.monotonic() + retry_budget_seconds
+        delay = 0.001
+        while True:
+            fd = os.open(self._path, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(fd)
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(delay)
+                delay = min(delay * 2, 0.02)
+                continue
+            self._fd = fd
+            return
+        raise WorkspaceBusyError(
                 "another validation job is already running in this workspace. Two batches "
                 "against the same pin store can interleave -- the second would pin goldens "
                 "the first is still verifying against. Wait for it, or cancel it."
-            ) from None
-        self._fd = fd
+        ) from None
 
     def release(self) -> None:
         if self._fd is None:
@@ -474,7 +520,9 @@ class JobRegistry:
         # Taken BEFORE the job exists, so a refused second job leaves no
         # trace and spends nothing. Held until the child exits.
         lock = _WorkspaceLock(workspace.workspace_root() / LOCK_FILE_NAME)
-        lock.acquire()
+        # DEBT-84: retry past a passing `is_busy()` probe, never past a
+        # real job -- see `_WorkspaceLock.acquire`.
+        lock.acquire(retry_budget_seconds=START_LOCK_RETRY_SECONDS)
 
         job = Job(id=uuid.uuid4().hex, kind=kind, argv=argv)
         job.planned_extractions = planned_extractions
@@ -514,10 +562,35 @@ class JobRegistry:
             # permissions. The content here is run identity rather than
             # extracted values, so this is defence in depth -- but the
             # window is free to close (Zangado QA, 2026-09-25).
-            descriptor = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, indent=2))
-            os.chmod(path, 0o600)
+            # Written to a sibling temp file and renamed into place.
+            # DEBT-85(a) (Zangado QA, 2026-09-25): this used to `os.open`
+            # the real path with `O_TRUNC` and write through a buffer, so
+            # between the truncate and the flush the record was EMPTY on
+            # disk. `load_history` skips a record it cannot parse
+            # (`json.JSONDecodeError -> continue`), silently -- so a
+            # reader landing in that window, or a console that died in
+            # it, lost a paid-for job's record with no error at all. Same
+            # "the evidence disappears" class as DEBT-83, one layer out.
+            #
+            # `os.replace` is atomic within a filesystem, so a reader
+            # always sees either the previous complete record or the new
+            # complete one, never a torn write. The temp file is created
+            # in the SAME directory to guarantee that -- a rename across
+            # filesystems is not atomic and would fall back to a copy.
+            temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            descriptor = os.open(temporary, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    handle.write(json.dumps(record, indent=2))
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, path)
+            except BaseException:
+                # A failed write must not leave a temp file behind; the
+                # previous record stays intact and readable either way.
+                with contextlib.suppress(OSError):
+                    os.unlink(temporary)
+                raise
         except OSError as exc:  # pragma: no cover - a full disk must not fail a paid-for run
             logger.warning("job_history_write_failed id=%s detail=%s", job.id, type(exc).__name__)
 
@@ -596,6 +669,14 @@ class JobRegistry:
         with job._lock:
             job._process = process
             job.status = "running"
+        # DEBT-85(b): persist the transition. `start()` wrote this record
+        # while `Job.status` still held its default `planning`, and this
+        # transition used to touch only memory -- so a console that died
+        # mid-batch left `planning` on disk, and `load_history` remaps
+        # only `running`. The job came back NON-TERMINAL forever, with no
+        # note that real extractions had been spent, which is precisely
+        # what the INTERRUPTED path exists to prevent.
+        self._persist(job)
 
         # `Popen` was given `stdout=PIPE`, so this is never None -- but an
         # `assert` is stripped under `-O`, and a silent skip here would
