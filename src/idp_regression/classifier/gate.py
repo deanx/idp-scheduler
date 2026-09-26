@@ -224,6 +224,7 @@ def _classify_field(
     scorer: Scorer = regression_scorer,
     kind: Literal["field", "prompt", "table_column"] = "field",
     source: str | None = None,
+    date_format: str | None = None,
 ) -> Verdict:
     """Build one leaf `Verdict`. The verdict WORD is the `scorer`'s call
     and nothing else here second-guesses it; this function only assembles
@@ -248,6 +249,7 @@ def _classify_field(
                 critical=critical,
                 format_critical=format_critical,
                 source=source,
+                date_format=date_format,
             )
         )
     )
@@ -293,14 +295,62 @@ def _classify_prompt(
 
 
 # DATA-MODEL-01 §1 carries no per-column type for table rows; columns are
-# compared as text. A future golden schema may add per-column types.
+# compared as text when the golden declares no type for them.
+#
+# D2a (user decision 2026-09-25), closing DEBT-04: a table spec may now
+# carry `types: {<column>: number|date|id|text}`, and a declared column
+# canonicalizes exactly as a FIELD of that type already does. Before this,
+# every column was text whatever it held, so a `unit_price` of `1,250.00`
+# against a golden `1250.00` -- the same number with a thousands separator
+# -- read as a difference, and a real regression on that column could not
+# be told from a formatting change.
+#
+# The DEFAULT stays `text`, and that is load-bearing rather than
+# incidental: every golden committed before D2a has no `types` key, and
+# those goldens must keep meaning exactly what they meant. Adopting this
+# change may not silently re-verdict an existing corpus.
 _TABLE_COLUMN_TYPE = "text"
+
+
+def _declared_date_format(spec: object) -> str | None:
+    """The golden field's declared `strptime` pattern, if any.
+
+    Returned only for a non-empty string. A malformed value degrades to
+    `None` -- i.e. to the pre-D2b behaviour -- rather than raising: the
+    committed schema constrains this key, so a bad one means a golden
+    that bypassed validation, and aborting a whole run over it would be a
+    worse outcome than comparing the date the way it was compared before
+    the key existed.
+    """
+    if not isinstance(spec, dict):
+        return None
+    declared = spec.get("date_format")
+    return declared if isinstance(declared, str) and declared.strip() else None
+
+
+def _column_type(gtable: GoldenTable, column: str) -> str:
+    """The declared type for ``column``, or ``text``.
+
+    Unknown type names fall back to ``text`` rather than raising: the
+    committed schema constrains `types` to the four `FieldType` values, so
+    a stray one means a golden that bypassed validation, and treating it
+    as text degrades to the pre-D2a behaviour instead of aborting a run
+    over a field the gate could still compare.
+    """
+    declared = gtable.get("types")
+    if not isinstance(declared, dict):
+        return _TABLE_COLUMN_TYPE
+    candidate = declared.get(column)
+    if isinstance(candidate, str) and candidate in FIELD_TYPES:
+        return candidate
+    return _TABLE_COLUMN_TYPE
 
 
 def _row_affinity(
     grow: dict[str, str],
     arow: dict[str, FieldValue],
     key_col: str,
+    gtable: GoldenTable | None = None,
 ) -> int:
     """Count the non-key columns of ``grow`` that ``arow`` matches exactly.
 
@@ -315,7 +365,8 @@ def _row_affinity(
         if acell is None or is_empty(acell.get("value")):
             continue
         avalue = cast(str, acell.get("value"))
-        if compare_value(_TABLE_COLUMN_TYPE, gval or "", avalue) == "match":
+        column_type = _column_type(gtable, col) if gtable is not None else _TABLE_COLUMN_TYPE
+        if compare_value(column_type, gval or "", avalue) == "match":
             score += 1
     return score
 
@@ -325,6 +376,7 @@ def _take_candidate(
     grow: dict[str, str],
     key_col: str,
     gmk_str: str | None,
+    gtable: GoldenTable | None = None,
 ) -> dict[str, FieldValue] | None:
     """Consume one actual row for ``grow``'s match_key, or return ``None``.
 
@@ -347,7 +399,7 @@ def _take_candidate(
         return candidates.pop()
     best = max(
         range(len(candidates)),
-        key=lambda i: (_row_affinity(grow, candidates[i], key_col), -i),
+        key=lambda i: (_row_affinity(grow, candidates[i], key_col, gtable), -i),
     )
     return candidates.pop(best)
 
@@ -393,7 +445,7 @@ def _classify_table(
     for grow in gtable["rows"]:
         gmk = grow.get(key_col)
         gmk_str = gmk if isinstance(gmk, str) else None
-        arow = _take_candidate(a_index, grow, key_col, gmk_str)
+        arow = _take_candidate(a_index, grow, key_col, gmk_str, gtable)
         if arow is None:
             rows.append(
                 RowVerdict(
@@ -419,7 +471,7 @@ def _classify_table(
                     ScoreContext(
                         name=col,
                         kind="table_column",
-                        field_type=_TABLE_COLUMN_TYPE,
+                        field_type=_column_type(gtable, col),
                         expected=gval,
                         actual=avalue,
                         confidence=acell.get("confidence") if acell else None,
@@ -529,6 +581,11 @@ def _classify(golden: Golden, actual: NormalizedOutput, *, scorer: Scorer) -> Ve
             afields.get(name),
             spec.get("format_critical", False),
             scorer,
+            # D2b: the golden declares which notation its own expected
+            # value is written in, so an ambiguous slash-date resolves to
+            # the date the Curator meant rather than to `_DATE_FORMATS`'
+            # American-first guess (DEBT-81).
+            date_format=_declared_date_format(spec),
         )
 
     for name, cell in afields.items():

@@ -452,3 +452,101 @@ def test_a_golden_table_still_wins_over_an_actual_table_of_the_same_name() -> No
 
     verdicts = classify(cast(Golden, golden), cast(NormalizedOutput, actual))
     assert verdicts["line_items"]["verdict"] == "detail"
+
+
+# ---------------------------------------------------------------------------
+# D2a / DEBT-04 -- table columns compare by their DECLARED type.
+# ---------------------------------------------------------------------------
+
+
+def _table_golden(types: dict[str, str] | None = None) -> dict[str, object]:
+    table: dict[str, object] = {
+        "match_key": "sku",
+        "critical": True,
+        "rows": [{"sku": "A-1", "unit_price": "1250.00", "shipped": "2024-06-28"}],
+    }
+    if types is not None:
+        table["types"] = types
+    return {
+        "fields": {"total": {"value": "10.00", "type": "number", "critical": True}},
+        "tables": {"line_items": table},
+    }
+
+
+def _table_actual(unit_price: str, shipped: str) -> dict[str, object]:
+    return {
+        "status": "SUCCEEDED",
+        "fields": {"total": {"value": "10.00", "confidence": 0.99}},
+        "tables": {
+            "line_items": [
+                {
+                    "sku": {"value": "A-1", "confidence": 0.9},
+                    "unit_price": {"value": unit_price, "confidence": 0.9},
+                    "shipped": {"value": shipped, "confidence": 0.9},
+                }
+            ]
+        },
+    }
+
+
+def _row_verdict_for(verdicts: object, column: str) -> str:
+    rows = cast(TableVerdict, cast("dict[str, object]", verdicts)["line_items"])["rows"]
+    return next(r["verdict"] for r in rows if r["column"] == column)
+
+
+def test_a_numeric_column_compares_by_value_not_by_text() -> None:
+    """DEBT-04: every column canonicalized as `text`, whatever it held.
+
+    `_TABLE_COLUMN_TYPE = "text"` was hard-coded because DATA-MODEL-01
+    carried no per-column type. So a line-item `unit_price` of
+    `1,250.00` against a golden `1250.00` -- the same number, one with a
+    thousands separator -- came back as a difference, and a real
+    regression on that column was indistinguishable from a formatting
+    change the extractor made.
+
+    With `types` declared (D2a, user decision 2026-09-25) a column
+    canonicalizes exactly as a field of that type already does.
+    """
+    verdicts = classify(
+        cast(Golden, _table_golden({"unit_price": "number", "shipped": "date"})),
+        cast(NormalizedOutput, _table_actual("1,250.00", "2024-06-28")),
+    )
+    assert _row_verdict_for(verdicts, "unit_price") == "match"
+
+
+def test_a_date_column_compares_by_value_not_by_text() -> None:
+    """The same for dates: `28/06/2024` is `2024-06-28`."""
+    verdicts = classify(
+        cast(Golden, _table_golden({"unit_price": "number", "shipped": "date"})),
+        cast(NormalizedOutput, _table_actual("1250.00", "28/06/2024")),
+    )
+    assert _row_verdict_for(verdicts, "shipped") in ("match", "wrong_format")
+
+
+def test_an_undeclared_column_still_compares_as_text() -> None:
+    """Backwards compatibility is load-bearing, not incidental.
+
+    Every golden committed before D2a has no `types` key. Those goldens
+    must keep meaning exactly what they meant, or adopting this change
+    would silently re-verdict an entire corpus -- which is the one thing
+    a regression tool may never do to its own baseline.
+    """
+    verdicts = classify(
+        cast(Golden, _table_golden(None)),
+        cast(NormalizedOutput, _table_actual("1,250.00", "2024-06-28")),
+    )
+    assert _row_verdict_for(verdicts, "unit_price") != "match"
+
+
+def test_a_declared_column_type_still_catches_a_real_difference() -> None:
+    """The guard against 'canonicalize everything into agreement'.
+
+    A number column must still fail on a DIFFERENT number -- otherwise
+    D2a would have bought fewer false positives by giving up the
+    detection the gate exists for.
+    """
+    verdicts = classify(
+        cast(Golden, _table_golden({"unit_price": "number"})),
+        cast(NormalizedOutput, _table_actual("1350.00", "2024-06-28")),
+    )
+    assert _row_verdict_for(verdicts, "unit_price") == "wrong_value"

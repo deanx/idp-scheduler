@@ -92,6 +92,25 @@ def _infer_type(name: str, value: str) -> str:
     return "text"
 
 
+_SLASH_DATE = re.compile(r"^\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*$")
+
+
+def _is_ambiguous_slash_date(value: str) -> bool:
+    """Could this string denote two different calendar dates?
+
+    True only when BOTH leading numbers are 12 or less, i.e. when the
+    D/M/Y and M/D/Y readings are both valid and disagree. `22/01/2026` is
+    unambiguous (there is no 22nd month) and is not flagged -- which is
+    exactly why the one slash-date in the existing fixture set never
+    exposed DEBT-81: it is unambiguous by luck, not by design.
+    """
+    match = _SLASH_DATE.match(value)
+    if match is None:
+        return False
+    first, second = int(match.group(1)), int(match.group(2))
+    return first <= 12 and second <= 12 and first != second
+
+
 def _pick_match_key(rows: list[dict[str, str]]) -> tuple[str | None, str]:
     """Return (column, why) -- `why` is shown in the review checklist."""
     if not rows:
@@ -136,8 +155,23 @@ def _draft_from_normalized(
             continue
         value = str(value)
         ftype = _infer_type(name, value)
+        # D2b, deliberately NOT inferred: a `date_format` is never guessed
+        # from an observed value. A corpus of `01/02/2024` through
+        # `05/06/2024` is indistinguishable under both readings, so a
+        # guessed format would be wrong about half the time AND look
+        # declared -- worse than the undeclared default, which at least
+        # reads as the known blind spot it is. The review worklist asks a
+        # human instead.
         fields[name] = {"value": value, "type": ftype, "critical": True}
         notes.append(f"  field {name!r}: type={ftype} critical=true  value={value!r}")
+        if _is_ambiguous_slash_date(value):
+            notes.append(
+                f"    ⚠️  AMBIGUOUS DATE: {value!r} reads as a different calendar "
+                "date under D/M/Y than under M/D/Y, and the classifier defaults to "
+                "M/D/Y (DEBT-81). If this corpus is not American, add "
+                '\'"date_format": "%d/%m/%Y"\' to this field -- otherwise every '
+                "verdict on it is confident about a date nobody chose."
+            )
 
     entry: dict[str, Any] = {"document_id": document_id, "fields": fields}
 
@@ -150,7 +184,34 @@ def _draft_from_normalized(
         if match_key is None:
             notes.append(f"  table {tname!r}: no rows captured -- omitted from the draft.")
             continue
-        tables[tname] = {"match_key": match_key, "critical": True, "rows": rows}
+        # D2a: infer a type per COLUMN, the same way fields already get one
+        # (`_infer_type` at the top of this module). Before this, tables
+        # carried no types at all and every column compared as text, so a
+        # numeric column's thousands separator read as a difference
+        # (DEBT-04).
+        #
+        # Inferred from the FIRST non-empty value seen for each column --
+        # a drafting convenience, never an oracle. A `quantity` column
+        # whose first row is `N/A` infers `text`, and the reconciliation
+        # worklist below is where a human corrects it, exactly as it
+        # already is for `match_key`.
+        column_types: dict[str, str] = {}
+        for row in rows:
+            for col, value in row.items():
+                if col not in column_types and value:
+                    column_types[col] = _infer_type(col, value)
+        tables[tname] = {
+            "match_key": match_key,
+            "critical": True,
+            "types": column_types,
+            "rows": rows,
+        }
+        typed = sorted(c for c, t in column_types.items() if t != "text")
+        if typed:
+            notes.append(
+                "    types inferred (CHECK THESE): "
+                + ", ".join(f"{c}={column_types[c]}" for c in typed)
+            )
         notes.append(
             f"  table {tname!r}: {len(rows)} rows, match_key={match_key!r} ({why})"
         )

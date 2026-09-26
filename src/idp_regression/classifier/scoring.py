@@ -103,6 +103,12 @@ class ScoreContext(NamedTuple):
     format_critical: bool = False
     match_key: str | None = None
     source: str | None = None
+    #: D2b: the golden's declared `strptime` pattern for an ambiguous
+    #: date, or None. Appended with a default -- this NamedTuple exists in
+    #: that shape precisely so a later field breaks no existing scorer.
+    #: A scorer may pass it to `compare_value` unconditionally; it is
+    #: ignored for every type but `date`.
+    date_format: str | None = None
 
 
 class ScoreResult(NamedTuple):

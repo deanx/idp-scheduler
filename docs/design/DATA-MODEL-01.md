@@ -185,3 +185,34 @@ No credential is ever logged (BR6, INV-02). `load_dotenv()` is the first line of
 
 - **ASM-04 (partially resolved 2026-09-24; Low for UC-01 / Med for Epic F):** the response contract can vary by action definition & API version, and `normalize()` is the single seam that absorbs this (ADR-0002). **Corrected:** the `pages[]` shape this line previously called "confirmed" was never confirmed — it came from a hand-authored reading of an early sample. Live responses carry `fields`/`tables` at the **top level** with **no `pages` key**, verified against a 3-page document (`tests/fixtures/live/inv-004-multipage.raw.json`). The `prompts` shape remains unverified (DEBT-69(a)): no action available to this project emits prompts. Multi-document-type routing (Epic F) will still need a spike before extending the golden/normalized contract.
 - **Confidence** is a first-class field in `NormalizedOutput` and the verdict so the remediation UI (Epic E) and a future review-queue gate can use it; the UC-01 gate itself ignores it.
+
+### D2 (user decision 2026-09-25) — per-column `type`, per-field `date_format`
+
+**Table columns carry a declared type.** A table spec may hold
+`types: {<column>: number|date|id|text}`, and a declared column canonicalizes
+exactly as a field of that type. Before this, `_TABLE_COLUMN_TYPE` was hard-coded to
+`text` because this document carried no per-column type (DEBT-04), so a `unit_price`
+of `1,250.00` against a golden `1250.00` — the same number with a thousands separator
+— read as a difference, and a real regression on that column could not be told from a
+formatting change.
+
+**The default stays `text`, and that is load-bearing.** Every golden written before D2
+has no `types` key, and those goldens must keep meaning exactly what they meant.
+Adopting this may not silently re-verdict an existing corpus.
+
+**Fields may declare `date_format`** (a `strptime` pattern). `canonical.py` tries
+`%m/%d/%Y` before `%d/%m/%Y`, so any `NN/NN/YYYY` whose day is 12 or less is read
+American-first — silently (DEBT-81). A declared format resolves *which* calendar date
+the golden's own value denotes.
+
+It applies to the **format tier**, not the value tier: two spellings of one date remain
+a `wrong_format` (ADR-0003's rule), and declaring a format decides which date is meant,
+never whether the notation changed.
+
+**Undeclared remains a guess, and is recorded as one.** The default is pinned by
+`tests/classifier/test_date_format.py` so that changing it requires changing a test and
+saying why, and `scripts/draft_golden.py` flags every genuinely ambiguous slash-date in
+its review worklist. Drafting **never infers** a `date_format`: a corpus of `01/02/2024`
+through `05/06/2024` is indistinguishable under both readings, so a guessed format would
+be wrong about half the time *and look declared* — worse than an undeclared default,
+which at least reads as the known blind spot it is.

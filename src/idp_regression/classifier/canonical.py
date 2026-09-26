@@ -90,6 +90,22 @@ def _format_date(value: str) -> str:
     return s.lower()
 
 
+def _format_date_with(value: str, date_format: str) -> str:
+    """Parse ``value`` with the DECLARED format first, then fall back.
+
+    The fallback matters: a golden declares the format its own expected
+    value is written in, but the extractor's actual value is whatever the
+    new Action version emitted -- commonly ISO, which the declared
+    pattern will not parse. Falling back to `_format_date` means a
+    declared format disambiguates the ambiguous side without rejecting
+    the unambiguous one.
+    """
+    try:
+        return datetime.strptime(value.strip(), date_format).date().isoformat()
+    except ValueError:
+        return _format_date(value)
+
+
 def _format_id(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.lower())
 
@@ -130,16 +146,44 @@ def match_key_form(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", value.lower())
 
 
-def compare_value(field_type: str, expected: str, actual: str) -> VerdictLiteral:
+def compare_value(
+    field_type: str, expected: str, actual: str, *, date_format: str | None = None
+) -> VerdictLiteral:
     """Compare an actual value against the expected under the type's tiers.
 
     Returns ``match`` if equal under the value tier, ``wrong_format`` if equal
     only under the format tier, else ``wrong_value``. Assumes ``actual`` is a
     non-empty string (the ``missing`` check is the caller's responsibility).
+
+    ``date_format`` (D2b, user decision 2026-09-25, closing DEBT-81) is an
+    optional ``strptime`` pattern that resolves an ambiguous date. It is a
+    KEYWORD with a default because this function is the public
+    scorer-authoring API (``classifier/scoring.py``); every custom scorer
+    calls it with three positional arguments, and a signature change here
+    would break scorers this project does not own.
+
+    Why it is needed: ``_DATE_FORMATS`` tries ``%m/%d/%Y`` before
+    ``%d/%m/%Y``, so any ``NN/NN/YYYY`` whose day is 12 or less is read
+    American-first, silently. A European ``03/04/2024`` (3 April) is
+    compared as 4 March, and the gate then reports a confident verdict
+    about the wrong calendar date.
+
+    Ignored for every type but ``date``, so a scorer may pass it
+    unconditionally without having to branch on the field's type.
     """
     canonicalizer = CANONICALIZERS[field_type]
     if canonicalizer.value_form(expected) == canonicalizer.value_form(actual):
         return "match"
+    # `date_format` applies to the FORMAT tier, which for a date is the
+    # tier that asks "which calendar date does this string denote" --
+    # `_format_date`'s lenient parse. The value tier is the strict literal
+    # form and is deliberately untouched: two spellings of one date are a
+    # formatting difference (ADR-0003), and declaring a format resolves
+    # WHICH date is meant, never whether the notation changed.
+    if field_type == "date" and date_format:
+        if _format_date_with(expected, date_format) == _format_date_with(actual, date_format):
+            return "wrong_format"
+        return "wrong_value"
     if canonicalizer.format_form(expected) == canonicalizer.format_form(actual):
         return "wrong_format"
     return "wrong_value"

@@ -26,7 +26,9 @@ def regression_scorer(ctx: ScoreContext) -> VerdictLiteral:
     """
     if is_empty(ctx.actual):
         return "missing"
-    return compare_value(ctx.field_type, ctx.expected or "", ctx.actual or "")
+    return compare_value(
+        ctx.field_type, ctx.expected or "", ctx.actual or "", date_format=ctx.date_format
+    )
 
 
 def pinned_file_scorer(ctx: ScoreContext) -> VerdictLiteral:
@@ -42,4 +44,6 @@ def pinned_file_scorer(ctx: ScoreContext) -> VerdictLiteral:
     """
     if is_empty(ctx.actual):
         return "match" if is_empty(ctx.expected) else "missing"
-    return compare_value(ctx.field_type, ctx.expected or "", ctx.actual or "")
+    return compare_value(
+        ctx.field_type, ctx.expected or "", ctx.actual or "", date_format=ctx.date_format
+    )

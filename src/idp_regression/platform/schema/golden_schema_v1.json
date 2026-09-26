@@ -42,6 +42,11 @@
           },
           "format_critical": {
             "type": "boolean"
+          },
+          "date_format": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32
           }
         },
         "allOf": [
@@ -163,6 +168,22 @@
               "additionalProperties": {
                 "type": "string"
               }
+            }
+          },
+          "types": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,128}$"
+            },
+            "additionalProperties": {
+              "type": "string",
+              "enum": [
+                "number",
+                "date",
+                "id",
+                "text"
+              ]
             }
           }
         }
