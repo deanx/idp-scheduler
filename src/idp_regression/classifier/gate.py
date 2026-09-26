@@ -28,6 +28,7 @@ from idp_regression.classifier.types import (
     NormalizedOutput,
     PromptValue,
     RowVerdict,
+    RowVerdictLiteral,
     TableVerdict,
     Verdict,
     VerdictLiteral,
@@ -37,6 +38,32 @@ from idp_regression.classifier.types import (
 # Derived from the declared type (not hand-enumerated, DEBT-40/43/47): a
 # seventh verdict added to VerdictLiteral is automatically accepted here.
 _VALID_VERDICTS: frozenset[str] = frozenset(get_args(VerdictLiteral))
+#: The six a table ROW may carry -- `new_table` is not one of them.
+_VALID_ROW_VERDICTS: frozenset[str] = frozenset(get_args(RowVerdictLiteral))
+
+
+def _as_row_verdict(
+    verdict: VerdictLiteral, *, tname: str | None, column: str | None
+) -> RowVerdictLiteral:
+    """Narrow a scorer's verdict to the six a table row may carry.
+
+    A `Scorer` returns a `VerdictLiteral`, which since D1a includes
+    `new_table` -- a statement about a table's EXISTENCE, meaningless for
+    a single cell. A custom scorer returning it for a cell is a scorer
+    bug, and the fail-closed posture this module already takes for an
+    unrecognised verdict (FO-5 in `overall_gate`) applies for the same
+    reason: a verdict the row vocabulary does not know must not be
+    written into a row where nothing downstream would question it.
+
+    mypy catches this statically for the shipped scorers; this guard is
+    for the ones loaded from a spec at runtime.
+    """
+    if verdict not in _VALID_ROW_VERDICTS:
+        location = f"table {tname!r} column {column!r}" if tname else f"column {column!r}"
+        raise MalformedActualError(
+            f"a scorer returned a verdict that is not valid for a table row at {location}"
+        )
+    return cast("RowVerdictLiteral", verdict)
 
 # Prompt answers are free-form text (DATA-MODEL-01 §1 has no per-prompt type).
 _PROMPT_TYPE = "text"
@@ -401,7 +428,7 @@ def _classify_table(
                     )
                 )
             )
-            verdict = cell_result.verdict
+            verdict = _as_row_verdict(cell_result.verdict, tname=None, column=col)
             # A `RowVerdict` carries no `critical` of its own -- the gate
             # reads the BLOCK's. So a scorer escalating one cell escalates
             # the block it is in, which is the only place that decision
@@ -545,6 +572,30 @@ def _classify(golden: Golden, actual: NormalizedOutput, *, scorer: Scorer) -> Ve
     for tname, gtable in gtables.items():
         verdicts[tname] = _classify_table(gtable, atables.get(tname, []), scorer)
 
+    # DEBT-05 / D1a: a table the golden does not have. Emitted AFTER the
+    # loop above and guarded on `not in gtables`, so a table present in
+    # both keeps its real row-by-row `detail` comparison -- the obvious
+    # implementation (iterate actual tables and assign) would overwrite it.
+    #
+    # Shaped like `new_field`: a leaf entry, not a `detail` container.
+    # There is no golden to pair rows against, so per-row sub-verdicts
+    # would be a list of `new_line` restating the same fact once per row.
+    # `actual` carries the row COUNT rather than any cell value -- INV-02
+    # keeps extracted values out of anything that is not the run artifact,
+    # and the count is what tells an operator whether this is a stray row
+    # or a whole table that appeared.
+    for tname, arows in atables.items():
+        if tname not in gtables:
+            verdicts[tname] = Verdict(
+                verdict="new_table",
+                expected=None,
+                actual=f"{len(arows)} row(s)" if isinstance(arows, list) else None,
+                confidence=None,
+                critical=False,
+                format_critical=False,
+                type=None,
+            )
+
     return verdicts
 
 
@@ -553,8 +604,9 @@ def overall_gate(verdicts: VerdictMap) -> Literal["PASS", "FAIL"]:
 
     ``FAIL`` iff a ``missing`` or ``wrong_value`` verdict is ``critical: True``
     (BR2), **or** a ``wrong_format`` verdict is ``format_critical: True``
-    (DEBT-80). ``new_field``, ``new_line``, and any non-critical difference do
-    not fail the gate (BR3).
+    (DEBT-80). ``new_field``, ``new_line``, ``new_table``, and any non-critical
+    difference do not fail the gate (BR3) -- all three are ADDITIONS, and an
+    addition is not a regression.
 
     ``wrong_format`` is informational by default and that remains BR3's rule:
     a value that is semantically right but formatted differently is not a

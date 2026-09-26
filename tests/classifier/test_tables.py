@@ -350,3 +350,105 @@ def test_duplicate_golden_match_key_second_row_is_missing() -> None:
     verdicts_for_widget_a = [r["verdict"] for r in rows if r["match_key"] == "Widget A"]
     assert verdicts_for_widget_a.count("missing") == 1
     assert overall_gate(v) == "FAIL"  # critical block, the second row's missing qty fails it
+
+# ---------------------------------------------------------------------------
+# D1a / DEBT-05 -- an actual-only table is represented, not invisible.
+# ---------------------------------------------------------------------------
+
+
+def test_a_table_the_golden_does_not_have_is_reported_as_new_table() -> None:
+    """DEBT-05: an actual-only table used to vanish from the verdict map.
+
+    `classify` iterated `golden["tables"]` only, so a table the new
+    Action version invented had no entry at all — not a verdict, not a
+    row, nothing. An operator reading the run artifact could not tell
+    the extractor had started emitting a whole table.
+
+    `new_table` is the seventh verdict literal (user decision D1a,
+    2026-09-25) and sits in the map beside `new_field` for an
+    actual-only field.
+    """
+    # A matching field, so the gate verdict below is driven by the table
+    # alone. `golden.fields` may not be empty (N28, and the committed
+    # schema's `minProperties: 1` since DEBT-76).
+    golden: dict[str, object] = {
+        "fields": {"total": {"value": "10.00", "type": "number", "critical": True}},
+        "tables": {},
+    }
+    actual: dict[str, object] = {
+        "status": "SUCCEEDED",
+        "fields": {"total": {"value": "10.00", "confidence": 0.99}},
+        "tables": {
+            "surcharges": [
+                {"code": {"value": "FUEL", "confidence": 0.9}},
+                {"code": {"value": "TOLL", "confidence": 0.9}},
+            ]
+        },
+    }
+
+    verdicts = classify(cast(Golden, golden), cast(NormalizedOutput, actual))
+
+    assert "surcharges" in verdicts, "an actual-only table is missing from the verdict map"
+    assert verdicts["surcharges"]["verdict"] == "new_table"
+
+
+def test_a_new_table_does_not_by_itself_fail_the_gate() -> None:
+    """BR3 holds: an ADDITION is not a regression.
+
+    `new_field` and `new_line` are informational, and a new table is the
+    same shape of event one level up — the extractor found something
+    extra, not something wrong. Making it fail would turn a benign
+    extraction improvement into a red build, which is the false-positive
+    side of the gate this product exists to keep trustworthy.
+
+    Representation was the defect DEBT-05 named ("not represented in the
+    verdict map"), and representation is what makes it visible in the
+    artifact, the platform scores and the console.
+    """
+    golden: dict[str, object] = {
+        "fields": {"total": {"value": "10.00", "type": "number", "critical": True}},
+        "tables": {},
+    }
+    actual: dict[str, object] = {
+        "status": "SUCCEEDED",
+        "fields": {"total": {"value": "10.00", "confidence": 0.99}},
+        "tables": {"surcharges": [{"code": {"value": "FUEL", "confidence": 0.9}}]},
+    }
+
+    verdicts = classify(cast(Golden, golden), cast(NormalizedOutput, actual))
+    assert overall_gate(verdicts) == "PASS"
+
+
+def test_a_golden_table_still_wins_over_an_actual_table_of_the_same_name() -> None:
+    """The new branch must not shadow the existing one.
+
+    A table present in BOTH is a normal `detail` container compared row
+    by row; only a table absent from the golden becomes `new_table`.
+    Pinned because the obvious implementation (iterate actual tables and
+    add them) would overwrite the real comparison.
+    """
+    golden: dict[str, object] = {
+        "fields": {"total": {"value": "10.00", "type": "number", "critical": True}},
+        "tables": {
+            "line_items": {
+                "match_key": "sku",
+                "critical": True,
+                "rows": [{"sku": "A-1", "qty": "2"}],
+            }
+        },
+    }
+    actual: dict[str, object] = {
+        "status": "SUCCEEDED",
+        "fields": {"total": {"value": "10.00", "confidence": 0.99}},
+        "tables": {
+            "line_items": [
+                {
+                    "sku": {"value": "A-1", "confidence": 0.9},
+                    "qty": {"value": "2", "confidence": 0.9},
+                }
+            ]
+        },
+    }
+
+    verdicts = classify(cast(Golden, golden), cast(NormalizedOutput, actual))
+    assert verdicts["line_items"]["verdict"] == "detail"

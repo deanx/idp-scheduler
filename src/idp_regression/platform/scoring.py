@@ -72,6 +72,45 @@ def field_score_name(field_name: str) -> str:
     return f"field:{field_name}"
 
 
+def table_column_score_name(table_name: str, column: str) -> str:
+    """``table:<table>.<column>`` — D1b (user decision, 2026-09-25).
+
+    Per COLUMN, not per table and not per row. Per table would collapse
+    every column of a line-item block into one verdict, which is the
+    information an operator actually needs to see. Per row is unbounded
+    by the golden -- NFR N9 forbids that -- and would make the score
+    count depend on the document rather than on the contract.
+    """
+    return f"table:{table_name}.{column}"
+
+
+#: Row verdicts ordered most-serious first. A column score aggregates many
+#: rows into one value, so the order decides what a single `wrong_value`
+#: among nine matches reports as -- and it must report the failure, which is
+#: what set the exit code. `missing` and `wrong_value` both fail the gate
+#: (BR2); `wrong_format` only with `format_critical` (DEBT-80); the rest are
+#: informational (BR3).
+_ROW_VERDICT_SEVERITY: tuple[str, ...] = (
+    "wrong_value",
+    "missing",
+    "wrong_format",
+    "new_line",
+    "new_field",
+    "match",
+)
+
+
+def _worst_row_verdict(row_verdicts: list[str]) -> str:
+    for candidate in _ROW_VERDICT_SEVERITY:
+        if candidate in row_verdicts:
+            return candidate
+    # Unreachable for a map `classify()` produced -- every row verdict is a
+    # `RowVerdictLiteral`. Falling back to the most serious value rather
+    # than to `match` keeps an unrecognised verdict from reading as clean,
+    # the same fail-closed posture as `overall_gate`'s FO-5 guard.
+    return "wrong_value"
+
+
 def _comment(verdict: Verdict | TableVerdict, include_values: bool) -> str | None:
     """The score's comment: what the platform shows beside the verdict.
 
@@ -173,6 +212,36 @@ def build_score_inputs(
             }
         )
 
+    # D1b / DEBT-14: table-block verdicts reach the platform. Driven by the
+    # GOLDEN's columns, like fields and prompts above -- a run must write
+    # the same score names whatever the extractor returned, or a missing
+    # column would silently mean "no score" instead of `missing`.
+    for table_name, table_spec in golden.get("tables", {}).items():
+        entry = verdicts.get(table_name)
+        if entry is None or entry.get("verdict") != "detail":
+            # A golden table with no `detail` entry is a caller bug for the
+            # same reason `_require_verdict` treats a missing field as one:
+            # `classify()` emits one per golden table (CT-02).
+            raise ValueError(f"no table verdict for golden table {table_name!r}")
+        rows = cast("TableVerdict", entry)["rows"]
+        by_column: dict[str, list[str]] = {}
+        for row in rows:
+            column = row["column"]
+            if column is not None:
+                by_column.setdefault(column, []).append(row["verdict"])
+        for column in _golden_table_columns(table_spec):
+            name = table_column_score_name(table_name, column)
+            scores.append(
+                {
+                    "id": score_id(
+                        run_id=run_id, document_id=document_id, score_name=name
+                    ),
+                    "name": name,
+                    "value": _worst_row_verdict(by_column.get(column, [])),
+                    "comment": None,
+                }
+            )
+
     scores.append(
         {
             "id": score_id(run_id=run_id, document_id=document_id, score_name="gate"),
@@ -185,6 +254,24 @@ def build_score_inputs(
         }
     )
     return scores
+
+
+def _golden_table_columns(table_spec: object) -> list[str]:
+    """The column names a table's golden declares, in first-seen order.
+
+    Read from the golden's own rows rather than from the verdict map, so
+    the score names a run writes depend on the CONTRACT and not on what
+    the extractor happened to return.
+    """
+    if not isinstance(table_spec, dict):
+        return []
+    columns: list[str] = []
+    for row in table_spec.get("rows", []) or []:
+        if isinstance(row, dict):
+            for column in row:
+                if column not in columns:
+                    columns.append(column)
+    return columns
 
 
 def _require_verdict(

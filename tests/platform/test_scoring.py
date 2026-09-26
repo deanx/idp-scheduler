@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import re
 import uuid
-from typing import get_args
+from typing import cast, get_args
 
 import pytest
 
-from idp_regression.classifier.types import Golden
+from idp_regression.classifier.types import Golden, VerdictMap
 from idp_regression.platform.scoring import (
     _VALID_GATES,
     NAMESPACE,
@@ -193,3 +193,125 @@ def test_build_score_inputs_rejected_gate_error_never_echoes_the_offending_value
             document_id="invoice-007.pdf",
         )
     assert offending not in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# D1b / DEBT-14 -- table verdicts reach the platform, one score per COLUMN.
+# ---------------------------------------------------------------------------
+
+
+def _golden_with_a_table() -> Golden:
+    return {
+        "fields": {"total": {"value": "10.00", "type": "number", "critical": True}},
+        "tables": {
+            "line_items": {
+                "match_key": "sku",
+                "critical": True,
+                "rows": [
+                    {"sku": "A-1", "qty": "2", "unit_price": "5.00"},
+                    {"sku": "B-2", "qty": "1", "unit_price": "9.00"},
+                ],
+            }
+        },
+    }
+
+
+def _verdicts_with_table_rows(*row_verdicts: tuple[str, str]) -> VerdictMap:
+    """`row_verdicts` is (column, verdict) pairs for `line_items`."""
+    return cast("VerdictMap", {
+        "total": {
+            "verdict": "match",
+            "expected": "10.00",
+            "actual": "10.00",
+            "confidence": 0.99,
+            "critical": True,
+            "format_critical": False,
+            "type": "number",
+        },
+        "line_items": {
+            "verdict": "detail",
+            "critical": True,
+            "type": None,
+            "rows": [
+                {
+                    "match_key": "A-1",
+                    "column": column,
+                    "verdict": verdict,
+                    "expected": "x",
+                    "actual": "y",
+                    "confidence": 0.9,
+                }
+                for column, verdict in row_verdicts
+            ],
+        },
+    })
+
+
+def test_each_table_column_gets_its_own_score() -> None:
+    """DEBT-14: `build_score_inputs` scored only golden fields and prompts.
+
+    A table regression was therefore in the exit code but nowhere on the
+    platform — and since the 2026-09-25 DEBT-18 reversal the platform is
+    "the information point", so a red run that cannot say which column
+    moved is exactly the gap that decision was taken to close.
+
+    Per COLUMN, not per row (user decision D1b): a column count is bounded
+    by the golden, a row count is not, and NFR N9 forbids an unbounded
+    score write. It also matches how fields are already scored.
+    """
+    scores = build_score_inputs(
+        golden=_golden_with_a_table(),
+        verdicts=_verdicts_with_table_rows(
+            ("sku", "match"), ("qty", "match"), ("unit_price", "wrong_value")
+        ),
+        gate="FAIL",
+        run_id="run-1",
+        document_id="doc-1",
+    )
+
+    names = {s["name"] for s in scores}
+    assert "table:line_items.sku" in names
+    assert "table:line_items.qty" in names
+    assert "table:line_items.unit_price" in names
+    by_name = {s["name"]: s["value"] for s in scores}
+    assert by_name["table:line_items.unit_price"] == "wrong_value"
+    assert by_name["table:line_items.qty"] == "match"
+
+
+def test_a_column_score_reports_the_most_serious_row_verdict() -> None:
+    """One column, many rows, one score — so the aggregation must not
+    hide a failure behind a majority of matches.
+
+    Ordered by severity rather than by position or count: a single
+    `wrong_value` among nine matches is the thing an operator needs to
+    see, and it is what set the exit code.
+    """
+    scores = build_score_inputs(
+        golden=_golden_with_a_table(),
+        verdicts=_verdicts_with_table_rows(
+            ("qty", "match"), ("qty", "wrong_value"), ("qty", "match")
+        ),
+        gate="FAIL",
+        run_id="run-1",
+        document_id="doc-1",
+    )
+    by_name = {s["name"]: s["value"] for s in scores}
+    assert by_name["table:line_items.qty"] == "wrong_value"
+
+
+def test_table_column_score_ids_are_deterministic_and_distinct() -> None:
+    """N26: re-running a run must upsert, not duplicate — and two columns
+    of one table must never collide onto the same score."""
+    kwargs = {
+        "golden": _golden_with_a_table(),
+        "verdicts": _verdicts_with_table_rows(("qty", "match"), ("unit_price", "match")),
+        "gate": "PASS",
+        "run_id": "run-1",
+        "document_id": "doc-1",
+    }
+    first = build_score_inputs(**kwargs)  # type: ignore[arg-type]
+    second = build_score_inputs(**kwargs)  # type: ignore[arg-type]
+
+    ids = {s["name"]: s["id"] for s in first}
+    assert ids == {s["name"]: s["id"] for s in second}, "score ids must be deterministic"
+    assert ids["table:line_items.qty"] != ids["table:line_items.unit_price"]

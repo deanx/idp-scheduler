@@ -15,17 +15,44 @@ from idp_regression.classifier import classify, overall_gate
 from idp_regression.classifier.types import (
     FIELD_TYPES,
     RowVerdict,
+    RowVerdictLiteral,
     TableVerdict,
     Verdict,
     VerdictLiteral,
 )
 
+#: The six LEAF verdicts -- what one expected/actual comparison can say.
 SIX_VERDICTS = {"match", "missing", "wrong_value", "wrong_format", "new_field", "new_line"}
+#: The top-level vocabulary: the six, plus `new_table` (D1a, DEBT-05), which
+#: is a statement about a table's EXISTENCE rather than about any comparison.
+SEVEN_VERDICTS = SIX_VERDICTS | {"new_table"}
 FOUR_TYPES = {"number", "date", "id", "text"}
 
 
-def test_verdict_literal_is_exactly_the_six_glossary_verdicts() -> None:
-    assert set(get_args(VerdictLiteral)) == SIX_VERDICTS
+def test_verdict_literal_is_exactly_the_seven_glossary_verdicts() -> None:
+    """INV-03's vocabulary, deliberately widened by one (D1a, 2026-09-25).
+
+    This test is the reason a seventh verdict cannot be added quietly:
+    `registry.py` holds every classifier to this same union, the platform
+    score names are derived from it, and the console renders it. A new
+    literal has to be an EDIT HERE, which is what makes it a decision
+    rather than a drift.
+    """
+    assert set(get_args(VerdictLiteral)) == SEVEN_VERDICTS
+
+
+def test_a_row_sub_verdict_can_never_be_new_table() -> None:
+    """The two vocabularies are NOT the same union, and must not become one.
+
+    A row is a comparison, so it can be `new_line` -- a row the golden
+    does not have -- but never `new_table`, which says something about a
+    table's existence rather than about anything inside it. Keeping
+    `RowVerdictLiteral` separate makes that true by construction; sharing
+    one union would make `{"verdict": "new_table"}` a structurally valid
+    row that nothing produces and nothing rejects.
+    """
+    assert set(get_args(RowVerdictLiteral)) == SIX_VERDICTS
+    assert "new_table" not in set(get_args(RowVerdictLiteral))
 
 
 def test_verdict_typeddict_has_the_contract_keys() -> None:
@@ -42,12 +69,12 @@ def test_verdict_typeddict_has_the_contract_keys() -> None:
     }
 
 
-def test_verdict_value_field_is_the_six_literal_union() -> None:
+def test_verdict_value_field_is_the_seven_literal_union() -> None:
     hints = get_type_hints(Verdict)
-    assert set(get_args(hints["verdict"])) == SIX_VERDICTS
+    assert set(get_args(hints["verdict"])) == SEVEN_VERDICTS
 
 
-def test_row_verdict_uses_the_same_six_literal_union() -> None:
+def test_row_verdict_uses_the_six_leaf_literal_union() -> None:
     hints = get_type_hints(RowVerdict)
     assert set(get_args(hints["verdict"])) == SIX_VERDICTS
 

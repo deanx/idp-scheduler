@@ -12,6 +12,21 @@ from __future__ import annotations
 from typing import Literal, NotRequired, TypedDict
 
 # The six verdicts that are the stable contract (glossary, ADR-0003, CT-02).
+#: The six LEAF verdicts: what a single expected/actual comparison can say.
+#: A table ROW sub-verdict is always one of these -- a row is a comparison,
+#: so it can be `new_line` (a row the golden does not have) but never
+#: `new_table`, which is a statement about a table's existence rather than
+#: about any comparison inside it. Kept as its own alias so that stays true
+#: by construction rather than by convention (INV-03).
+RowVerdictLiteral = Literal[
+    "match",
+    "missing",
+    "wrong_value",
+    "wrong_format",
+    "new_field",
+    "new_line",
+]
+
 VerdictLiteral = Literal[
     "match",
     "missing",
@@ -19,6 +34,16 @@ VerdictLiteral = Literal[
     "wrong_format",
     "new_field",
     "new_line",
+    # D1a (user decision 2026-09-25), closing DEBT-05: a table present in
+    # `actual.tables` but absent from the golden. Before this it had no
+    # entry in the verdict map AT ALL -- `classify` iterated the golden's
+    # tables only -- so an extractor that began emitting a whole table was
+    # invisible to the artifact, the platform scores and the console.
+    #
+    # Informational, like `new_field` and `new_line`: BR3 says an ADDITION
+    # is not a regression, and a new table is that same event one level up.
+    # Representation was the defect DEBT-05 named, not gating.
+    "new_table",
 ]
 
 # The four field types that drive per-type canonical comparison (ADR-0003).
@@ -112,7 +137,7 @@ class RowVerdict(TypedDict):
 
     match_key: str | None
     column: str | None
-    verdict: VerdictLiteral
+    verdict: RowVerdictLiteral
     expected: str | None
     actual: str | None
     confidence: float | None
