@@ -394,6 +394,9 @@ def run(args: argparse.Namespace, run_eval: Any) -> tuple[int, dict[str, Any]]:
         # empty being empty again is agreement, not a loss (see
         # `classifier/registry.py`).
         classifier=PINNED_FILE_CLASSIFIER,
+        # Ids this script resolved itself: a non-exact match is a bug, and
+        # the substring fallback would measure a different item (DEBT-117).
+        exact_documents=True,
     )
     return gate, {
         "classifier": PINNED_FILE_CLASSIFIER,

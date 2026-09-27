@@ -2844,3 +2844,27 @@ def test_an_unexpected_error_mid_run_records_the_artifact_as_aborted(
     assert written["status"] == "aborted"
     assert written["abort_reason"] == "unexpected_error"
     assert "secret-looking" not in text
+
+
+def test_run_eval_exact_documents_refuses_a_substring_selector_before_submitting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+) -> None:
+    """DEBT-117: `exact_documents=True` must reach `select_items`. `1` is a
+    unique substring of `doc-1`; with exact matching it names no item, so
+    the run is refused before any document is submitted."""
+    dataset = _two_item_dataset()
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(dataset))
+    path1, actual1 = _matching_actual_for("/documents", "doc-1")
+    fake_idp = _FakeIDPAdapter({path1: actual1})
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda org_id: fake_idp)
+    args = (
+        "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden", "org-t"
+    )
+
+    assert run_eval(*args, documents=["1"]) == 0, "the CLI convenience still resolves it"
+    fake_idp.calls.clear()
+    assert run_eval(*args, documents=["1"], exact_documents=True) != 0
+    assert fake_idp.calls == [], "refused before any submit"

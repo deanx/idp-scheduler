@@ -208,7 +208,7 @@ class _DocumentSelectionError(Exception):
 
 
 def select_items(
-    items: list[DatasetItem], selectors: Sequence[str] | None
+    items: list[DatasetItem], selectors: Sequence[str] | None, *, exact: bool = False
 ) -> list[DatasetItem]:
     """The subset of `items` a `--document` selector names, in dataset
     order (ADR-0004 A8/A9's spirit: what a run measured is visible in the
@@ -224,6 +224,14 @@ def select_items(
     the operator did not name. A selector matching nothing is refused for
     the same reason: a filtered run that silently measured zero documents
     would exit 0 and read as a pass.
+
+    `exact=True` turns the substring fallback OFF (DEBT-117). The fallback
+    is a convenience for a human typing `--document inv-00` at the CLI. For
+    a program passing ids it has already resolved -- `verify_document`,
+    `compare_versions` -- a selector that is not an exact id is a bug, and
+    the fallback would resolve it to a DIFFERENT item (`1.pdf` ->
+    `inv-1.pdf`) and measure that instead, while the caller counted the one
+    it named.
     """
     if not selectors:
         return items
@@ -233,6 +241,10 @@ def select_items(
         if selector in by_id:
             chosen[selector] = by_id[selector]
             continue
+        if exact:
+            raise _DocumentSelectionError(
+                f"no dataset item is exactly {selector!r} (exact match required)"
+            )
         matches = [document_id for document_id in by_id if selector in document_id]
         if not matches:
             raise _DocumentSelectionError(f"no dataset item matches {selector!r}")
@@ -395,6 +407,8 @@ def run_eval(
     documents: Sequence[str] | None = None,
     classifier: str | None = None,
     platform_values: str = DEFAULT_PLATFORM_VALUES,
+    *,
+    exact_documents: bool = False,
 ) -> int:
     """Run the baseline regression for `action_id` at `version` over the
     named golden set (`dataset_name`), writing per-field + gate scores to
@@ -588,7 +602,7 @@ def run_eval(
         # to skip a validation the unfiltered run performs, or a broken golden
         # set could be worked around one document at a time.
         try:
-            selected_items = select_items(dataset["items"], documents)
+            selected_items = select_items(dataset["items"], documents, exact=exact_documents)
         except _DocumentSelectionError as exc:
             # Pre-run refusal, same shape as the quota ceiling below: log,
             # run_end outcome=aborted, return 1, NO run_status marker (no

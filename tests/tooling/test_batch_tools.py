@@ -3598,3 +3598,13 @@ def test_a_redraft_keeps_the_key_a_document_was_first_drafted_under(tmp_path: Pa
     assert bootstrap._golden_key("inv.png", golden) == "inv"
     assert bootstrap._golden_key("inv.pdf", golden) == "inv.pdf"
     assert bootstrap._golden_key("other.pdf", golden) == "other"
+
+
+def test_verify_asks_run_eval_for_exact_document_matches(tmp_path: Path) -> None:
+    """DEBT-117: the ids verify passes are resolved already; the substring
+    fallback must not be able to substitute another item for one of them."""
+    _pinned(tmp_path, "a.pdf")
+    run_eval = _RecordingRunEval()
+    verify_document.run(_verify_args(tmp_path, all=True), run_eval)
+    (_, kwargs), = run_eval.calls
+    assert kwargs["exact_documents"] is True

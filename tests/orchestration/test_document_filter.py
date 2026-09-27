@@ -108,3 +108,24 @@ def test_selection_never_mutates_the_dataset_it_filters() -> None:
     select_items(items, ["a.pdf"])
 
     assert [dict(cast("dict[str, Any]", item)) for item in items] == before
+
+
+# --- DEBT-117: programmatic callers get exact matches only ------------------
+
+
+def test_exact_mode_refuses_a_selector_the_substring_fallback_would_resolve() -> None:
+    """`1.pdf` is a unique substring of `inv-1.pdf`. A program that passed
+    `1.pdf` meant `1.pdf`; measuring `inv-1.pdf` instead would report on a
+    document it never named."""
+    items = _items("inv-1.pdf", "inv-2.pdf")
+
+    assert _ids(select_items(items, ["1.pdf"])) == ["inv-1.pdf"]  # the CLI convenience
+    with pytest.raises(_DocumentSelectionError, match="exact match required"):
+        select_items(items, ["1.pdf"], exact=True)
+
+
+def test_exact_mode_still_selects_exact_ids() -> None:
+    items = _items("inv-1.pdf", "inv-2.pdf")
+    assert _ids(select_items(items, ["inv-2.pdf", "inv-1.pdf"], exact=True)) == [
+        "inv-1.pdf", "inv-2.pdf",
+    ]
