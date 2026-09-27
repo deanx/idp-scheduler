@@ -17,6 +17,7 @@ import pytest
 
 from idp_regression.adapter.errors import MalformedIDPOutputError
 from idp_regression.adapter.normalize import MAX_TABLE_ROWS, MAX_VALUE_BYTES, normalize
+from tests.adapter._prompts import _as_documented_map
 
 FIXTURE = json.loads(
     (pathlib.Path(__file__).parent / "fixtures" / "raw_idp_response.json").read_text()
@@ -76,7 +77,7 @@ def test_duplicate_prompt_string_raises_typed_error() -> None:
         "status": "SUCCEEDED",
         "pages": [
             {
-                "prompts": [
+                "prompts": _as_documented_map([
                     {
                         "prompt": "vendor?",
                         "source": "p1",
@@ -87,7 +88,7 @@ def test_duplicate_prompt_string_raises_typed_error() -> None:
                         "source": "p2",
                         "answer": {"value": "B", "confidence": 0.9},
                     },
-                ]
+                ])
             }
         ],
     }
@@ -182,7 +183,9 @@ def test_unsafe_prompt_key_with_control_char_raises() -> None:
     raw = {
         "status": "SUCCEEDED",
         "pages": [
-            {"prompts": [{"prompt": "vendor?\n", "answer": {"value": "A", "confidence": None}}]}
+            {"prompts": _as_documented_map([
+                {"prompt": "vendor?\n", "answer": {"value": "A", "confidence": None}}
+            ])}
         ],
     }
     with pytest.raises(MalformedIDPOutputError) as excinfo:
@@ -199,9 +202,9 @@ def test_unsafe_prompt_key_lone_surrogate_raises() -> None:
         "status": "SUCCEEDED",
         "pages": [
             {
-                "prompts": [
+                "prompts": _as_documented_map([
                     {"prompt": "vendor?\udcff", "answer": {"value": "A", "confidence": None}}
-                ]
+                ])
             }
         ],
     }
@@ -215,7 +218,9 @@ def test_unsafe_prompt_key_too_long_raises() -> None:
     raw = {
         "status": "SUCCEEDED",
         "pages": [
-            {"prompts": [{"prompt": "x" * 201, "answer": {"value": "A", "confidence": None}}]}
+            {"prompts": _as_documented_map([
+                {"prompt": "x" * 201, "answer": {"value": "A", "confidence": None}}
+            ])}
         ],
     }
     with pytest.raises(MalformedIDPOutputError) as excinfo:
@@ -228,12 +233,12 @@ def test_prompt_key_allows_punctuation_and_charset_outside_field_names() -> None
         "status": "SUCCEEDED",
         "pages": [
             {
-                "prompts": [
+                "prompts": _as_documented_map([
                     {
                         "prompt": "What is the vendor: name?",
                         "answer": {"value": "A", "confidence": None},
                     }
-                ]
+                ])
             }
         ],
     }
@@ -312,13 +317,13 @@ def test_prompt_source_too_large_raises_typed_error() -> None:
         "status": "SUCCEEDED",
         "pages": [
             {
-                "prompts": [
+                "prompts": _as_documented_map([
                     {
                         "prompt": "vendor?",
                         "source": huge_source,
                         "answer": {"value": "A", "confidence": None},
                     }
-                ]
+                ])
             }
         ],
     }
@@ -333,13 +338,13 @@ def test_prompt_source_at_the_64kb_limit_is_accepted() -> None:
         "status": "SUCCEEDED",
         "pages": [
             {
-                "prompts": [
+                "prompts": _as_documented_map([
                     {
                         "prompt": "vendor?",
                         "source": at_limit_source,
                         "answer": {"value": "A", "confidence": None},
                     }
-                ]
+                ])
             }
         ],
     }
@@ -582,7 +587,7 @@ def test_non_dict_table_row_raises_typed_error() -> None:
 
 
 def test_non_dict_prompt_entry_raises_typed_error() -> None:
-    raw = {"status": "SUCCEEDED", "pages": [{"prompts": ["not a mapping"]}]}
+    raw = {"status": "SUCCEEDED", "pages": [{"prompts": _as_documented_map(["not a mapping"])}]}
     with pytest.raises(MalformedIDPOutputError):
         normalize(raw, success_statuses={"SUCCEEDED"})
 
@@ -706,14 +711,14 @@ def test_top_level_prompt_wins_over_a_colliding_pages_entry_instead_of_raising()
         "status": "SUCCEEDED",
         "pages": [
             {
-                "prompts": [
+                "prompts": _as_documented_map([
                     {"prompt": "vendor?", "answer": {"value": "from pages"}},
-                ]
+                ])
             }
         ],
-        "prompts": [
+        "prompts": _as_documented_map([
             {"prompt": "vendor?", "answer": {"value": "from top level"}},
-        ],
+        ]),
     }
     out = normalize(raw, success_statuses={"SUCCEEDED"})
     assert out["prompts"]["vendor?"]["answer"] == "from top level"
@@ -727,10 +732,10 @@ def test_duplicate_prompt_within_the_top_level_rollup_itself_still_raises() -> N
     # (test_duplicate_prompt_string_raises_typed_error, unchanged above).
     raw = {
         "status": "SUCCEEDED",
-        "prompts": [
+        "prompts": _as_documented_map([
             {"prompt": "vendor?", "answer": {"value": "A"}},
             {"prompt": "vendor?", "answer": {"value": "B"}},
-        ],
+        ]),
     }
     with pytest.raises(MalformedIDPOutputError) as excinfo:
         normalize(raw, success_statuses={"SUCCEEDED"})
@@ -868,9 +873,9 @@ def test_barren_or_junk_pages_never_discards_a_populated_top_level_container(
 def test_top_level_prompts_only_is_a_recognised_envelope_not_missing() -> None:
     raw = {
         "status": "SUCCEEDED",
-        "prompts": [
+        "prompts": _as_documented_map([
             {"prompt": "invoice_number", "answer": {"value": "INV-1", "confidence": None}}
-        ],
+        ]),
     }
     out = normalize(raw, success_statuses={"SUCCEEDED"})
     assert out["fields"] == {}
@@ -963,3 +968,63 @@ def test_both_confidence_keys_present_raises_even_when_both_are_individually_val
     with pytest.raises(MalformedIDPOutputError) as excinfo:
         normalize(raw, success_statuses={"SUCCEEDED"})
     assert excinfo.value.reason == "conflicting_confidence_keys"
+
+
+# ---- DEBT-69(a): MuleSoft's documented `prompts` shape (2026-09-27) -------
+#
+# The pin is MuleSoft's own documentation example, NOT a live capture (see
+# fixtures/mulesoft_docs_prompts_example.README.md). The org emits no prompts.
+
+DOCS_PROMPTS_EXAMPLE = json.loads(
+    (pathlib.Path(__file__).parent / "fixtures" / "mulesoft_docs_prompts_example.json").read_text()
+)
+
+
+def test_the_documented_prompts_example_parses() -> None:
+    out = normalize(DOCS_PROMPTS_EXAMPLE, success_statuses={"SUCCEEDED"})
+    prompt = out["prompts"]["what is the company main business"]
+    assert prompt["answer"] is None
+    assert prompt["source"] == "document"
+
+
+def test_the_documented_map_is_also_accepted_at_the_top_level() -> None:
+    """Real responses put `fields`/`tables` at the top level with no
+    `pages` (1d78c32); a prompts map arriving the same way must parse."""
+    raw = {
+        "status": "SUCCEEDED",
+        "fields": {"total": {"value": "1.00", "confidenceScore": 99.0}},
+        "prompts": {"vendor": {"prompt": "Who is the vendor?", "source": "document",
+                               "answer": {"value": "Acme", "confidenceScore": 88.0}}},
+    }
+    out = normalize(raw, success_statuses={"SUCCEEDED"})
+    assert out["prompts"]["Who is the vendor?"]["answer"] == "Acme"
+    assert out["fields"]["total"]["value"] == "1.00"
+
+
+def test_the_undocumented_list_form_is_rejected() -> None:
+    """The shape the parser used to expect. No MuleSoft documentation
+    describes it; accepting it is how the mismatch went unnoticed."""
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [{"prompts": [{"prompt": "vendor?", "answer": {"value": "A"}}]}],
+    }
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "invalid_page"
+    assert "documented shape" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("empty", [[], {}])
+def test_an_empty_prompts_container_is_no_prompts(empty: object) -> None:
+    raw = {"status": "SUCCEEDED", "fields": {"total": {"value": "1.00"}}, "prompts": empty}
+    assert normalize(raw, success_statuses={"SUCCEEDED"})["prompts"] == {}
+
+
+def test_an_unsafe_prompt_name_is_rejected() -> None:
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [{"prompts": {"bad\nname": {"prompt": "ok?", "answer": {"value": "A"}}}}],
+    }
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "unsafe_prompt_key"

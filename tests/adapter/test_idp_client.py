@@ -34,6 +34,7 @@ from idp_regression.adapter.idp_client import (
     _parse_retry_after_seconds,
     _per_call_timeout_seconds,
 )
+from tests.adapter._prompts import _as_documented_map
 
 
 def _advancing_clock(step: float = 0.1) -> Callable[[], float]:
@@ -508,12 +509,12 @@ def test_extracted_values_never_appear_in_logs_or_stdout_stderr(
                         {"account": {"value": sentinel_table_cell, "confidence": 0.9}}
                     ]
                 },
-                "prompts": [
+                "prompts": _as_documented_map([
                     {
                         "prompt": "vendor name?",
                         "answer": {"value": sentinel_prompt_answer, "confidence": 0.9},
                     }
-                ],
+                ]),
             }
         ],
     }

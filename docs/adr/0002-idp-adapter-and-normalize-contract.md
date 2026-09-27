@@ -327,3 +327,36 @@ that it is unexercised rather than untested.
 - Cell shape `{value, confidenceScore, geometry}` unchanged across page counts.
 - A table spanning a page break arrives **as one array**, so row-order and `match_key` pairing
   behave exactly as the single-page case. No new pairing logic is needed.
+
+## Amendment 2026-09-27 — `prompts` follows MuleSoft's documented shape: a map keyed by name (DEBT-69(a), user decision)
+
+**Supersedes, for `prompts` only, this ADR's `pages[].prompts[].answer.value` wording and the list form
+`_merge_prompts` accepted.** That list shape was an early assumption. No MuleSoft documentation describes
+it, and no real response has ever carried one.
+
+**What is documented** (docs.mulesoft.com/idp/integrating-idp-with-anypoint-studio; its source in
+github.com/mulesoft/docs-idp): a `prompts` section beside `fields`/`tables`, nested under `pages[]`,
+**keyed by the prompt's name**:
+
+```json
+"prompts": { "business": { "prompt": "what is the company main business",
+                           "source": "document", "answer": { "value": null } } }
+```
+
+**Decision (user, 2026-09-27: "if they are part of the MuleSoft doc, we must support them"):**
+- `normalize()` accepts the documented map, inside `pages[]` and at the top level. Real responses put
+  `fields`/`tables` at the top level with no `pages` (Correction 2026-09-24 (b)), so a prompts map
+  arriving the same way must parse too.
+- The list form is **rejected** as `invalid_page`, with a message naming the documented shape. An EMPTY
+  container (`[]` or `{}`) is "no prompts", so it can never abort a run.
+- The map's name is validated with the prompt-key charset rule and **not used as the key**. Prompts stay
+  keyed by their question text, verbatim. That is the golden, classifier and score-name contract (this
+  ADR's 2026-09-19 amendment; DATA-MODEL-01 `prompts.<key>`). Keying by name would survive a reworded
+  question, but it changes that contract across layers, so it is recorded on DEBT-69 rather than made
+  here.
+
+**Still unverified (SR-1).** The pin is MuleSoft's own example
+(`tests/adapter/fixtures/mulesoft_docs_prompts_example.json`, labelled as such), not a live capture. The
+project's org uses field prompts only, which return under `fields`. The first real response carrying a
+`prompts` section replaces that fixture. The docs are not self-consistent either: the API-reference page
+shows a flat `fields` object with neither `pages` nor `prompts`.

@@ -22,13 +22,13 @@
           }
         ]
       },
-      "prompts": [
-        {
+      "prompts": {
+        "vendor_name": {
           "prompt": "What is the vendor name?",
           "source": "page-1-ocr",
           "answer": { "value": "Acme Corp", "confidence": 0.88 }
         }
-      ]
+      }
     }
   ]
 }

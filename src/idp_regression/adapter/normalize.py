@@ -169,7 +169,7 @@ def normalize(raw: object, success_statuses: set[str]) -> NormalizedOutput:
         _merge_fields(page.get("fields", {}), fields)
         _merge_tables(page.get("tables", {}), tables)
         _merge_prompts(
-            page.get("prompts", []), prompts, seen_prompt_keys, allow_override=is_top_level_rollup
+            page.get("prompts", {}), prompts, seen_prompt_keys, allow_override=is_top_level_rollup
         )
 
     return NormalizedOutput(status=status, fields=fields, tables=tables, prompts=prompts)
@@ -347,12 +347,37 @@ def _merge_prompts(
     # collision (`allow_override=False` on both) still raises exactly as
     # before — this only de-fangs the specific page/top-level seam R-2 is
     # about, nothing else.
-    if not isinstance(raw_prompts, list):
-        raise MalformedIDPOutputError("invalid_page", "page 'prompts' must be a list")
+    # MuleSoft's DOCUMENTED shape (docs.mulesoft.com/idp/
+    # integrating-idp-with-anypoint-studio, 2026-09-27): a MAP keyed by the
+    # prompt's name, each entry `{"prompt": <question>, "source": ...,
+    # "answer": {"value": ...}}`. The parser used to expect a LIST of
+    # entries, a shape no documentation describes, so a real prompts
+    # response would have been rejected as malformed (DEBT-69(a), user
+    # decision 2026-09-27: support the documented shape, drop the list).
+    # ⚠️ Still UNVERIFIED against a live response (SR-1): no action in the
+    # project's org emits prompts, so the pin is the documentation's own
+    # example, labelled as such. An empty list is tolerated as "no prompts"
+    # so an empty container can never abort a run.
+    if isinstance(raw_prompts, list) and not raw_prompts:
+        return
+    if not isinstance(raw_prompts, dict):
+        raise MalformedIDPOutputError(
+            "invalid_page",
+            "page 'prompts' must be a map keyed by prompt name (MuleSoft's documented shape)",
+        )
     seen_in_this_list: set[str] = set()
-    for raw_entry in raw_prompts:
+    for prompt_name, raw_entry in raw_prompts.items():
+        if not isinstance(prompt_name, str) or not _SAFE_PROMPT_PATTERN.match(prompt_name):
+            raise MalformedIDPOutputError(
+                "unsafe_prompt_key", "a prompt name failed the verbatim safe-charset check"
+            )
         if not isinstance(raw_entry, dict):
             raise MalformedIDPOutputError("invalid_page", "each prompt entry must be a mapping")
+        # Keyed downstream by the QUESTION text, verbatim -- the golden,
+        # classifier and score-name contract (ADR-0002 amendment,
+        # DATA-MODEL-01 `prompts.<key>`). The map's name is validated above
+        # and otherwise not used; keying by it instead is a cross-layer
+        # data-model change, recorded on DEBT-69, not made here.
         prompt_key = raw_entry.get("prompt")
         if not isinstance(prompt_key, str) or not _SAFE_PROMPT_PATTERN.match(prompt_key):
             raise MalformedIDPOutputError(

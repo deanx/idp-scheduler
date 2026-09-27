@@ -1,0 +1,19 @@
+{
+  "status": "SUCCEEDED",
+  "pages": [
+    {
+      "page": 1,
+      "fields": {},
+      "tables": {},
+      "prompts": {
+        "business": {
+          "prompt": "what is the company main business",
+          "source": "document",
+          "answer": {
+            "value": null
+          }
+        }
+      }
+    }
+  ]
+}
