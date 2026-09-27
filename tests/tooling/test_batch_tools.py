@@ -4008,3 +4008,18 @@ def test_verify_refuses_pins_from_several_orgs_unless_one_is_named(tmp_path: Pat
     assert exit_code == 0
     (args, _kwargs), = run_eval.calls
     assert args[4] == "org-9"
+
+
+# --- DEBT-106 (a): two entries, one document, one platform item -------------
+
+
+def test_provision_refuses_two_entries_naming_one_document(
+    tmp_path: Path, provisioned: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    golden = _golden_file(tmp_path, {"a": _entry("same.pdf"), "b": _entry("same.pdf")})
+    rc = provision.main(["--dataset", "ds", "--all", "--golden-file", str(golden)])
+    assert rc == 1
+    assert provisioned.item_posts == []
+    err = capsys.readouterr().err
+    assert "'same.pdf' by a, b" in err
+    assert "87.48" not in err

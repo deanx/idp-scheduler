@@ -429,6 +429,27 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    # Two entries naming one document_id are ONE platform item (the id is
+    # uuid5(dataset|document_id)): the later upsert silently replaced the
+    # earlier while both were reported created, and DEBT-83's duplicate
+    # refusal could never fire because the platform held only one (DEBT-106).
+    # Refused before anything is written, naming the keys, never a value.
+    owners: dict[str, list[str]] = {}
+    for key, seed in entries:
+        document_id = seed.get("document_id") if isinstance(seed, dict) else None
+        if isinstance(document_id, str):
+            owners.setdefault(document_id, []).append(key)
+    collisions = {doc: keys for doc, keys in owners.items() if len(keys) > 1}
+    if collisions:
+        doc, keys = sorted(collisions.items())[0]
+        print(
+            f"provision_golden_dataset: {len(collisions)} document_id(s) are named by more "
+            f"than one entry (e.g. {doc!r} by {', '.join(sorted(keys))}). They would "
+            "collapse into ONE platform item; nothing provisioned.",
+            file=sys.stderr,
+        )
+        return 1
+
     invalid: list[tuple[str, str]] = []
     valid: list[tuple[str, dict[str, Any]]] = []
     for key, seed in entries:
