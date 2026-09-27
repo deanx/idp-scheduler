@@ -3868,3 +3868,58 @@ def test_show_run_counts_a_new_table_as_new(
     show_run.main([str(_artifact(tmp_path, documents))])
     out = capsys.readouterr().out
     assert "new=1" in out
+
+
+# --- DEBT-107: a failed draft is not paid for twice -------------------------
+
+
+class _BrokenDraft:
+    @staticmethod
+    def _draft(*_args: Any) -> Any:
+        raise ValueError("draft failed")
+
+
+def _loader_with_a_broken_draft(real_load: Any) -> Any:
+    return lambda name: _BrokenDraft if name == "draft_golden" else real_load(name)
+
+
+def test_pin_retries_a_failed_draft_from_its_capture_for_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document = tmp_path / "inv-001.pdf"
+    document.write_bytes(b"%PDF")
+    real_load = pin_document._load
+    monkeypatch.setattr(pin_document, "_load", _loader_with_a_broken_draft(real_load))
+    calls: list[Path] = []
+    exit_code, _ = pin_document.run(
+        _pin_args(tmp_path, document), lambda path: _record(calls, path), _FakeStage()
+    )
+    assert exit_code == 1 and len(calls) == 1
+
+    monkeypatch.setattr(pin_document, "_load", real_load)
+    exit_code, _ = pin_document.run(
+        _pin_args(tmp_path, document), lambda path: _record(calls, path), _FakeStage()
+    )
+    assert exit_code == 0
+    assert len(calls) == 1, "the retry drafted from the stored capture"
+
+
+def test_pin_re_extracts_when_the_bytes_changed_or_repin_is_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document = tmp_path / "inv-001.pdf"
+    document.write_bytes(b"%PDF")
+    real_load = pin_document._load
+    monkeypatch.setattr(pin_document, "_load", _loader_with_a_broken_draft(real_load))
+    calls: list[Path] = []
+    def _capture(path: Path) -> dict[str, Any]:
+        return _record(calls, path)
+
+    pin_document.run(_pin_args(tmp_path, document), _capture, _FakeStage())
+    document.write_bytes(b"%PDF-replaced")
+    pin_document.run(_pin_args(tmp_path, document), _capture, _FakeStage())
+    assert len(calls) == 2, "different bytes: the old capture is not theirs"
+    pin_document.run(
+        _pin_args(tmp_path, document, repin=True), lambda path: _record(calls, path), _FakeStage()
+    )
+    assert len(calls) == 3, "--repin always reads fresh"

@@ -242,6 +242,11 @@ def _resolve_documents(args: argparse.Namespace) -> tuple[list[Path], int]:
 _PATH_SAFE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 
+#: `document -> sha256` of the bytes each capture was taken from, beside the
+#: captures (DEBT-107: a capture is reusable only for the same bytes).
+CAPTURE_DIGESTS_FILE = "_digests.json"
+
+
 def golden_dir(store: Path, action_id: str, version: str) -> Path:
     """`<store>/goldens/<action-id>/<action-version>/`.
 
@@ -287,14 +292,27 @@ def _pin_one(
     # Hashed BEFORE extraction: these are the bytes the trusted version reads.
     digest = file_sha256(document)
 
-    try:
-        capture = capture_fn(document)
-    except Exception as exc:  # noqa: BLE001 - INV-02: type name only, never str(exc)
-        print(f"    FAILED extraction: {type(exc).__name__}", file=sys.stderr)
-        return {"document_id": document_id, "error": type(exc).__name__}
+    capture_path = captures_dir / f"{document_id}.raw.json"
+    digests_path = captures_dir / CAPTURE_DIGESTS_FILE
+    digests = read_json_if_present(digests_path)
+    # A capture from an earlier attempt whose DRAFT failed is reused, not
+    # paid for again (DEBT-107, `_batch` rule 2: nothing paid for is lost).
+    # Only for the same bytes (DEBT-100), and never under --repin, whose
+    # whole point is a fresh reading.
+    if capture_path.exists() and digests.get(document_id) == digest and not args.repin:
+        capture = read_json_if_present(capture_path)
+        print("    reusing the capture from an earlier attempt (no extraction)", file=sys.stderr)
+    else:
+        try:
+            capture = capture_fn(document)
+        except Exception as exc:  # noqa: BLE001 - INV-02: type name only, never str(exc)
+            print(f"    FAILED extraction: {type(exc).__name__}", file=sys.stderr)
+            return {"document_id": document_id, "error": type(exc).__name__}
 
-    ensure_private_dir(captures_dir)
-    write_private_json(captures_dir / f"{document_id}.raw.json", capture)
+        ensure_private_dir(captures_dir)
+        write_private_json(capture_path, capture)
+        digests[document_id] = digest
+        write_private_json(digests_path, digests)
 
     draft_golden = _load("draft_golden")
     try:
