@@ -548,6 +548,17 @@ class LangfuseAdapter:
             # unusable.
             raise DatasetFetchFailedError("get_dataset: dataset response is missing a valid 'id'")
         schema = body.get("expectedOutputSchema")
+        if schema is not None and not isinstance(schema, dict):
+            # FO-6 (DEBT-48): returned verbatim, a string or list schema made
+            # a `Dataset` violating its own declared type. Downstream it still
+            # failed CLOSED -- `check_schema_drift` hashed it, the hash did not
+            # match, and the run aborted `schema_drift` -- but told the
+            # operator "the schema does not match" when the truth is "the
+            # platform sent something that is not a schema". An ABSENT schema
+            # stays `None`: that is its own, already-distinct abort.
+            raise DatasetFetchFailedError(
+                "get_dataset: the dataset's expectedOutputSchema is not a JSON object"
+            )
 
         items = self._fetch_all_dataset_items(name, encoded_name, dataset_id)
         self._cached_dataset_name = name

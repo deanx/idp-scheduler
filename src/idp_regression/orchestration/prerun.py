@@ -63,6 +63,14 @@ def check_schema_drift(dataset: Dataset) -> None:
         logger.error("schema_drift committed=%s actual=absent", committed_hash)
         raise RunAbortedError("schema_drift", "golden dataset schema is absent")
 
+    if not isinstance(actual_schema, dict):
+        # FO-6, at the consumer too: `Dataset` can come from any
+        # PlatformAdapter, and a non-object schema is not "a different
+        # schema" -- saying so would send the operator to re-provision a
+        # schema that was never the problem.
+        logger.error("schema_drift committed=%s actual=not-an-object", committed_hash)
+        raise RunAbortedError("schema_drift", "golden dataset schema is not a JSON object")
+
     actual_hash = _canonical_hash(actual_schema)
     if actual_hash != committed_hash:
         logger.error(

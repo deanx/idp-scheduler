@@ -1894,3 +1894,36 @@ def test_platform_adapter_protocol_has_no_get_golden_version() -> None:
 
     assert not hasattr(PlatformAdapter, "get_golden_version")
     assert not hasattr(LangfuseAdapter, "get_golden_version")
+
+
+# --- FO-6 (DEBT-48): `expectedOutputSchema` must be an object or absent -----
+
+
+@pytest.mark.parametrize("schema", ["a string", ["a", "list"], 7])
+def test_get_dataset_refuses_a_schema_that_is_not_an_object(schema: object) -> None:
+    """Returned verbatim, this made a `Dataset` violating its own type. It
+    failed closed downstream, but as "schema does not match" -- the wrong
+    reason, sending the operator to re-provision a schema that was never the
+    problem."""
+    body = _v2_dataset_response(None)
+    body["expectedOutputSchema"] = schema
+    client = FakeHttpClient({("GET", "/api/public/v2/datasets/spike-01"): (200, body)})
+    adapter = LangfuseAdapter(client=client)
+
+    with pytest.raises(DatasetFetchFailedError, match="not a JSON object"):
+        adapter.get_dataset("spike-01")
+    assert client.calls == [("GET", "/api/public/v2/datasets/spike-01", None)]
+
+
+def test_get_dataset_still_returns_an_absent_schema_as_none() -> None:
+    """Absence is its own, already-distinct abort (`actual=absent`)."""
+    body = _v2_dataset_response(None)
+    body.pop("expectedOutputSchema", None)
+    client = FakeHttpClient(
+        {
+            ("GET", "/api/public/v2/datasets/spike-01"): (200, body),
+            ("GET", "/api/public/dataset-items"): (200, {"data": [], "meta": {"totalPages": 1}}),
+        }
+    )
+    dataset = LangfuseAdapter(client=client).get_dataset("spike-01")
+    assert dataset["expected_output_schema"] is None

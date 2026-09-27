@@ -182,3 +182,15 @@ def test_validate_golden_set_runs_before_any_idp_call(
     import idp_regression.orchestration.prerun as prerun_module
 
     assert not hasattr(prerun_module, "make_idp_adapter")
+
+
+@pytest.mark.parametrize("schema", ["a string", ["a", "list"]])
+def test_check_schema_drift_says_when_the_schema_is_not_an_object(
+    schema: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    """FO-6 at the consumer: any PlatformAdapter can supply the Dataset."""
+    with caplog.at_level(logging.ERROR), pytest.raises(RunAbortedError) as excinfo:
+        check_schema_drift(_dataset(schema=schema))
+    assert excinfo.value.reason == "schema_drift"
+    assert "not a JSON object" in str(excinfo.value)
+    assert "actual=not-an-object" in caplog.text
