@@ -1814,14 +1814,55 @@ def test_pipeline_sets_the_document_dir_the_candidate_run_needs(
     assert "2.0.0" in stages.run_eval_stage.calls[0]
 
 
-def test_pipeline_reads_the_candidate_run_against_the_floor(tmp_path: Path) -> None:
+def _candidate_run_writing_an_artifact() -> Any:
+    envelope = artifact_envelope("r", {"a.pdf": {"total": _cell("match")}}, status="complete")
+    return _FakeStage(writes={Path(".idp-regression-run-artifacts") / "r.json": envelope})
+
+
+def test_pipeline_reads_the_candidate_run_against_the_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "a.pdf").write_bytes(b"%PDF")
+    stages = _pipeline_stages(tmp_path)
+    stages.run_eval = _candidate_run_writing_an_artifact().main
+
+    golden_pipeline.run(_pipeline_args(tmp_path, candidate_version="2.0.0"), stages)
+
+    argv = stages.show_run.calls[0]
+    assert "--baseline" in argv
+    assert argv[0].endswith("r.json"), "THIS run's artifact, named explicitly"
+
+
+def test_pipeline_never_shows_a_previous_runs_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DEBT-111: the candidate run's artifact write is best-effort. When it
+    wrote nothing, the newest file in the directory was a previous run."""
+    monkeypatch.chdir(tmp_path)
+    old = tmp_path / ".idp-regression-run-artifacts"
+    old.mkdir()
+    (old / "previous.json").write_text("{}")
+    os.utime(old / "previous.json", (1, 1))
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "a.pdf").write_bytes(b"%PDF")
     stages = _pipeline_stages(tmp_path)
 
     golden_pipeline.run(_pipeline_args(tmp_path, candidate_version="2.0.0"), stages)
 
-    assert "--baseline" in stages.show_run.calls[0]
+    assert stages.show_run.calls == []
+
+
+def test_show_run_document_filter_narrows_the_view_never_the_gate(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """DEBT-111: drilling into a passing document of a failed run."""
+    documents = {"good.pdf": {"total": _cell("match")}, "bad.pdf": {"total": _cell("wrong_value")}}
+    rc = show_run.main([str(_artifact(tmp_path, documents)), "--document", "good"])
+    out = capsys.readouterr().out
+    assert rc == 1, "the run failed; a view of one passing document does not change that"
+    assert "SHOWN    PASS" in out and "OVERALL  FAIL" in out
 
 
 def test_pipeline_stop_after_halts_where_told(tmp_path: Path) -> None:

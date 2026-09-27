@@ -576,6 +576,20 @@ def extract_documents_from_zip(
 # ── what a validation run concluded ───────────────────────────────────
 
 
+def newest_artifact_since(since: float, *, artifact_dir: Path | None = None) -> Path | None:
+    """The newest run artifact written at or after `since`, or None. The
+    time bound is what ties an artifact to the run just made; a newer run
+    in the same directory at the same moment can still confuse it (see
+    `run_outcome`)."""
+    from idp_regression.orchestration.run_artifact import ARTIFACT_DIR_NAME
+
+    directory = artifact_dir if artifact_dir is not None else Path(ARTIFACT_DIR_NAME)
+    if not directory.is_dir():
+        return None
+    candidates = [p for p in directory.glob("*.json") if p.stat().st_mtime >= since]
+    return max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
+
+
 def run_outcome(
     returncode: int, *, since: float, artifact_dir: Path | None = None
 ) -> tuple[str, str]:
@@ -596,25 +610,13 @@ def run_outcome(
     if returncode == 0:
         return "STILL VALID", ""
     from idp_regression.classifier.gate import overall_gate
-    from idp_regression.orchestration.run_artifact import (
-        ARTIFACT_DIR_NAME,
-        parse_run_artifact,
-        run_level_gate,
-    )
+    from idp_regression.orchestration.run_artifact import parse_run_artifact, run_level_gate
 
-    directory = artifact_dir if artifact_dir is not None else Path(ARTIFACT_DIR_NAME)
-    candidates = (
-        sorted(
-            (p for p in directory.glob("*.json") if p.stat().st_mtime >= since),
-            key=lambda p: p.stat().st_mtime,
-        )
-        if directory.is_dir()
-        else []
-    )
-    if not candidates:
+    newest = newest_artifact_since(since, artifact_dir=artifact_dir)
+    if newest is None:
         return "RUN FAILED", "it stopped before writing a result -- see the messages above"
     try:
-        artifact = parse_run_artifact(json.loads(candidates[-1].read_text(encoding="utf-8")))
+        artifact = parse_run_artifact(json.loads(newest.read_text(encoding="utf-8")))
     except (ValueError, OSError):
         return "RUN FAILED", "its result could not be read"
     gates: list[str] = []

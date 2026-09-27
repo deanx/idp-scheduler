@@ -58,6 +58,7 @@ import datetime as dt
 import importlib.util
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +76,7 @@ from _batch import (  # noqa: E402
     discover_documents,
     ensure_private_dir,
     extract_documents_from_zip,
+    newest_artifact_since,
     read_json_if_present,
     refuse_over_ceiling,
     write_private_json,
@@ -338,6 +340,7 @@ def run(args: argparse.Namespace, stages: Any) -> tuple[int, dict[str, Any]]:
     # pipeline knows where it unpacked them, so the operator never has to.
     os.environ["IDP_DOCUMENT_DIR"] = str(document_dir.resolve())
     run_name = f"candidate-{args.candidate_version}-{dt.datetime.now(dt.UTC):%Y%m%dT%H%M%SZ}"
+    candidate_started = time.time()
     gate = stages.run_eval(
         [
             "--org", args.org,
@@ -352,7 +355,18 @@ def run(args: argparse.Namespace, stages: Any) -> tuple[int, dict[str, Any]]:
     summary["candidate_run"] = run_name
     summary["gate_exit_code"] = gate
 
-    show_argv = ["--failures-only"]
+    # THIS run's artifact, never simply the newest one in the directory: the
+    # artifact write is best-effort, and when it failed show_run displayed a
+    # previous run as if it were this one (DEBT-111).
+    artifact = newest_artifact_since(candidate_started)
+    if artifact is None:
+        print(
+            "golden_pipeline: the candidate run wrote no run artifact, so there is no "
+            "per-document detail to show. The exit code above is still the gate's.",
+            file=sys.stderr,
+        )
+        return gate, summary
+    show_argv = [str(artifact), "--failures-only"]
     if floor_report:
         show_argv += ["--baseline", str(floor_report)]
     stages.show_run.main(show_argv)

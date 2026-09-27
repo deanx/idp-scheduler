@@ -342,6 +342,14 @@ def main(argv: list[str] | None = None) -> int:
             baseline_report = json.load(fh)
         baseline = _baseline_index(baseline_report)
 
+    # The RUN's gate, over every document, computed before any --document
+    # filter. Filtering is a view; it used to become the gate, so drilling
+    # into one passing document of a failed run printed PASS and exited 0
+    # (DEBT-111).
+    whole_run_gates = [overall_gate(fields) for fields in documents.values()]
+    whole_run_gate = run_level_gate(whole_run_gates, artifact.status)
+    whole_run_count = len(documents)
+
     if args.document:
         picked = {d: f for d, f in documents.items() if args.document.lower() in d.lower()}
         if not picked:
@@ -426,7 +434,15 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         tail = f"  (all {len(documents)} documents passed)"
-    print(f"OVERALL  {run_gate}{tail}")
+    if args.document:
+        print(f"SHOWN    {run_gate}{tail}")
+        print(
+            f"OVERALL  {whole_run_gate}  (the WHOLE run, {whole_run_count} document(s): "
+            f"{whole_run_gates.count('FAIL')} failed. --document narrows the view, "
+            "never the gate)"
+        )
+    else:
+        print(f"OVERALL  {run_gate}{tail}")
     if comparison and failed:
         noise_only = sorted(
             doc for doc in failed if _failure_rests_on_noise(documents[doc], comparison)
@@ -453,7 +469,7 @@ def main(argv: list[str] | None = None) -> int:
     # a run that fails, however well its failure is explained (INV-08).
     # An INCOMPLETE run is not a pass either (DEBT-91): `run_eval` exited
     # non-zero on it, and this must not be the command that says otherwise.
-    return 0 if run_gate == "PASS" else 1
+    return 0 if whole_run_gate == "PASS" else 1
 
 
 def _floor_note(label: str, baseline: dict[str, tuple[float, int]]) -> str:
