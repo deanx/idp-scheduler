@@ -352,8 +352,18 @@ def run(args: argparse.Namespace, run_eval: Any) -> tuple[int, dict[str, Any]]:
         )
         return 2, {}
 
-    first = pins.get(selected[0], {})
-    org = args.org or first.get("org", "")
+    # One run authenticates against ONE org. Taking the first pin's silently
+    # would verify every other pin against the wrong org (DEBT-109); pins
+    # from several orgs must be named explicitly, like several directories.
+    orgs = {pins[name].get("org") for name in selected if name in pins} - {None, ""}
+    if not args.org and len(orgs) > 1:
+        print(
+            f"verify_document: the selected pins were taken in {len(orgs)} different orgs -- "
+            "pass --org to say which, or verify them in separate runs.",
+            file=sys.stderr,
+        )
+        return 2, {}
+    org = args.org or (next(iter(orgs)) if orgs else "")
     action = action_id
     if args.version == trusted:
         print(

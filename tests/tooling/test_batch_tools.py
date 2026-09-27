@@ -3923,3 +3923,47 @@ def test_pin_re_extracts_when_the_bytes_changed_or_repin_is_asked(
         _pin_args(tmp_path, document, repin=True), lambda path: _record(calls, path), _FakeStage()
     )
     assert len(calls) == 3, "--repin always reads fresh"
+
+
+# --- DEBT-109: reports say what actually happened ----------------------------
+
+
+class _FailFirst:
+    """Reference read fails for doc-001; everything else succeeds."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def extract(self, document_path: str, action_id: str, version: str) -> dict[str, Any]:
+        self.calls += 1
+        if Path(document_path).name == "doc-001.pdf":
+            raise RuntimeError("boom")
+        return _normalized()
+
+
+def test_noise_floor_reports_the_extractions_it_attempted_not_planned(tmp_path: Path) -> None:
+    document_dir = _documents(tmp_path, 2)
+    adapter = _FailFirst()
+    _, report = noise_floor.run(_noise_args(tmp_path, document_dir, repeats=3), adapter)
+    assert report["sample"]["extractions_planned"] == 6
+    assert report["sample"]["extractions_spent"] == adapter.calls == 4
+
+
+def test_verify_refuses_pins_from_several_orgs_unless_one_is_named(tmp_path: Path) -> None:
+    docs = str(tmp_path / "docs")
+    _pins_file(
+        tmp_path,
+        {
+            "a.pdf": {"dataset": "ds", "document_dir": docs, "org": "org-1"},
+            "b.pdf": {"dataset": "ds", "document_dir": docs, "org": "org-2"},
+        },
+    )
+    run_eval = _RecordingRunEval()
+    exit_code, _ = verify_document.run(_verify_args(tmp_path, all=True), run_eval)
+    assert exit_code == 2 and run_eval.calls == []
+
+    # An org no pin carries, so only the flag itself can produce it.
+    exit_code, _ = verify_document.run(_verify_args(tmp_path, all=True, org="org-9"), run_eval)
+    assert exit_code == 0
+    (args, _kwargs), = run_eval.calls
+    assert args[4] == "org-9"

@@ -383,10 +383,16 @@ def run(args: argparse.Namespace, adapter: SupportsExtract | None) -> tuple[int,
     failures: list[dict[str, Any]] = []
     started = time.monotonic()
     total = len(documents)
+    # Counted per attempt, not planned (DEBT-109): a document whose reference
+    # read fails never has its repeats attempted, so `total * repeats`
+    # overstated the spend. An attempt that failed still counts: it may have
+    # been submitted, and an over-report is the safe direction for quota.
+    attempted = 0
 
     for index, document in enumerate(documents, start=1):
         document_id = document.name
         progress(index, total, document_id, started)
+        attempted += 1
         try:
             reference = extract_with_containment(
                 adapter, document, action_id=args.action, version=args.version, attempt=1
@@ -404,6 +410,7 @@ def run(args: argparse.Namespace, adapter: SupportsExtract | None) -> tuple[int,
             continue
 
         for attempt in range(2, args.repeats + 1):
+            attempted += 1
             try:
                 repeat = extract_with_containment(
                     adapter,
@@ -454,7 +461,8 @@ def run(args: argparse.Namespace, adapter: SupportsExtract | None) -> tuple[int,
         "zip": str(args.zip_path) if args.zip_path else None,
             "glob": args.glob,
             "repeats": args.repeats,
-            "extractions_spent": total * args.repeats,
+            "extractions_spent": attempted,
+            "extractions_planned": total * args.repeats,
         },
         "includes_values": bool(args.include_values),
         **body,
