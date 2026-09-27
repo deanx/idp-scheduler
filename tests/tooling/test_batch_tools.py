@@ -3325,3 +3325,148 @@ def test_run_outcome_names_an_abort_after_a_real_failure(tmp_path: Path) -> None
     _outcome_artifact(arts, {"a.pdf": {"total": _cell("wrong_value")}}, "aborted")
     verdict, reason = batch.run_outcome(1, since=0.0, artifact_dir=arts)
     assert verdict == "CHANGED" and "ABORTED (timeout)" in reason
+
+
+# --- /test gate (Med-High wave) F-1..F-6 ------------------------------------
+
+
+def _write_failing_artifact(directory: Path) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "run.json").write_text(
+        json.dumps(
+            artifact_envelope("run", {"a.pdf": {"total": _cell("wrong_value")}}, status="complete")
+        )
+    )
+
+
+def test_verify_main_banner_follows_the_artifact_not_the_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-1 (DEBT-98's own symptom location): `main`'s wiring, including
+    that `started` is stamped BEFORE the run writes its artifact."""
+    from idp_regression.orchestration import dotenv_support, facade
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(dotenv_support, "load_dotenv", lambda *a, **k: None)
+    _pinned(tmp_path, "a.pdf")
+    argv = ["--all", "--dataset", "ds", "--version", "2.0.0", "--store",
+            str(tmp_path / "pins"), "--yes"]
+
+    def _failing_run(*args: Any, **kwargs: Any) -> int:
+        _write_failing_artifact(tmp_path / ".idp-regression-run-artifacts")
+        return 1
+
+    monkeypatch.setattr(facade, "run_eval", _failing_run)
+    assert verify_document.main(argv) == 1
+    assert "CHANGED:" in capsys.readouterr().err
+
+    monkeypatch.setattr(facade, "run_eval", lambda *a, **k: 1)  # aborts, writes nothing new
+    for stale in (tmp_path / ".idp-regression-run-artifacts").glob("*.json"):
+        stale.unlink()
+    assert verify_document.main(argv) == 1
+    err = capsys.readouterr().err
+    assert "RUN FAILED:" in err and "CHANGED:" not in err
+
+
+def test_compare_main_banner_follows_the_artifact_not_the_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    document_dir = _documents(tmp_path, 1)
+
+    class _Verify:
+        def __init__(self, writes: bool) -> None:
+            self.writes = writes
+
+        def main(self, argv: list[str]) -> int:
+            if self.writes:
+                _write_failing_artifact(tmp_path / ".idp-regression-run-artifacts")
+            return 1
+
+    argv = ["--document-dir", str(document_dir), "--dataset", "ds", "--org", "o",
+            "--action", "a", "--trusted-version", "1.0.0", "--candidate-version", "2.0.0",
+            "--store", str(tmp_path / "pins"), "--yes"]
+    for writes, banner in ((True, "CHANGED:"), (False, "RUN FAILED:")):
+        verify = _Verify(writes)
+        monkeypatch.setattr(
+            compare_versions,
+            "_load",
+            lambda name, v=verify: _FakeStage() if name == "pin_document" else v,
+        )
+        for stale in (tmp_path / ".idp-regression-run-artifacts").glob("*.json"):
+            stale.unlink()
+        assert compare_versions.main(argv) == 1
+        assert banner in capsys.readouterr().err
+
+
+def test_a_legacy_pin_without_a_provisioned_record_is_re_sent(tmp_path: Path) -> None:
+    """F-2 / M20."""
+    document = tmp_path / "inv-001.pdf"
+    document.write_bytes(b"%PDF")
+    _pinned(tmp_path, "inv-001.pdf")  # pre-DEBT-97 record: no `provisioned` key
+    provision = _FakeStage()
+    exit_code, summary = pin_document.run(
+        _pin_args(tmp_path, document), lambda path: _raw(), provision
+    )
+    assert exit_code == 0 and summary["reprovisioned"] == ["inv-001.pdf"]
+
+
+def test_a_failed_reprovisioning_is_not_lost_in_a_batch_with_new_documents(
+    tmp_path: Path,
+) -> None:
+    """F-2 / M22: DEBT-97's "re-run reports success" in a mixed batch."""
+    docs = _documents(tmp_path, 2)
+    _pinned(tmp_path, "doc-001.pdf", document_dir=str(docs))  # legacy, unprovisioned
+
+    class _FailOld:
+        calls: list[list[str]] = []
+
+        def main(self, argv: list[str]) -> int:
+            return 1 if "doc-001.pdf" in argv else 0
+
+    exit_code, summary = pin_document.run(
+        _pin_args(tmp_path, None, document_dir=docs, all=True), lambda path: _raw(), _FailOld()
+    )
+    assert exit_code == 1
+    assert [f["document_id"] for f in summary["failures"]] == ["doc-001.pdf"]
+
+
+def test_bootstrap_resume_never_rewrites_an_entry_it_already_drafted(tmp_path: Path) -> None:
+    """F-3 / M07: a hand-reconciled entry survives --resume."""
+    document_dir = _documents(tmp_path, 2)
+    args = _bootstrap_args(tmp_path, document_dir)
+    bootstrap.run(args, lambda d: _raw())
+    golden = json.loads(args.out.read_text())
+    golden["doc-001"]["fields"]["total"]["value"] = "HAND-EDITED"
+    args.out.write_text(json.dumps(golden))
+
+    bootstrap.run(_bootstrap_args(tmp_path, document_dir, resume=True), lambda d: _raw())
+
+    assert json.loads(args.out.read_text())["doc-001"]["fields"]["total"]["value"] == (
+        "HAND-EDITED"
+    )
+
+
+def test_a_table_wrong_format_never_reads_as_gate_failing() -> None:
+    """F-4 / M14, M16: overall_gate ignores a table's wrong_format, even
+    on a block that carries format_critical."""
+    block = _table("wrong_format")
+    block["format_critical"] = True
+    assert not any(show_run._fails(cell) for _, cell in show_run._leaves({"t": block}))
+
+
+def test_calibrate_reads_an_absent_critical_as_false() -> None:
+    """F-5 / M12: `critical` is schema-optional and the gate reads it absent
+    as False; calibration must not promote it."""
+    golden: dict[str, Any] = {f"d{i}": _entry(f"d{i}.pdf") for i in range(20)}
+    del golden["d0"]["fields"]["total"]["critical"]
+    calibrated, _ = calibrate_golden.calibrate(golden, None)
+    assert calibrated["d0"]["fields"]["total"]["critical"] is False
+
+
+def test_run_outcome_calls_an_unreadable_artifact_a_failed_run(tmp_path: Path) -> None:
+    """F-6 / M30."""
+    arts = tmp_path / "arts"
+    arts.mkdir()
+    (arts / "bad.json").write_text("{not json")
+    assert batch.run_outcome(1, since=0.0, artifact_dir=arts)[0] == "RUN FAILED"
