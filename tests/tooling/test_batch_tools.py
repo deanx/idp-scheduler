@@ -4099,3 +4099,58 @@ def test_a_rerun_of_the_same_archive_pays_only_for_the_candidate(
             _RealHalf(verify_document, _RecordingRunEval()),
         )
     assert extracted == ["inv-1.pdf"], "the second run re-pinned nothing"
+
+
+# --- Wave A2 /test gate findings F-2..F-6 -----------------------------------
+
+
+def test_show_run_names_the_fields_the_floor_cannot_judge(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-2 (M21): the fail-closed half of DEBT-101 -- a field the floor
+    report never saw is not quietly counted as fine."""
+    documents = {f"doc-{i:03d}.pdf": {"total": _cell("match"), "po": _cell("match")}
+                 for i in range(1, 31)}
+    floor = _floor_report(
+        tmp_path, {"total": {"observations": 50, "unstable": 1, "instability_rate": 0.02}}
+    )
+    show_run.main([str(_artifact(tmp_path, documents)), "--baseline", str(floor)])
+    assert "1 field(s) cannot be judged against it." in capsys.readouterr().out
+
+
+def test_show_run_per_document_row_counts_a_new_table(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-3 (M25): the per-document NEW column, not only the totals."""
+    documents = {"a.pdf": {"total": _cell("match"),
+                           "freight": {"verdict": "new_table", "actual": 2, "critical": False}}}
+    show_run.main([str(_artifact(tmp_path, documents))])
+    row = next(line for line in capsys.readouterr().out.splitlines() if line.startswith("a.pdf"))
+    assert row.split()[-1] == "1"
+
+
+def test_newest_artifact_since_picks_the_newest(tmp_path: Path) -> None:
+    """F-4 (M43): with two candidates after `since`, the newest wins."""
+    arts = tmp_path / "arts"
+    arts.mkdir()
+    for name, mtime in (("older.json", 100.0), ("newer.json", 200.0), ("stale.json", 10.0)):
+        (arts / name).write_text("{}")
+        os.utime(arts / name, (mtime, mtime))
+    newest = batch.newest_artifact_since(50.0, artifact_dir=arts)
+    assert newest is not None and newest.name == "newer.json"
+    assert batch.newest_artifact_since(300.0, artifact_dir=arts) is None
+
+
+def test_mypys_configured_scope_matches_what_ci_checks() -> None:
+    """F-6: DEBT-33's invariant, until now enforced by a comment. A bare
+    `mypy` must check exactly what CI's typecheck job checks."""
+    import tomllib
+
+    import yaml
+
+    configured = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["tool"]["mypy"]["files"]
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/quality-gate.yml").read_text())
+    ci_run = next(
+        s["run"] for s in workflow["jobs"]["typecheck"]["steps"] if "mypy" in s.get("run", "")
+    )
+    assert ci_run.split()[1:] == configured

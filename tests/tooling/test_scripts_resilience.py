@@ -648,3 +648,14 @@ def test_two_runs_started_in_the_same_second_keep_separate_files(tmp_path: Path)
     log_dir = scratch / "logs" / "scheduled-runs"
     assert len(list(log_dir.glob("run-*.log"))) == 2
     assert not list(log_dir.glob("FAILED-*.marker"))
+
+
+def test_every_per_run_file_in_the_scheduled_script_is_keyed_by_run_key() -> None:
+    """Gate F-5 (M45): the status file's own write-to-read window is too short
+    for the same-second test to hit deterministically, so this pins the
+    naming statically -- no per-run file may be keyed by the bare timestamp."""
+    script = (SCRIPTS_DIR / "run_eval_scheduled.sh").read_text()
+    for name in ('run-${RUN_KEY}.log', 'FAILED-${RUN_KEY}.marker', '.status-${RUN_KEY}"'):
+        assert name in script, name
+    for stale in ('run-${TS}.log', 'FAILED-${TS}.marker', '.status-${TS}"'):
+        assert stale not in script, stale

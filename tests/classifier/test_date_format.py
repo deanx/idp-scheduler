@@ -172,3 +172,11 @@ def test_a_blank_date_format_is_refused_even_on_an_empty_value() -> None:
                                      "critical": False}}}
     with pytest.raises(MalformedGoldenError):
         classify(cast(Golden, golden), cast(NormalizedOutput, _actual("")))
+
+
+def test_a_padded_value_is_parsed_the_way_the_comparison_reads_it() -> None:
+    """Gate F-1 (M11): `canonical` strips before parsing, so the validator
+    must too, or it refuses a golden the comparison would accept."""
+    golden = {"fields": {"shipped": {"value": " 03/04/2024 ", "type": "date",
+                                     "date_format": "%d/%m/%Y", "critical": True}}}
+    classify(cast(Golden, golden), cast(NormalizedOutput, _actual("2024-04-03")))
