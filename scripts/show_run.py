@@ -2,9 +2,11 @@
 """Print a grouped, human-readable summary of one run's results.
 
 The local run artifact (`.idp-regression-run-artifacts/<run_id>.json`,
-ADR-0007) is the only place the *values* live -- the evaluation platform
-deliberately stores verdicts only (DEBT-18 option B). That makes the
-artifact the right place to answer "what happened across all N documents",
+ADR-0007) holds a run's complete verdict map, every expected, actual and
+confidence value, on this machine. (The platform also receives the values
+behind each verdict since the DEBT-18 reversal of 2026-09-25, but it holds
+them per score, not as one map per run.) That makes the artifact the right
+place to answer "what happened across all N documents",
 but it is raw JSON (`run_artifact.ARTIFACT_FORMAT`: run id, status, then
 `document_id -> field -> verdict`), which
 is not readable at a glance.
@@ -367,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
         print("-" * 78)
         for doc in sorted(documents):
             c = _counts(documents[doc])
-            new = c["new_field"] + c["new_line"]
+            new = c["new_field"] + c["new_line"] + c["new_table"]
             mark = "FAIL" if gates[doc] == "FAIL" else "pass"
             print(
                 f"{doc:34} {mark:6} {c['match']:>6} {c['wrong_value']:>5} "
@@ -413,7 +415,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"\ntotals   match={total['match']} wrong_value={total['wrong_value']} "
         f"missing={total['missing']} wrong_format={total['wrong_format']} "
-        f"new={total['new_field'] + total['new_line']}"
+        f"new={total['new_field'] + total['new_line'] + total['new_table']}"
     )
     if failed:
         tail = f"  ({len(failed)} of {len(documents)} documents: {', '.join(sorted(failed))})"

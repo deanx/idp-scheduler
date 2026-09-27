@@ -24,11 +24,18 @@ Usage
 -----
     .venv/bin/python scripts/capture_raw.py \
         --org <org-id> --action <action-id> --version 1.0.0 \
-        --document testpack/inv-001-clean.pdf \
+        --document testpack/inv-001-clean.pdf --yes \
         > testpack/captures/inv-001-clean.raw.json
 
+Nothing is submitted without `--yes`: this is the one quota-spending entry
+point that used to be exempt from `_batch`'s rule 1 (DEBT-108).
+
 Add `--keep-execution-id` only if you have a reason to; by default the
-execution id is redacted so the capture is safe to commit.
+execution id is redacted. Redacting it does NOT make a capture safe to commit:
+it still holds every value the extractor read from the document, which is the
+data `## Domain` calls sensitive. Commit a capture only of a synthetic or
+scrubbed document (as `tests/fixtures/live/` does), and remember a shell
+redirect writes it at your umask, not owner-only (DEBT-108).
 """
 
 from __future__ import annotations
@@ -63,7 +70,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--keep-execution-id",
         action="store_true",
-        help="do not redact the execution id (default: redact, so the capture is committable)",
+        help="do not redact the execution id (default: redact it)",
+    )
+    parser.add_argument(
+        "--yes", action="store_true", help="approve the ONE real extraction this spends"
     )
     return parser.parse_args(argv)
 
@@ -75,6 +85,13 @@ def main(argv: list[str] | None = None) -> int:
     if not document.is_file():
         print(f"capture_raw: no such document: {args.document}", file=sys.stderr)
         return 1
+    if not args.yes:
+        print(
+            "capture_raw: refusing to start -- this spends one real IDP extraction. "
+            "Re-run with --yes to approve it.",
+            file=sys.stderr,
+        )
+        return 2
 
     load_dotenv()
 

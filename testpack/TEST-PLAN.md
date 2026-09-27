@@ -113,12 +113,13 @@ ORG=ef1232be-0e85-43e7-a7b2-927d32eb6d38; ACTION=fb900ba5-de93-4445-9ddb-89fe175
 mkdir -p testpack/captures
 for f in testpack/inv-00*.pdf; do
   .venv/bin/python scripts/capture_raw.py \
-    --org "$ORG" --action "$ACTION" --version "$VER" --document "$f" \
+    --org "$ORG" --action "$ACTION" --version "$VER" --document "$f" --yes \
     > "testpack/captures/$(basename "$f" .pdf).raw.json"
 done
 ```
-Each invocation **spends one real extraction** and says so on stderr before submitting. The
-execution id is redacted by default so the captures are safe to commit.
+Each invocation **spends one real extraction**, and nothing is submitted without `--yes`. The
+execution id is redacted by default. These captures are committable because the testpack's
+documents are synthetic; a capture of a real document holds its extracted values and is not.
 
 On success it prints the answer to Phase 2.3 for you, per document:
 ```

@@ -3839,3 +3839,32 @@ def test_show_run_says_when_nothing_is_above_the_floor(
     )
     show_run.main([str(artifact), "--baseline", str(floor)])
     assert "No field disagrees more than the floor predicts." in capsys.readouterr().out
+
+
+# --- DEBT-108 / DEBT-112 ----------------------------------------------------
+
+
+def test_capture_raw_spends_nothing_without_yes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capture_raw = _load("capture_raw")
+    document = tmp_path / "a.pdf"
+    document.write_bytes(b"%PDF")
+
+    def _never(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("no adapter may be built without --yes")
+
+    monkeypatch.setattr(capture_raw, "make_idp_adapter", _never)
+    rc = capture_raw.main(["--org", "o", "--action", "a", "--version", "1.0.0",
+                           "--document", str(document)])
+    assert rc == 2
+
+
+def test_show_run_counts_a_new_table_as_new(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    documents = {"a.pdf": {"total": _cell("match"),
+                           "freight": {"verdict": "new_table", "actual": 2, "critical": False}}}
+    show_run.main([str(_artifact(tmp_path, documents))])
+    out = capsys.readouterr().out
+    assert "new=1" in out
