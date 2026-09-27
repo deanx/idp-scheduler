@@ -534,6 +534,12 @@ The convenience argument is real but secondary: all three edits are test-file-on
 
 ## DEBT-48 — repo-wide fail-open sweep (FO-1 … FO-9): nine gaps of the F-1 class, dispositioned
 
+> ✅ **2026-09-27 — FO-6, the last open member, is CLOSED in `f1725aa`.** `get_dataset` refuses a
+> non-object `expectedOutputSchema` (absent stays `None`), and `check_schema_drift` names a non-object
+> schema as such instead of "does not match". Three mutants killed. **All nine FO rows are now closed.**
+> The umbrella's second reason (the sweep's instrument cannot see a wrong DECLARED type, REG-11) is a
+> method limit, not an open defect; SR-1 is the instrument for it.
+
 **Status:** open (umbrella) · **Origin:** orchestrator-run read-only sweep, 2026-09-21, executed *concurrently* with FU-01.3-G · **Impact: High** (one member is the CI gate itself)
 
 > ⚖️ **WAVE-0 AUDIT 2026-09-23 (Dunga) — KEEP OPEN, still narrowed to `FO-6` — but the DISPOSITION ABOVE IS NOW FACTUALLY WRONG ON ITS KEY CLAUSE, and that is the finding.**
