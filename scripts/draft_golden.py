@@ -66,6 +66,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
@@ -281,8 +282,11 @@ def main() -> int:
                 file=sys.stderr,
             )
     existing[key] = entry
-    with open(args.out, "w", encoding="utf-8") as fh:
-        fh.write(json.dumps(existing, indent=2) + "\n")
+    # Owner-only and atomic, like every other golden writer (DEBT-105): a
+    # golden carries the expected values `## Domain` calls sensitive.
+    from _batch import write_private_json
+
+    write_private_json(Path(args.out), existing)
     print(
         f"\ndraft_golden: wrote {key!r} into {args.out} ({len(existing)} entries)",
         file=sys.stderr,

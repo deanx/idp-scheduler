@@ -553,7 +553,11 @@ def extract_documents_from_zip(
                 continue
 
             written = 0
-            with zf.open(member) as src, open(target, "wb") as dst:
+            # Created 0600, never written at the umask and chmodded after:
+            # this is a customer document now on local disk (DEBT-99 gate).
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, FILE_MODE)
+            os.fchmod(fd, FILE_MODE)
+            with zf.open(member) as src, os.fdopen(fd, "wb") as dst:
                 while chunk := src.read(1024 * 1024):
                     written += len(chunk)
                     if written > member.file_size:
@@ -564,9 +568,6 @@ def extract_documents_from_zip(
                             "declares -- refusing the archive."
                         )
                     dst.write(chunk)
-            # Owner-only, like every other file these tools write: this is
-            # a customer document now sitting on local disk.
-            os.chmod(target, FILE_MODE)
             extracted.append(target)
 
     return sorted(extracted), skipped

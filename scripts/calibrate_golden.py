@@ -66,7 +66,7 @@ if str(_REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 import jsonschema  # noqa: E402
-from _batch import write_private_json  # noqa: E402
+from _batch import write_private_json, write_private_text  # noqa: E402
 
 from idp_regression.platform.schema import load_golden_schema  # noqa: E402
 
@@ -450,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:
     write_private_json(out, calibrated)
     write_private_json(out.with_suffix(".calibration.json"), report)
     markdown = out.with_suffix(".calibration.md")
-    markdown.write_text(_markdown(report, out))
+    write_private_text(markdown, _markdown(report, out))
 
     print(f"calibrate_golden: {out}  ({report['corpus']['documents']} documents)")
     print(f"  report: {markdown}")

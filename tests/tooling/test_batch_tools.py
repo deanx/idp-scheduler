@@ -3658,3 +3658,108 @@ def test_a_stale_partial_worklist_is_rewritten_owner_only(tmp_path: Path) -> Non
     os.chmod(stale, 0o644)
     batch.write_private_text(tmp_path / "review.md", "values")
     assert stat.S_IMODE((tmp_path / "review.md").stat().st_mode) == 0o600
+
+
+# --- Wave A1 /test gate findings F-1..F-4, and two write-then-chmod sites ---
+
+
+def test_verify_checks_the_bytes_at_the_NEW_source_not_the_pinned_directory(
+    tmp_path: Path,
+) -> None:
+    """F-1 / M17: the row's own scenario, and the path compare_versions and
+    the console drive. Pinned from dir A; verified from dir B, where a file
+    of the same name holds different bytes."""
+    pinned_dir = tmp_path / "pinned"
+    pinned_dir.mkdir()
+    (pinned_dir / "a.pdf").write_bytes(b"%PDF-original")
+    new_source = tmp_path / "new-source"
+    new_source.mkdir()
+    (new_source / "a.pdf").write_bytes(b"%PDF-a-different-invoice")
+    _pins_file(
+        tmp_path,
+        {"a.pdf": {"dataset": "ds", "document_dir": str(pinned_dir), "org": "o",
+                   "sha256": hashlib.sha256(b"%PDF-original").hexdigest()}},
+    )
+    run_eval = _RecordingRunEval()
+    exit_code, _ = verify_document.run(
+        _verify_args(tmp_path, all=True, document_dir=new_source), run_eval
+    )
+    assert exit_code == 2 and run_eval.calls == []
+
+
+def test_pin_refuses_a_changed_file_before_spending_on_the_new_ones(tmp_path: Path) -> None:
+    """F-2 / M15: a mixed batch -- one already-pinned file rewritten, one new."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "old.pdf").write_bytes(b"%PDF-old")
+    pin_document.run(
+        _pin_args(tmp_path, None, document_dir=docs, all=True), lambda path: _raw(), _FakeStage()
+    )
+    (docs / "old.pdf").write_bytes(b"%PDF-old-but-replaced")
+    (docs / "new.pdf").write_bytes(b"%PDF-new")
+    calls: list[Path] = []
+    exit_code, _ = pin_document.run(
+        _pin_args(tmp_path, None, document_dir=docs, all=True),
+        lambda path: _record(calls, path),
+        _FakeStage(),
+    )
+    assert exit_code == 2 and calls == [], "nothing spent, not even on the new file"
+
+
+def test_compare_passes_repin_to_the_pin_half_only_when_asked(tmp_path: Path) -> None:
+    """F-3 / M25: always passing --repin would bypass the byte check and
+    re-pay every pinned document on each re-run."""
+    for repin in (False, True):
+        document_dir = tmp_path / f"docs-{repin}"
+        document_dir.mkdir()
+        (document_dir / "a.pdf").write_bytes(b"%PDF")
+        pin = _FakeStage()
+        compare_versions.run(
+            _compare_args(tmp_path, document_dir=document_dir, repin=repin, dataset=f"d{repin}"),
+            pin,
+            _FakeStage(),
+        )
+        assert ("--repin" in pin.calls[0]) is repin
+
+
+def test_a_missing_file_is_not_reported_as_changed(tmp_path: Path) -> None:
+    """F-4 / M12b: absence is the MISSING check's business (refused unless
+    --allow-missing); calling it a byte change would mislabel it."""
+    recorded = {"gone.pdf": {"sha256": "0" * 64}}
+    assert batch.changed_since_recorded([tmp_path / "gone.pdf"], recorded) == []
+
+
+def test_unpacked_documents_are_owner_only(tmp_path: Path) -> None:
+    archive = _zip(tmp_path, {"a.pdf": b"%PDF"})
+    paths, _ = batch.extract_documents_from_zip(archive, tmp_path / "out")
+    assert stat.S_IMODE(paths[0].stat().st_mode) == 0o600
+
+
+def test_the_calibration_report_markdown_is_owner_only(tmp_path: Path) -> None:
+    golden = tmp_path / "golden.json"
+    golden.write_text(json.dumps({f"d{i}": _entry(f"d{i}.pdf") for i in range(5)}))
+    out = tmp_path / "calibrated.json"
+    assert calibrate_golden.main(["--golden-file", str(golden), "--out", str(out)]) == 0
+    assert stat.S_IMODE(out.with_suffix(".calibration.md").stat().st_mode) == 0o600
+
+
+def test_draft_golden_writes_its_golden_owner_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DEBT-105: `draft_golden --out` used a plain `open(..., "w")`."""
+    draft_golden = _load("draft_golden")
+    capture = tmp_path / "doc.raw.json"
+    capture.write_text(json.dumps(_raw()))
+    out = tmp_path / "open" / "golden.json"
+    out.parent.mkdir()
+    os.chmod(out.parent, 0o755)
+
+    monkeypatch.setattr(
+        sys, "argv",
+        ["draft_golden", "--capture", str(capture), "--document-id", "doc.pdf", "--out", str(out)],
+    )
+    rc = draft_golden.main()
+
+    assert rc == 0
+    assert stat.S_IMODE(out.stat().st_mode) == 0o600
+    assert "doc" in json.loads(out.read_text())
