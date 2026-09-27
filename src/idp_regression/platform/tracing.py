@@ -49,7 +49,19 @@ OTLP_EXPORTER_LOGGER_NAME = "opentelemetry.exporter.otlp.proto.http.trace_export
 #: not just level: a bare WARNING floor on this logger would also match
 #: unrelated, benign warnings, trading a false negative for a false
 #: positive, which ADR-0005 #9 amendment A1 forbids doing silently.
-OTEL_SDK_EXPORT_LOGGER_NAME = "opentelemetry.sdk.trace.export"
+#:
+#: ⚠️ CORRECTED 2026-09-27 (Wave B): this used to be
+#: `opentelemetry.sdk.trace.export`, and on the installed SDK
+#: (opentelemetry-sdk 1.44.0) that logger never receives the drop. The
+#: batch logic moved to `opentelemetry.sdk._shared_internal.BatchProcessor`,
+#: which logs `"Queue full, dropping %s."` and `"Exception while exporting
+#: %s."` on ITS OWN module logger -- not a child of `...trace.export`. The
+#: watcher was attached where the drop no longer goes, and its tests passed
+#: because they wrote a synthetic record to the watched logger directly
+#: (with wording the SDK never used). Watching the common parent,
+#: `opentelemetry.sdk`, sees the records wherever the SDK moves them inside
+#: its own package; the message filter, not the logger, discriminates.
+OTEL_SDK_EXPORT_LOGGER_NAME = "opentelemetry.sdk"
 
 #: The langfuse SDK's own logger (and its submodules, via propagation) —
 #: a failed `dataset_run_items.create` call (R5c) is logged here, not on
@@ -64,7 +76,18 @@ LANGFUSE_SDK_LOGGER_NAME = "langfuse"
 #: benign WARNING on the same logger (if one is ever added) from
 #: widening the false-positive surface DEBT-27's false positive leg
 #: already describes.
-_DROP_CLASS_MESSAGE_MARKERS = ("queue is full", "dropping", "dropped")
+#: The installed SDK's real wordings are "Queue full, dropping %s." (a span
+#: DROP) and "Exception while exporting %s." (the batch export itself
+#: raised -- logged at ERROR on the same unwatched logger, so it was a
+#: second invisible failure). Both are pinned against the real SDK in
+#: `tests/platform/test_tracing.py`, not against synthetic records.
+_DROP_CLASS_MESSAGE_MARKERS = (
+    "queue is full",
+    "queue full",
+    "dropping",
+    "dropped",
+    "exception while exporting",
+)
 
 #: DEBT-17 / DEBT-27(b): the log-watch handlers below are attached to
 #: PROCESS-WIDE loggers by design (R5 -- catches a background-thread
@@ -254,8 +277,8 @@ def record_experiment(
         # evidence for a run the caller believes succeeded), so mapped to
         # the same typed error.
         raise FlushFailedError(
-            "the OTel SDK logged a span-drop warning during record_experiment "
-            "(see the opentelemetry.sdk.trace.export logger's own log for detail)"
+            "the OTel SDK logged a span drop or a failed batch export during "
+            "record_experiment (see the opentelemetry.sdk loggers' own log for detail)"
         )
     if langfuse_watcher.failed:
         raise ExperimentRecordFailedError(

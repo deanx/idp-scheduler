@@ -447,7 +447,7 @@ def test_debt27a_span_queue_full_drop_warning_raises_flush_failed() -> None:
     class _QueueFullDrop(_OkTracingClient):
         def run_experiment(self, **kwargs: object) -> _FakeResult:
             logging.getLogger(OTEL_SDK_EXPORT_LOGGER_NAME).warning(
-                "Queue is full, likely spans will be dropped."
+                "Queue full, dropping %s.", "span"  # the installed SDK's real wording
             )
             return super().run_experiment(**kwargs)
 
@@ -549,3 +549,120 @@ def test_debt17_record_experiment_calls_are_mutually_exclusive_in_one_process() 
     assert not thread_a.is_alive()
     assert not thread_b.is_alive()
     assert not overlap_observed.is_set()
+
+
+# --- DEBT-27(a), corrected 2026-09-27: against the REAL installed OTel SDK ---
+#
+# The tests above write a record to the watched logger themselves, with
+# wording the SDK never used, so they passed while the watcher sat on a
+# logger (`opentelemetry.sdk.trace.export`) the installed SDK never logs the
+# drop to. These drive the REAL `BatchSpanProcessor` into the failure and let
+# the SDK log it wherever it actually does.
+
+import threading as _threading  # noqa: E402
+
+from opentelemetry.sdk.trace import TracerProvider  # noqa: E402
+from opentelemetry.sdk.trace.export import (  # noqa: E402
+    BatchSpanProcessor,
+    SpanExporter,
+    SpanExportResult,
+)
+from opentelemetry.trace import Tracer  # noqa: E402
+
+
+def _shutdown(processor: Any) -> None:
+    """The SDK's `shutdown` is unannotated; called through `Any`."""
+    processor.shutdown()
+
+
+def _tracer_with(processor: BatchSpanProcessor) -> Tracer:
+    provider = TracerProvider()
+    provider.add_span_processor(processor)
+    return provider.get_tracer("debt27a")
+
+
+class _BlockingExporter(SpanExporter):
+    """Holds the first export until released, so the queue behind it fills."""
+
+    def __init__(self) -> None:
+        self.release = _threading.Event()
+        self.exporting = _threading.Event()
+
+    def export(self, spans: object) -> SpanExportResult:
+        self.exporting.set()
+        self.release.wait(timeout=10)
+        return SpanExportResult.SUCCESS
+
+    def shutdown(self) -> None:
+        self.release.set()
+
+
+class _RaisingExporter(SpanExporter):
+    def export(self, spans: object) -> SpanExportResult:
+        raise RuntimeError("export blew up")
+
+    def shutdown(self) -> None:
+        pass
+
+
+def test_a_real_sdk_span_drop_fails_the_record_phase() -> None:
+    items = _items(1)
+    exporter = _BlockingExporter()
+    processor = BatchSpanProcessor(
+        exporter, max_queue_size=1, max_export_batch_size=1, schedule_delay_millis=60_000
+    )
+    tracer = _tracer_with(processor)
+
+    class _DropsSpans(_OkTracingClient):
+        def run_experiment(self, **kwargs: object) -> _FakeResult:
+            tracer.start_span("first").end()
+            exporter.exporting.wait(timeout=10)  # the worker is now stuck exporting
+            for name in ("second", "third"):
+                tracer.start_span(name).end()  # the queue is full: the SDK drops one
+            return super().run_experiment(**kwargs)
+
+    try:
+        with pytest.raises(FlushFailedError, match="span drop or a failed batch export"):
+            record_experiment(_DropsSpans(items), run_name="r", items=items, task=_task)
+    finally:
+        exporter.release.set()
+        _shutdown(processor)
+
+
+def test_a_real_sdk_batch_export_exception_fails_the_record_phase() -> None:
+    items = _items(1)
+    processor = BatchSpanProcessor(_RaisingExporter(), schedule_delay_millis=60_000)
+    tracer = _tracer_with(processor)
+
+    class _ExportRaises(_OkTracingClient):
+        def run_experiment(self, **kwargs: object) -> _FakeResult:
+            tracer.start_span("s").end()
+            processor.force_flush()
+            return super().run_experiment(**kwargs)
+
+    try:
+        with pytest.raises(FlushFailedError):
+            record_experiment(_ExportRaises(items), run_name="r", items=items, task=_task)
+    finally:
+        _shutdown(processor)
+
+
+def test_a_healthy_real_sdk_export_does_not_fail_the_record_phase() -> None:
+    """The mirror case: the real SDK exporting cleanly logs nothing that
+    trips the widened watcher."""
+    items = _items(1)
+    exporter = _BlockingExporter()
+    exporter.release.set()
+    processor = BatchSpanProcessor(exporter, schedule_delay_millis=60_000)
+    tracer = _tracer_with(processor)
+
+    class _Healthy(_OkTracingClient):
+        def run_experiment(self, **kwargs: object) -> _FakeResult:
+            tracer.start_span("s").end()
+            processor.force_flush()
+            return super().run_experiment(**kwargs)
+
+    try:
+        assert record_experiment(_Healthy(items), run_name="r", items=items, task=_task)
+    finally:
+        _shutdown(processor)
