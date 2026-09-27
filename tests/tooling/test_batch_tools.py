@@ -3097,3 +3097,52 @@ def test_compare_admits_a_second_corpus_under_a_second_dataset(tmp_path: Path) -
         _compare_args(tmp_path, zip_path=archive, dataset="second"), pin, _FakeStage()
     )
     assert exit_code == 0 and pin.calls
+
+
+# --- DEBT-94: a partial draft never reaches calibrate / provision -----------
+
+
+def test_pipeline_stops_on_a_partial_draft_that_still_wrote_a_golden(tmp_path: Path) -> None:
+    """The real shape: bootstrap flushes after every document, so rc 1
+    ALWAYS leaves a golden behind. The older test's fake wrote none."""
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "a.pdf").write_bytes(b"%PDF")
+    partial = _FakeStage(
+        exit_code=1,
+        writes={tmp_path / "work" / "golden.json": {"d0": _golden_entry("d0.pdf", total="1")}},
+    )
+    stages = _pipeline_stages(tmp_path, bootstrap_golden_set=partial)
+
+    exit_code, summary = golden_pipeline.run(_pipeline_args(tmp_path), stages)
+
+    assert exit_code == 1
+    assert summary["draft_exit_code"] == 1
+    assert stages.calibrate_golden.calls == []
+    assert stages.provision_golden_dataset.calls == []
+    assert stages.run_eval_stage.calls == []
+
+
+def test_bootstrap_resume_redrafts_a_failed_draft_from_its_capture_for_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    document_dir = _documents(tmp_path, 2)
+    real_draft = bootstrap._draft_one
+
+    def _flaky(capture: Any, document_id: str) -> Any:
+        if document_id == "doc-002.pdf":
+            raise ValueError("draft failed")
+        return real_draft(capture, document_id)
+
+    monkeypatch.setattr(bootstrap, "_draft_one", _flaky)
+    exit_code, _ = bootstrap.run(_bootstrap_args(tmp_path, document_dir), lambda d: _raw())
+    assert exit_code == 1
+
+    monkeypatch.setattr(bootstrap, "_draft_one", real_draft)
+    calls: list[Path] = []
+    args = _bootstrap_args(tmp_path, document_dir, resume=True)
+    exit_code, summary = bootstrap.run(args, lambda d: _record(calls, d))
+
+    assert exit_code == 0
+    assert calls == [], "the capture was already paid for"
+    assert sorted(json.loads(args.out.read_text())) == ["doc-001", "doc-002"]
+    assert summary["failures"] == []

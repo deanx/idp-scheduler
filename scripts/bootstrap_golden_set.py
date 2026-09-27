@@ -349,6 +349,7 @@ def run(
             print("bootstrap_golden_set: --plan, stopping before any IDP call.", file=sys.stderr)
             return 0, {}
 
+    redraft_free: set[str] = set()
     if args.from_captures:
         sources = sorted(captures_dir.glob("*.raw.json"))
         documents = [Path(p.name.removesuffix(".raw.json")) for p in sources]
@@ -363,18 +364,32 @@ def run(
             print(f"bootstrap_golden_set: {exc}", file=sys.stderr)
             return 2, {}
         if args.resume:
+            # "Done" is DRAFTED, not captured. Keying resume on the capture
+            # alone meant a document whose capture succeeded and whose draft
+            # failed was never retried: the re-run made 0 calls, reported no
+            # failures and exited 0 without it (DEBT-94). A captured but
+            # undrafted document is re-drafted from its capture, free.
+            drafted = {
+                entry.get("document_id")
+                for entry in golden_set.values()
+                if isinstance(entry, dict)
+            }
             before = len(documents)
-            documents = [d for d in documents if not _capture_path(captures_dir, d.name).exists()]
+            documents = [d for d in documents if d.name not in drafted]
+            redraft_free = {
+                d.name for d in documents if _capture_path(captures_dir, d.name).exists()
+            }
             print(
-                f"  --resume: {before - len(documents)} already captured, "
-                f"{len(documents)} to go",
+                f"  --resume: {before - len(documents)} already drafted, "
+                f"{len(redraft_free)} re-drafted from their capture (free), "
+                f"{len(documents) - len(redraft_free)} to extract",
                 file=sys.stderr,
             )
 
     print(f"bootstrap_golden_set: {len(documents)} document(s) to draft", file=sys.stderr)
     try:
         confirm_cost(
-            documents=0 if args.from_captures else len(documents),
+            documents=0 if args.from_captures else len(documents) - len(redraft_free),
             extractions_each=1,
             # `--plan` is the cost preview, so it must print the number
             # rather than be refused for not having approved it.
@@ -395,7 +410,7 @@ def run(
         key = document_id.rsplit(".", 1)[0]
         progress(index, total, document_id, started)
         try:
-            if args.from_captures:
+            if args.from_captures or document_id in redraft_free:
                 with _capture_path(captures_dir, document_id).open(encoding="utf-8") as fh:
                     capture = json.load(fh)
             elif capture_fn is None:  # pragma: no cover - guarded by main()

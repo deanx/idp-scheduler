@@ -270,11 +270,23 @@ def run(args: argparse.Namespace, stages: Any) -> tuple[int, dict[str, Any]]:
     ]
     rc = stages.bootstrap_golden_set.main(draft_argv)
     _record(work_dir, state, "draft", {"golden": str(golden), "exit_code": rc})
+    summary["draft_exit_code"] = rc
     if not golden.exists():
         print("golden_pipeline: drafting produced no golden set — stopping", file=sys.stderr)
         return 1, summary
+    if rc != 0:
+        # bootstrap flushes the golden set after EVERY document, so a partial
+        # failure always leaves a file behind. Calibrating and provisioning it
+        # anyway made the failed documents vanish from the baseline AND from
+        # the candidate run, which then exited on the gate alone (DEBT-94).
+        print(
+            "golden_pipeline: drafting failed for some documents (see above) — stopping "
+            "before calibrate/provision, so they cannot silently leave the baseline. "
+            "Re-run with --resume: captured documents are re-drafted for free.",
+            file=sys.stderr,
+        )
+        return rc, summary
     summary["golden"] = str(golden)
-    summary["draft_exit_code"] = rc
     if args.stop_after == "draft":
         return 0, summary
 
