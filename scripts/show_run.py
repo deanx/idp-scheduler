@@ -488,9 +488,27 @@ def _print_baseline_section(
         f"  this run disagrees with the golden on {run_rate:.1%} of field "
         f"observations ({run_bad}/{run_total});"
     )
+    print(f"  the SAME version disagreed with itself on {floor_rate:.1%}.")
+    # No pooled verdict (DEBT-101). Comparing the two pooled rates above is
+    # the bare-rate comparison this module's docstring rejects, and it pooled
+    # over different field sets (`no_floor` fields included). It printed
+    # "within the floor" directly above a field that was ABOVE it. The only
+    # conclusion drawn is the per-field one.
+    statuses = [c["status"] for c in comparison.values()]
+    above = statuses.count("above")
     print(
-        f"  the SAME version disagreed with itself on {floor_rate:.1%}."
-        + ("  -> the difference is within the floor." if run_rate <= floor_rate else "")
+        "  (pooled rates are context, not a verdict.) "
+        + (
+            f"{above} field(s) disagree MORE than the floor predicts -- see ABOVE below."
+            if above
+            else "No field disagrees more than the floor predicts"
+            + (
+                f"; {statuses.count('unknown') + statuses.count('no_floor')} field(s) "
+                "cannot be judged against it."
+                if {"unknown", "no_floor"} & set(statuses)
+                else "."
+            )
+        )
     )
     print()
     label = {

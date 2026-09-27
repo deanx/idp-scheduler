@@ -3796,3 +3796,46 @@ def test_an_agreed_column_type_is_not_reported() -> None:
     golden = {f"d{i}": _with_table(f"d{i}.pdf", "number") for i in range(3)}
     _, report = calibrate_golden.calibrate(golden, None)
     assert report["column_types"] == {}
+
+
+# --- DEBT-101: no pooled "within the floor" above a real red ----------------
+
+
+def test_show_run_never_prints_a_pooled_reassurance_above_an_above_floor_field(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`total` is noisy (50% floor) and dominates the pooled rate; `amount`
+    has a 0% floor and fails once, so it is ABOVE. The pooled comparison
+    used to conclude "within the floor" directly above that red."""
+    documents = {
+        f"doc-{i:03d}.pdf": {
+            "total": _cell("wrong_value" if i % 2 else "match", critical=False),
+            "amount": _cell("wrong_value" if i == 1 else "match"),
+        }
+        for i in range(1, 31)
+    }
+    artifact = _artifact(tmp_path, documents)
+    floor = _floor_report(
+        tmp_path,
+        {
+            "total": {"observations": 50, "unstable": 25, "instability_rate": 0.5},
+            "amount": {"observations": 50, "unstable": 0, "instability_rate": 0.0},
+        },
+        rate=0.5,
+    )
+    show_run.main([str(artifact), "--baseline", str(floor)])
+    out = capsys.readouterr().out
+    assert "within the floor" not in out
+    assert "1 field(s) disagree MORE than the floor predicts" in out
+
+
+def test_show_run_says_when_nothing_is_above_the_floor(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    documents = {f"doc-{i:03d}.pdf": {"total": _cell("match")} for i in range(1, 31)}
+    artifact = _artifact(tmp_path, documents)
+    floor = _floor_report(
+        tmp_path, {"total": {"observations": 50, "unstable": 1, "instability_rate": 0.02}}
+    )
+    show_run.main([str(artifact), "--baseline", str(floor)])
+    assert "No field disagrees more than the floor predicts." in capsys.readouterr().out
