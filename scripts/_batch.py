@@ -33,6 +33,7 @@ import json
 import os
 import sys
 import time
+import unicodedata
 import zipfile
 from pathlib import Path
 from typing import Any, Protocol
@@ -286,23 +287,39 @@ class ZipRejectedError(Exception):
     Distinct from a skipped entry, which is reported and survivable."""
 
 
-def _flatten_name(member_name: str, taken: dict[str, str]) -> str:
-    """One flat filename per document.
+def _name_key(flat: str) -> str:
+    """How the FILESYSTEM compares two names. macOS's default volume is
+    case-insensitive and normalization-insensitive, so `Inv.pdf` and
+    `inv.pdf` -- or an NFC and an NFD `é` -- are one file there."""
+    return unicodedata.normalize("NFC", flat).casefold()
+
+
+def _flatten_name(member_name: str, claimed: dict[str, str]) -> str | None:
+    """One flat filename per document, or None when the entry cannot have
+    one without overwriting another.
 
     The golden's `document_id` is resolved by `run_eval` against
     `IDP_DOCUMENT_DIR` (`facade._resolve_document_path`), and a flat
     filename is the shape that survives every later step unambiguously:
     the capture file, the golden key, and the dataset item all key off
     it. So a nested `invoices/2024/a.pdf` becomes `a.pdf` -- unless that
-    name is already taken by a DIFFERENT entry, in which case the parent
-    path is folded into the name (`invoices__2024__a.pdf`) rather than
-    one document silently overwriting another.
+    name is already claimed by a DIFFERENT entry, in which case the parent
+    path is folded into the name (`invoices__2024__a.pdf`).
+
+    `claimed` maps `_name_key(flat)` -> the entry that took it, and it is
+    checked for EVERY candidate, the folded one included. The first
+    version checked only the incoming basename, so a folded `b/x.pdf ->
+    b__x.pdf` was then overwritten by a real `b__x.pdf` entry, and
+    `p/Inv.pdf` and `q/inv.pdf` became one file on a case-insensitive
+    disk -- while the returned list still counted both (DEBT-87).
     """
     base = os.path.basename(member_name)
-    if taken.get(base) in (None, member_name):
-        return base
     folded = member_name.replace("/", "__").replace("\\", "__")
-    return folded
+    for candidate in (base, folded):
+        owner = claimed.get(_name_key(candidate))
+        if owner is None or owner == member_name:
+            return candidate
+    return None
 
 
 def _is_symlink(member: zipfile.ZipInfo) -> bool:
@@ -366,7 +383,7 @@ def extract_documents_from_zip(
             ensure_private_dir(destination)
         root = destination.resolve()
         wanted = [p.strip() for p in patterns.split(",") if p.strip()]
-        taken: dict[str, str] = {}
+        claimed: dict[str, str] = {}
 
         for member in sorted(members, key=lambda m: m.filename):
             name = member.filename
@@ -394,8 +411,19 @@ def extract_documents_from_zip(
                     f"{ZIP_MAX_RATIO}x cap -- treated as a decompression bomb."
                 )
 
-            flat = _flatten_name(name, taken)
-            taken[os.path.basename(name)] = name
+            flat = _flatten_name(name, claimed)
+            if flat is None:
+                # Refuse the ARCHIVE, not the entry: skipping one would
+                # leave a corpus that silently lost a document, which is
+                # the outcome this check exists to prevent.
+                other = claimed[_name_key(os.path.basename(name))]
+                raise ZipRejectedError(
+                    f"{archive.name}: entries {other!r} and {name!r} cannot be unpacked "
+                    "flat without one overwriting the other (names that differ only in "
+                    "case or Unicode form are the same file on this disk). Rename one "
+                    "and re-send the archive."
+                )
+            claimed[_name_key(flat)] = name
             target = (destination / flat).resolve()
             if not target.is_relative_to(root) or target == root:
                 # Belt and braces: the name checks above should already

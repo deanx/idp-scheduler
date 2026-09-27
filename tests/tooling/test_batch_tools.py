@@ -2778,3 +2778,58 @@ def test_pipeline_refuses_over_the_ceiling_before_any_stage(tmp_path: Path) -> N
     exit_code, _ = golden_pipeline.run(_pipeline_args(tmp_path, max_documents=2), stages)
     assert exit_code == 2
     assert stages.noise_floor.calls == [] and stages.bootstrap_golden_set.calls == []
+
+
+# --- DEBT-87: flattening may never overwrite one document with another ------
+
+
+def _unpacked_contents(paths: list[Path]) -> dict[str, bytes]:
+    return {p.name: p.read_bytes() for p in paths}
+
+
+def test_a_folded_name_is_never_overwritten_by_a_real_entry_of_that_name(
+    tmp_path: Path,
+) -> None:
+    """`b/x.pdf` folds to `b__x.pdf`; a real `b__x.pdf` entry then wrote
+    over it and the returned list still counted both."""
+    archive = _zip(
+        tmp_path, {"a/x.pdf": b"AAA", "b/x.pdf": b"BBB", "b__x.pdf": b"CCC"}
+    )
+    with pytest.raises(batch.ZipRejectedError, match="overwriting"):
+        batch.extract_documents_from_zip(archive, tmp_path / "out")
+    with pytest.raises(batch.ZipRejectedError, match="overwriting"):
+        batch.extract_documents_from_zip(archive, tmp_path / "plan", dry_run=True)
+
+
+def test_names_differing_only_in_case_are_kept_apart(tmp_path: Path) -> None:
+    archive = _zip(tmp_path, {"p/Inv.pdf": b"UPPER", "q/inv.pdf": b"lower"})
+    paths, _ = batch.extract_documents_from_zip(archive, tmp_path / "out")
+    contents = _unpacked_contents(paths)
+    assert sorted(contents.values()) == [b"UPPER", b"lower"], "both documents survive"
+    assert len({p.name.casefold() for p in paths}) == 2
+
+
+def test_a_case_collision_in_one_folder_falls_back_to_the_folded_name(tmp_path: Path) -> None:
+    archive = _zip(tmp_path, {"a/Inv.pdf": b"UPPER", "a/inv.pdf": b"lower"})
+    paths, _ = batch.extract_documents_from_zip(archive, tmp_path / "out")
+    assert sorted(_unpacked_contents(paths).values()) == [b"UPPER", b"lower"]
+
+
+def test_unicode_forms_of_one_name_are_the_same_name(tmp_path: Path) -> None:
+    nfc, nfd = "fatura-é.pdf", "fatura-é.pdf"
+    archive = _zip(tmp_path, {f"a/{nfc}": b"NFC", f"b/{nfd}": b"NFD"})
+    paths, _ = batch.extract_documents_from_zip(archive, tmp_path / "out")
+    assert sorted(_unpacked_contents(paths).values()) == [b"NFC", b"NFD"]
+
+
+def test_every_returned_path_is_a_distinct_file_on_disk(tmp_path: Path) -> None:
+    """The invariant behind all of the above: the list a caller prices and
+    reports on is exactly the set of files that exist."""
+    archive = _zip(
+        tmp_path,
+        {"x/a.pdf": b"1", "y/a.pdf": b"2", "z/a.pdf": b"3", "a.pdf": b"4", "x/b.pdf": b"5"},
+    )
+    paths, _ = batch.extract_documents_from_zip(archive, tmp_path / "out")
+    on_disk = sorted((tmp_path / "out").iterdir())
+    assert len(paths) == len(set(paths)) == len(on_disk) == 5
+    assert sorted(p.read_bytes() for p in on_disk) == [b"1", b"2", b"3", b"4", b"5"]
