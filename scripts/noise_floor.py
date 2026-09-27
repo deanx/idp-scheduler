@@ -29,10 +29,21 @@ What it does
 ------------
 For each document: extract `--repeats` times against ONE action version.
 Take the first pass as the reference, draft a golden from it (the same
-rules `scripts/draft_golden.py` uses, every field `critical`), and
-classify every later pass against it with the production classifier. The
-differences are, by construction, pure self-inconsistency: same document,
-same prompt, same version.
+rules `scripts/draft_golden.py` uses: a field with a value is `critical`,
+an empty one is not), and classify every later pass against it with the
+`pinned-file` classifier. The differences are, by construction, pure
+self-inconsistency: same document, same prompt, same version.
+
+**Why `pinned-file` and not the default `regression` classifier
+(DEBT-88).** The two differ in exactly one rule: under `regression` an
+empty expected value read empty again is `missing`; under `pinned-file` it
+is `match`. For a measurement of self-consistency the second is the only
+honest reading -- the extractor read nothing, twice. With `regression` a
+field empty on every pass scored 100% unstable, which inflated the
+headline rate, every per-field rate `calibrate_golden` demotes on (widening
+the gate's blind spots), and the rates `show_run --baseline` uses to label
+real reds `within floor`. Invented content (empty, then a value) is still
+`wrong_value` under both.
 
 It reports two rates, and they answer different questions:
 
@@ -97,7 +108,7 @@ from _batch import (  # noqa: E402
     write_private_json,
 )
 
-from idp_regression.classifier.gate import classify, overall_gate  # noqa: E402
+from idp_regression.classifier.gate import classify_pinned_file, overall_gate  # noqa: E402
 from idp_regression.orchestration.dotenv_support import load_dotenv  # noqa: E402
 
 _spec = importlib.util.spec_from_file_location("draft_golden", _SCRIPTS_DIR / "draft_golden.py")
@@ -382,7 +393,7 @@ def run(args: argparse.Namespace, adapter: SupportsExtract | None) -> tuple[int,
                     version=args.version,
                     attempt=attempt,
                 )
-                verdicts = classify(golden, repeat)
+                verdicts = classify_pinned_file(golden, repeat)
             except DocumentFailedError as exc:
                 failures.append(exc.as_record())
                 print(f"    FAILED (repeat {attempt}): {exc.error_type}", file=sys.stderr)

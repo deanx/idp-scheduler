@@ -812,7 +812,7 @@ def test_noise_floor_contains_a_classifier_failure(
     def _raise(golden: Any, actual: Any) -> Any:
         raise ValueError("Acme Office Supplies is not a valid row")
 
-    monkeypatch.setattr(noise_floor, "classify", _raise)
+    monkeypatch.setattr(noise_floor, "classify_pinned_file", _raise)
 
     exit_code, report = noise_floor.run(_noise_args(tmp_path, document_dir), adapter)
 
@@ -2833,3 +2833,35 @@ def test_every_returned_path_is_a_distinct_file_on_disk(tmp_path: Path) -> None:
     on_disk = sorted((tmp_path / "out").iterdir())
     assert len(paths) == len(set(paths)) == len(on_disk) == 5
     assert sorted(p.read_bytes() for p in on_disk) == [b"1", b"2", b"3", b"4", b"5"]
+
+
+# --- DEBT-88: empty-on-every-pass is agreement, not instability -------------
+
+
+def _with_field(value: str, name: str = "po_number") -> dict[str, Any]:
+    out = _normalized()
+    out["fields"][name] = {"value": value, "confidence": 0.99}
+    return out
+
+
+def test_noise_floor_counts_a_field_empty_on_every_pass_as_stable(tmp_path: Path) -> None:
+    document_dir = _documents(tmp_path, 2)
+    adapter = _ScriptedAdapter(
+        {
+            "doc-001.pdf": [_with_field(""), _with_field("")],
+            "doc-002.pdf": [_with_field(""), _with_field("")],
+        }
+    )
+    _, report = noise_floor.run(_noise_args(tmp_path, document_dir), adapter)
+    po = report["by_field"]["po_number"]
+    assert po["instability_rate"] == 0.0, "the extractor read nothing, twice: that is agreement"
+    assert (po["observations"], po["unstable"]) == (2, 0)
+    assert report["summary"]["field_instability_rate"] == 0.0
+
+
+def test_noise_floor_still_counts_invented_content_as_unstable(tmp_path: Path) -> None:
+    document_dir = _documents(tmp_path, 1)
+    adapter = _ScriptedAdapter({"doc-001.pdf": [_with_field(""), _with_field("PO-7")]})
+    _, report = noise_floor.run(_noise_args(tmp_path, document_dir), adapter)
+    assert report["by_field"]["po_number"]["instability_rate"] == 1.0
+    assert report["by_field"]["po_number"]["verdicts"] == {"wrong_value": 1}
