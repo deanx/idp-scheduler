@@ -316,7 +316,36 @@ def _pin_one(
     }
     write_private_json(pins_path, pins)
 
-    rc = provision.main(
+    rc = _provision_pin(document_id, golden_path, args, provision, pins, pins_path)
+    if rc != 0:
+        return _provision_failure(document_id, rc)
+    return {
+        "document_id": document_id,
+        "fields": len(entry["fields"]),
+        "critical": sum(1 for f in entry["fields"].values() if f.get("critical")),
+        "tables": len(entry.get("tables", {})),
+        "notes": notes,
+        "provision_exit_code": rc,
+    }
+
+
+def _provision_pin(
+    document_id: str,
+    golden_path: Path,
+    args: argparse.Namespace,
+    provision: Any,
+    pins: dict[str, Any],
+    pins_path: Path,
+) -> int:
+    """Upsert one pinned golden to the platform and RECORD whether it landed.
+
+    The local golden has to exist first (provisioning reads it), so its
+    existence cannot mean "pinned". It used to: a failed provisioning left
+    the golden on disk, `main` printed `PINNED` with an empty FAILED section,
+    and the re-run saw the file, skipped it as already pinned and exited 0 --
+    while the dataset lacked the item a verification would select (DEBT-97).
+    `_pins.json` now carries `provisioned`, and only `True` counts."""
+    rc = int(provision.main(
         [
             "--dataset", args.dataset,
             "--seed", document_id,
@@ -326,13 +355,19 @@ def _pin_one(
             "--source-action", args.action,
             "--source-version", args.version,
         ]
-    )
+    ))
+    pins.setdefault(document_id, {})["provisioned"] = rc == 0
+    write_private_json(pins_path, pins)
+    return rc
+
+
+def _provision_failure(document_id: str, rc: int) -> dict[str, Any]:
     return {
         "document_id": document_id,
-        "fields": len(entry["fields"]),
-        "critical": sum(1 for f in entry["fields"].values() if f.get("critical")),
-        "tables": len(entry.get("tables", {})),
-        "notes": notes,
+        "error": (
+            f"provisioning failed (exit {rc}); the golden is kept locally and a re-run "
+            "retries only the provisioning, at no extraction cost"
+        ),
         "provision_exit_code": rc,
     }
 
@@ -378,8 +413,36 @@ def run(args: argparse.Namespace, capture_fn: Any, provision: Any) -> tuple[int,
             "it (that spends another extraction)",
             file=sys.stderr,
         )
+
+    # A golden on disk whose provisioning is not RECORDED as landed is
+    # provisioned again here -- an idempotent upsert, no extraction. A pin
+    # written before `provisioned` existed is included: re-sending it costs a
+    # platform write, and assuming it landed is the assumption DEBT-97 broke.
+    pins = read_json_if_present(pins_path)
+    failures: list[dict[str, Any]] = []
+    reprovisioned: list[str] = []
+    for document in skipped:
+        if pins.get(document.name, {}).get("provisioned") is True:
+            continue
+        rc = _provision_pin(
+            document.name, goldens_dir / f"{document.name}.json", args, provision,
+            pins, pins_path,
+        )
+        if rc != 0:
+            failures.append(_provision_failure(document.name, rc))
+        else:
+            reprovisioned.append(document.name)
     if not todo:
-        return 0, {"already_pinned": True, "skipped": [d.name for d in skipped]}
+        if failures:
+            return 1, {
+                "pinned": [], "failures": failures, "skipped": [d.name for d in skipped],
+                "dataset": args.dataset, "goldens_dir": str(goldens_dir), "document_dir": "",
+            }
+        return 0, {
+            "already_pinned": True,
+            "skipped": [d.name for d in skipped],
+            "reprovisioned": reprovisioned,
+        }
 
     try:
         confirm_cost(documents=len(todo), extractions_each=1, approved=args.yes)
@@ -394,7 +457,6 @@ def run(args: argparse.Namespace, capture_fn: Any, provision: Any) -> tuple[int,
     )
     started = time.monotonic()
     pinned: list[dict[str, Any]] = []
-    failures: list[dict[str, Any]] = []
     for index, document in enumerate(todo, start=1):
         if len(todo) > 1:
             progress(index, len(todo), document.name, started)
@@ -411,8 +473,7 @@ def run(args: argparse.Namespace, capture_fn: Any, provision: Any) -> tuple[int,
         "goldens_dir": str(goldens_dir),
         "document_dir": str(todo[0].resolve().parent) if todo else "",
     }
-    failed_provision = any(r.get("provision_exit_code") for r in pinned)
-    return (1 if (failures or failed_provision) else 0), summary
+    return (1 if failures else 0), summary
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -486,7 +547,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    {record['document_id']}: {record['error']}", file=sys.stderr)
         print(
             "  (re-run the same command -- pinned documents are skipped, so only "
-            "these are retried)",
+            "these are retried; a failed provisioning is retried without re-extracting)",
             file=sys.stderr,
         )
     print(

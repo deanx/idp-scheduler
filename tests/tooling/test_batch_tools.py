@@ -3241,3 +3241,46 @@ def test_show_run_never_calls_a_table_regression_noise(
 def test_a_non_critical_tables_difference_is_not_flagged_as_failing() -> None:
     fields = {"line_items": _table("wrong_value", critical=False)}
     assert not any(show_run._fails(cell) for _, cell in show_run._leaves(fields))
+
+
+# --- DEBT-97: a failed provisioning is a failure, and a re-run retries it --
+
+
+def test_a_failed_provisioning_is_reported_and_retried_without_re_extracting(
+    tmp_path: Path,
+) -> None:
+    document = tmp_path / "inv-001.pdf"
+    document.write_bytes(b"%PDF")
+    calls: list[Path] = []
+
+    exit_code, summary = pin_document.run(
+        _pin_args(tmp_path, document), lambda path: _record(calls, path), _FakeStage(exit_code=1)
+    )
+    assert exit_code == 1
+    assert summary["pinned"] == []
+    assert [f["document_id"] for f in summary["failures"]] == ["inv-001.pdf"]
+
+    provision = _FakeStage()
+    exit_code, summary = pin_document.run(
+        _pin_args(tmp_path, document), lambda path: _record(calls, path), provision
+    )
+    assert exit_code == 0
+    assert len(calls) == 1, "the retry re-provisions; it never re-extracts"
+    assert len(provision.calls) == 1 and summary["reprovisioned"] == ["inv-001.pdf"]
+
+    # Once recorded as landed, a third run touches nothing at all.
+    again = _FakeStage()
+    exit_code, _ = pin_document.run(
+        _pin_args(tmp_path, document), lambda path: _record(calls, path), again
+    )
+    assert exit_code == 0 and again.calls == [] and len(calls) == 1
+
+
+def test_a_failing_re_provisioning_keeps_the_run_red(tmp_path: Path) -> None:
+    document = tmp_path / "inv-001.pdf"
+    document.write_bytes(b"%PDF")
+    pin_document.run(_pin_args(tmp_path, document), lambda path: _raw(), _FakeStage(exit_code=1))
+    exit_code, summary = pin_document.run(
+        _pin_args(tmp_path, document), lambda path: _raw(), _FakeStage(exit_code=1)
+    )
+    assert exit_code == 1 and summary["failures"]
