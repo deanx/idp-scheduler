@@ -176,6 +176,31 @@ def _decide_field(
     }
 
 
+def _unify_column_types(golden_set: dict[str, Any]) -> dict[str, dict[str, dict[str, Any]]]:
+    """One `type` per table COLUMN, across the corpus (DEBT-104).
+
+    `draft_golden` infers each column's type from the first non-empty value
+    in that document's rows, so one column was `text` in one document and
+    `number` in another, and the classifier compared it one way here and
+    another way there. That is the per-document inconsistency
+    `_unify_match_keys` removes for the join key. A column with no value in
+    a document casts no vote there. Majority wins; the minority is reported.
+    Table cells carry no value pattern in the schema, so unifying can never
+    make an entry invalid (unlike fields -- see `calibrate`)."""
+    counts: dict[str, dict[str, Counter[str]]] = {}
+    for entry in golden_set.values():
+        for tname, block in entry.get("tables", {}).items():
+            for column, ctype in (block.get("types") or {}).items():
+                counts.setdefault(tname, {}).setdefault(column, Counter())[str(ctype)] += 1
+    return {
+        tname: {
+            column: {"chosen": c.most_common(1)[0][0], "counts": dict(c), "agreed": len(c) == 1}
+            for column, c in columns.items()
+        }
+        for tname, columns in counts.items()
+    }
+
+
 def _unify_match_keys(golden_set: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """One `match_key` per table, across the whole corpus.
 
@@ -250,6 +275,7 @@ def calibrate(
     calibrated = copy.deepcopy(golden_set)
     present, documents = _presence(calibrated)
     types = _unify_types(calibrated)
+    column_types = _unify_column_types(calibrated)
     match_keys = _unify_match_keys(calibrated)
 
     field_names: set[str] = set()
@@ -328,6 +354,12 @@ def calibrate(
             block["critical"] = bool(block.get("critical", False)) and decision["critical"]
             if decision["match_key"]:
                 block["match_key"] = decision["match_key"]
+            unified = column_types.get(tname, {})
+            if unified:
+                block["types"] = {
+                    **(block.get("types") or {}),
+                    **{column: info["chosen"] for column, info in unified.items()},
+                }
 
     blind_spots = [n for n, d in decisions.items() if not d["critical"]]
     blind_spots += [f"{t} (table)" for t, d in table_decisions.items() if not d["critical"]]
@@ -344,6 +376,12 @@ def calibrate(
         "fields": decisions,
         "tables": table_decisions,
         "types": {n: t for n, t in types.items() if not t["agreed"]},
+        "column_types": {
+            f"{tname}.{column}": info
+            for tname, columns in column_types.items()
+            for column, info in columns.items()
+            if not info["agreed"]
+        },
         "blind_spots": sorted(blind_spots),
         "still_human": _still_human(bool(floor), table_decisions),
     }

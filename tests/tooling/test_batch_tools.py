@@ -3763,3 +3763,36 @@ def test_draft_golden_writes_its_golden_owner_only(
     assert rc == 0
     assert stat.S_IMODE(out.stat().st_mode) == 0o600
     assert "doc" in json.loads(out.read_text())
+
+
+# --- DEBT-104: one type per table column across the corpus ------------------
+
+
+def _with_table(document_id: str, qty_type: str | None) -> dict[str, Any]:
+    entry = _golden_entry(document_id, total="1")
+    block: dict[str, Any] = {"match_key": "sku", "critical": True,
+                             "rows": [{"sku": "S1", "qty": "3"}]}
+    if qty_type is not None:
+        block["types"] = {"qty": qty_type}
+    entry["tables"] = {"line_items": block}
+    return entry
+
+
+def test_calibrate_unifies_a_table_columns_type_across_the_corpus() -> None:
+    # The majority (`text`) deliberately does NOT sort first, so a rule that
+    # picked alphabetically instead of by count would be caught.
+    golden = {
+        "d0": _with_table("d0.pdf", "number"),
+        "d1": _with_table("d1.pdf", "text"),
+        "d2": _with_table("d2.pdf", "text"),
+        "d3": _with_table("d3.pdf", None),  # no value seen: no vote, still unified
+    }
+    calibrated, report = calibrate_golden.calibrate(golden, None)
+    assert {calibrated[k]["tables"]["line_items"]["types"]["qty"] for k in golden} == {"text"}
+    assert report["column_types"]["line_items.qty"]["counts"] == {"number": 1, "text": 2}
+
+
+def test_an_agreed_column_type_is_not_reported() -> None:
+    golden = {f"d{i}": _with_table(f"d{i}.pdf", "number") for i in range(3)}
+    _, report = calibrate_golden.calibrate(golden, None)
+    assert report["column_types"] == {}
