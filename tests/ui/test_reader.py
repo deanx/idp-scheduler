@@ -342,3 +342,15 @@ class TestCompleteness:
         )
         [run] = reader.list_runs(tmp_path)
         assert run["gate"] == "FAIL"
+
+
+def test_an_uncomputable_document_makes_a_complete_run_incomplete(tmp_path: Path) -> None:
+    """/test gate F-3 / M13: a malformed verdict map inside a `complete`
+    artifact must not render PASS."""
+    write_artifact(tmp_path, "r1", {
+        "a.pdf": {"total": field("match", critical=True)},
+        "b.pdf": {"total": {"critical": True}},  # no verdict: overall_gate cannot read it
+    })
+    [run] = reader.list_runs(tmp_path)
+    assert run["gate"] == "INCOMPLETE"
+    assert reader.read_run("r1", artifact_dir=tmp_path)["gate"] == "INCOMPLETE"

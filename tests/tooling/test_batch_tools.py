@@ -3053,3 +3053,47 @@ def test_calibrate_keeps_a_value_out_of_a_type_it_cannot_satisfy(tmp_path: Path)
     assert calibrated["blank"]["fields"]["total"]["type"] == "text"
     assert calibrated["comma"]["fields"]["total"]["type"] == "text"
     assert sorted(report["types"]["total"]["kept_drafted"]) == ["blank", "comma"]
+
+
+# --- /test gate F-1..F-5 (Lane G High, 2026-09-27): each kills a survivor ---
+
+
+def test_pin_refuses_a_zip_larger_than_its_ceiling(tmp_path: Path) -> None:
+    """F-1 / M19: the --zip leg, not only --document-dir."""
+    archive = _zip(tmp_path, {f"x{i}.pdf": b"%PDF" for i in range(3)})
+    calls: list[Path] = []
+    exit_code, _ = pin_document.run(
+        _pin_args(tmp_path, None, zip_path=archive, all=True, max_documents=2),
+        lambda path: _record(calls, path),
+        _FakeStage(),
+    )
+    assert exit_code == 2 and calls == []
+
+
+def test_noise_floor_counts_a_field_that_drops_out_as_unstable(tmp_path: Path) -> None:
+    """F-2 / M31: value on the first pass, empty on the repeat is the
+    extractor forgetting a field -- instability calibration must see."""
+    document_dir = _documents(tmp_path, 1)
+    adapter = _ScriptedAdapter({"doc-001.pdf": [_with_field("PO-7"), _with_field("")]})
+    _, report = noise_floor.run(_noise_args(tmp_path, document_dir), adapter)
+    assert report["by_field"]["po_number"]["instability_rate"] == 1.0
+
+
+def test_pinned_elsewhere_sees_another_action_too(tmp_path: Path) -> None:
+    """F-4 / M43: the platform item id carries neither version nor action."""
+    _pinned(tmp_path, "a.pdf", action="other-action", version="9.9.9")
+    own = tmp_path / "pins" / "goldens" / "a" / "1.0.0"
+    assert batch.pinned_elsewhere(tmp_path / "pins", "ds", {"a.pdf"}, own) == {
+        "a.pdf": "other-action/9.9.9"
+    }
+
+
+def test_compare_admits_a_second_corpus_under_a_second_dataset(tmp_path: Path) -> None:
+    """F-5 / M37: another dataset's pins in the same store are not a conflict."""
+    _pins_file(tmp_path, {"old.pdf": {"dataset": "first", "document_dir": "/elsewhere"}})
+    archive = _zip(tmp_path, {"new.pdf": b"%PDF"})
+    pin = _FakeStage()
+    exit_code, _ = compare_versions.run(
+        _compare_args(tmp_path, zip_path=archive, dataset="second"), pin, _FakeStage()
+    )
+    assert exit_code == 0 and pin.calls

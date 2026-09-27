@@ -95,6 +95,20 @@ def _document_gate(fields: dict[str, Any]) -> str:
         return "UNKNOWN"
 
 
+def _document_counts(show_run: Any, fields: dict[str, Any]) -> Counter[str]:
+    """Verdict counts for one document, or none for a malformed one. The
+    counts are display; the gate (`_document_gate` -> UNKNOWN -> the run
+    INCOMPLETE) is what says the document could not be read. Without this,
+    one truncated verdict map raised out of `list_runs` and took the whole
+    Runs page down before the gate's own guard was ever reached (/test gate
+    F-3, 2026-09-27)."""
+    try:
+        counts: Counter[str] = show_run._counts(fields)
+        return counts
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return Counter()
+
+
 def list_runs(artifact_dir: Path | None = None) -> list[dict[str, Any]]:
     """Every run artifact, newest first, with its gate and verdict counts."""
     root = artifact_dir or ARTIFACT_DIR()
@@ -111,7 +125,7 @@ def list_runs(artifact_dir: Path | None = None) -> list[dict[str, Any]]:
         counts: Counter[str] = Counter()
         gates: list[str] = []
         for fields in artifact.documents.values():
-            counts.update(show_run._counts(fields))
+            counts.update(_document_counts(show_run, fields))
             gates.append(_document_gate(fields))
         runs.append({
             "run_id": artifact.run_id,
@@ -181,6 +195,18 @@ def read_run(
 
     out_documents: list[dict[str, Any]] = []
     for document_id, fields in sorted(documents.items()):
+        if _document_gate(fields) == "UNKNOWN":
+            # Unreadable verdict map: shown as such, never rendered through
+            # display helpers that assume a well-formed one -- and its UNKNOWN
+            # makes the run INCOMPLETE (/test gate F-3, 2026-09-27).
+            out_documents.append({
+                "document_id": document_id,
+                "gate": "UNKNOWN",
+                "verdicts": {},
+                "rests_on_noise": False,
+                "leaves": [],
+            })
+            continue
         leaves = []
         for label, cell in show_run._leaves(fields):
             key = show_run._field_key(label)
