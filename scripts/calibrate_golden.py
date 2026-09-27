@@ -65,7 +65,10 @@ _REPO_ROOT = _SCRIPTS_DIR.parent
 if str(_REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "src"))
 
+import jsonschema  # noqa: E402
 from _batch import write_private_json  # noqa: E402
+
+from idp_regression.platform.schema import load_golden_schema  # noqa: E402
 
 #: A field whose own version disagrees with itself MORE often than this
 #: cannot carry a gate: at 2% over a 1,000-document dataset it is ~20 red
@@ -293,10 +296,26 @@ def calibrate(
             "drafted_match_keys": info["drafted"],
         }
 
-    for entry in calibrated.values():
+    validator = jsonschema.Draft7Validator(load_golden_schema())
+    for document_key, entry in calibrated.items():
         for name, spec in entry.get("fields", {}).items():
             spec["critical"] = decisions[name]["critical"]
-            spec["type"] = types[name]["chosen"]
+            drafted = spec.get("type", "text")
+            chosen = types[name]["chosen"]
+            if chosen == drafted:
+                continue
+            spec["type"] = chosen
+            # The majority type is applied only where THIS entry's value
+            # has that shape. An empty value, or a `1,250.00` drafted as
+            # text, fails the committed schema's `if/then` for `number` /
+            # `date` / `id`; writing it anyway produced a set that
+            # provisioned partially, and a run against the partial dataset
+            # could pass (DEBT-92). Checked with the same schema provisioning
+            # uses, so the two can never disagree about what is valid.
+            if not validator.is_valid(entry):
+                spec["type"] = drafted
+                types[name].setdefault("kept_drafted", []).append(document_key)
+                types[name]["agreed"] = False
         for tname, block in entry.get("tables", {}).items():
             decision = table_decisions[tname]
             block["critical"] = decision["critical"]

@@ -621,8 +621,24 @@ def test_provision_all_names_an_invalid_entry_and_never_prints_its_values(
     assert rc == 1
     assert "INVALID b" in err
     assert "87.48" not in err and "INV-1001" not in err
-    # The valid entry still reached the platform: one bad entry must not
-    # cost the whole batch.
+    # DEBT-92: validation is local and free, so one invalid entry refuses
+    # the batch. Provisioning the rest left a partial dataset that a run
+    # could pass against.
+    assert provisioned.item_posts == []
+
+
+def test_provision_all_skip_invalid_provisions_the_rest_when_asked(
+    tmp_path: Path, provisioned: Any
+) -> None:
+    broken = _entry("b.pdf")
+    broken["fields"]["total"]["type"] = "currency"
+    golden = _golden_file(tmp_path, {"a": _entry("a.pdf"), "b": broken})
+
+    rc = provision.main(
+        ["--dataset", "ds", "--all", "--golden-file", str(golden), "--skip-invalid"]
+    )
+
+    assert rc == 1, "still non-zero: the batch is incomplete"
     assert [p["input"]["document_id"] for p in provisioned.item_posts] == ["a.pdf"]
 
 
@@ -1003,7 +1019,7 @@ def test_provision_all_catches_a_structural_error_the_schema_cannot_see(
     assert rc == 1
     assert "INVALID b: structure:" in err
     assert "SKU-1" not in err
-    assert [p["input"]["document_id"] for p in provisioned.item_posts] == ["a.pdf"]
+    assert provisioned.item_posts == []
 
 
 # ── #4 reading a run against the floor (scripts/show_run.py --baseline) ─
@@ -3010,3 +3026,30 @@ def test_verify_refuses_a_pin_set_whose_documents_are_pinned_at_another_version_
     )
     assert exit_code == 2 and run_eval.calls == []
     assert "DEBT-89" in capsys.readouterr().err
+
+
+# --- DEBT-92: calibration never writes an entry the schema rejects ----------
+
+
+
+def test_calibrate_keeps_a_value_out_of_a_type_it_cannot_satisfy(tmp_path: Path) -> None:
+    """Majority `number`, but one document drafted the field empty and one
+    as `1,250.00` text. Forcing `number` on them fails the committed
+    schema, and provisioning then left a partial dataset."""
+    golden: dict[str, Any] = {}
+    for i in range(18):
+        golden[f"d{i}"] = _entry(f"d{i}.pdf")
+    blank = _entry("blank.pdf")
+    blank["fields"]["total"] = {"value": "", "type": "text", "critical": False}
+    comma = _entry("comma.pdf")
+    comma["fields"]["total"] = {"value": "1,250.00", "type": "text", "critical": True}
+    golden["blank"], golden["comma"] = blank, comma
+
+    calibrated, report = calibrate_golden.calibrate(golden, None)
+
+    for key, entry in calibrated.items():
+        assert provision._validation_error(entry) is None, key
+    assert calibrated["d0"]["fields"]["total"]["type"] == "number"
+    assert calibrated["blank"]["fields"]["total"]["type"] == "text"
+    assert calibrated["comma"]["fields"]["total"]["type"] == "text"
+    assert sorted(report["types"]["total"]["kept_drafted"]) == ["blank", "comma"]

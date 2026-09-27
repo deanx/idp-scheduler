@@ -377,6 +377,14 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--skip-invalid",
+        action="store_true",
+        help=(
+            "provision the valid entries even when some are invalid (off by default: a "
+            "partial dataset gates only what it holds, and a run against it can pass)"
+        ),
+    )
+    parser.add_argument(
         "--show-values",
         action="store_true",
         help="with --dry-run, print full golden field values instead of just names + a digest",
@@ -433,9 +441,17 @@ def main(argv: list[str] | None = None) -> int:
             invalid.append((key, reason))
             print(f"provision_golden_dataset: INVALID {key}: {reason}", file=sys.stderr)
 
-    if invalid and (args.stop_on_error or not valid):
+    # Validation is local and free, so an invalid entry refuses the WHOLE
+    # batch before anything is written. Provisioning the valid ones used to
+    # leave a partial dataset on the platform -- and `run_eval` gates what
+    # the dataset holds, so a run against it could pass while documents
+    # the operator meant to gate were absent (DEBT-92). `--skip-invalid`
+    # keeps the old behaviour for someone who has decided they want it.
+    if invalid and (args.stop_on_error or not valid or not args.skip_invalid):
         print(
-            f"provision_golden_dataset: {len(invalid)} invalid entr(ies); nothing provisioned",
+            f"provision_golden_dataset: {len(invalid)} invalid entr(ies); nothing provisioned"
+            + ("" if args.skip_invalid or not valid else
+               " -- fix them and re-run, or pass --skip-invalid to provision the rest"),
             file=sys.stderr,
         )
         return 1
