@@ -20,6 +20,7 @@ that would be expensive to discover live:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -3515,3 +3516,60 @@ def test_noise_floor_refuses_an_unwritable_report_path_before_spending(tmp_path:
         os.chmod(locked, 0o700)
     assert exit_code == 2
     assert adapter.calls == 0
+
+
+# --- DEBT-100: a pin is the BYTES it was read from, not the filename --------
+
+
+def test_pin_refuses_a_same_named_file_with_different_bytes(tmp_path: Path) -> None:
+    document = tmp_path / "inv-001.pdf"
+    document.write_bytes(b"%PDF-original")
+    pin_document.run(_pin_args(tmp_path, document), lambda path: _raw(), _FakeStage())
+
+    document.write_bytes(b"%PDF-a-different-invoice")
+    calls: list[Path] = []
+    exit_code, _ = pin_document.run(
+        _pin_args(tmp_path, document), lambda path: _record(calls, path), _FakeStage()
+    )
+    assert exit_code == 2 and calls == [], "refused before spending"
+
+    exit_code, _ = pin_document.run(
+        _pin_args(tmp_path, document, repin=True), lambda path: _record(calls, path), _FakeStage()
+    )
+    assert exit_code == 0 and len(calls) == 1, "--repin re-reads the new bytes"
+
+
+def test_pin_still_skips_the_same_bytes(tmp_path: Path) -> None:
+    document = tmp_path / "inv-001.pdf"
+    document.write_bytes(b"%PDF-original")
+    pin_document.run(_pin_args(tmp_path, document), lambda path: _raw(), _FakeStage())
+    calls: list[Path] = []
+    exit_code, summary = pin_document.run(
+        _pin_args(tmp_path, document), lambda path: _record(calls, path), _FakeStage()
+    )
+    assert exit_code == 0 and calls == [] and summary.get("already_pinned")
+
+
+def test_verify_refuses_to_compare_different_bytes_against_a_golden(tmp_path: Path) -> None:
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "a.pdf").write_bytes(b"%PDF-now")
+    _pins_file(
+        tmp_path,
+        {"a.pdf": {"dataset": "ds", "document_dir": str(docs), "org": "o",
+                   "sha256": hashlib.sha256(b"%PDF-when-pinned").hexdigest()}},
+    )
+    run_eval = _RecordingRunEval()
+    exit_code, _ = verify_document.run(_verify_args(tmp_path, all=True), run_eval)
+    assert exit_code == 2 and run_eval.calls == []
+
+
+def test_bootstrap_resume_refuses_a_document_whose_bytes_changed(tmp_path: Path) -> None:
+    document_dir = _documents(tmp_path, 2)
+    bootstrap.run(_bootstrap_args(tmp_path, document_dir), lambda d: _raw())
+    (document_dir / "doc-001.pdf").write_bytes(b"%PDF-a-different-invoice")
+    calls: list[Path] = []
+    exit_code, _ = bootstrap.run(
+        _bootstrap_args(tmp_path, document_dir, resume=True), lambda d: _record(calls, d)
+    )
+    assert exit_code == 2 and calls == []

@@ -29,6 +29,7 @@ visible in the invocation that produced it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -260,6 +261,34 @@ def write_private_json(path: Path, payload: object) -> None:
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     os.replace(tmp, path)
+
+
+def file_sha256(path: Path) -> str:
+    """Content identity of a document. A pin, a capture and a golden are
+    otherwise keyed by FILENAME, and a re-sent archive can reuse a name for
+    different bytes; a golden read from the old bytes then judges the new
+    ones (DEBT-100)."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while chunk := fh.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def changed_since_recorded(
+    documents: list[Path], recorded: dict[str, Any], *, key: str = "sha256"
+) -> list[str]:
+    """Names of `documents` whose bytes differ from the digest recorded for
+    them. A document with no recorded digest (written before DEBT-100) is
+    not listed: there is nothing to compare, and it is reported as such by
+    the caller rather than guessed at."""
+    changed = []
+    for document in documents:
+        entry = recorded.get(document.name)
+        expected = entry.get(key) if isinstance(entry, dict) else entry
+        if isinstance(expected, str) and document.is_file() and file_sha256(document) != expected:
+            changed.append(document.name)
+    return sorted(changed)
 
 
 def read_json_if_present(path: Path) -> dict[str, Any]:

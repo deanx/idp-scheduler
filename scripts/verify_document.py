@@ -51,6 +51,7 @@ from _batch import (  # noqa: E402
     DEFAULT_DOCUMENT_PATTERNS,
     QuotaRefusedError,
     ZipRejectedError,
+    changed_since_recorded,
     confirm_cost,
     discover_documents,
     extract_documents_from_zip,
@@ -334,6 +335,22 @@ def run(args: argparse.Namespace, run_eval: Any) -> tuple[int, dict[str, Any]]:
             )
             return 2, {}
         document_dir = directories.pop()
+
+    # The golden is what the trusted version read from particular BYTES.
+    # Re-reading different bytes under the same name would be a comparison
+    # of two documents, reported as a regression or as STILL VALID
+    # (DEBT-100). Pins written before the digest existed are not checked.
+    changed = changed_since_recorded(
+        [Path(document_dir) / name for name in selected], pins
+    )
+    if changed:
+        print(
+            f"verify_document: {len(changed)} document(s) are not the bytes they were "
+            f"pinned from (e.g. {changed[0]!r}) -- refusing to compare a different "
+            "document against their golden. Re-pin them, or point at the original files.",
+            file=sys.stderr,
+        )
+        return 2, {}
 
     first = pins.get(selected[0], {})
     org = args.org or first.get("org", "")

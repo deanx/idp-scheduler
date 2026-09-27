@@ -101,10 +101,12 @@ from _batch import (  # noqa: E402
     CorpusTooLargeError,
     QuotaRefusedError,
     ZipRejectedError,
+    changed_since_recorded,
     confirm_cost,
     discover_documents,
     ensure_private_dir,
     extract_documents_from_zip,
+    file_sha256,
     pinned_elsewhere,
     progress,
     read_json_if_present,
@@ -282,6 +284,8 @@ def _pin_one(
     document_id = document.name
     golden_path = goldens_dir / f"{document_id}.json"
     pins = read_json_if_present(pins_path)
+    # Hashed BEFORE extraction: these are the bytes the trusted version reads.
+    digest = file_sha256(document)
 
     try:
         capture = capture_fn(document)
@@ -313,6 +317,7 @@ def _pin_one(
         "dataset": args.dataset,
         "org": args.org,
         "pinned_at": dt.datetime.now(dt.UTC).isoformat(),
+        "sha256": digest,
     }
     write_private_json(pins_path, pins)
 
@@ -406,6 +411,19 @@ def run(args: argparse.Namespace, capture_fn: Any, provision: Any) -> tuple[int,
     skipped = [
         d for d in documents if (goldens_dir / f"{d.name}.json").exists() and not args.repin
     ]
+    # "Already pinned" means the SAME BYTES were pinned, not the same name.
+    # A re-sent archive can reuse a filename for a different document, and
+    # skipping it would leave a golden read from the old bytes to judge the
+    # new ones (DEBT-100). Refused before anything is spent; --repin re-reads.
+    changed = changed_since_recorded(skipped, read_json_if_present(pins_path))
+    if changed:
+        print(
+            f"pin_document: {len(changed)} document(s) differ from the bytes they were "
+            f"pinned from (e.g. {changed[0]!r}). Their goldens describe other content. "
+            "Pass --repin to re-read them, or use a separate --store.",
+            file=sys.stderr,
+        )
+        return 2, {}
     todo = [d for d in documents if not (goldens_dir / f"{d.name}.json").exists() or args.repin]
     for document in skipped:
         print(

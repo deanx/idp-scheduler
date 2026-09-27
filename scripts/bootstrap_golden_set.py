@@ -87,10 +87,12 @@ from _batch import (  # noqa: E402
     CorpusTooLargeError,
     QuotaRefusedError,
     ZipRejectedError,
+    changed_since_recorded,
     confirm_cost,
     discover_documents,
     ensure_private_dir,
     extract_documents_from_zip,
+    file_sha256,
     progress,
     read_json_if_present,
     refuse_over_ceiling,
@@ -147,6 +149,10 @@ def _make_capture_fn(org_id: str, action_id: str, version: str) -> SupportsCaptu
         return dict(raw)
 
     return capture
+
+
+#: `document_id -> sha256` of the bytes each capture was taken from (DEBT-100).
+DIGESTS_FILE = "_digests.json"
 
 
 def _capture_path(captures_dir: Path, document_id: str) -> Path:
@@ -364,6 +370,21 @@ def run(
             print(f"bootstrap_golden_set: {exc}", file=sys.stderr)
             return 2, {}
         if args.resume:
+            # A capture is only reusable for the SAME BYTES. golden_pipeline
+            # always passes --resume, so a re-sent archive reusing a filename
+            # was drafted from the old capture: a golden describing another
+            # document (DEBT-100). Refused before anything is spent.
+            changed = changed_since_recorded(
+                documents, read_json_if_present(captures_dir / DIGESTS_FILE)
+            )
+            if changed:
+                print(
+                    f"bootstrap_golden_set: {len(changed)} document(s) differ from the "
+                    f"bytes they were captured from (e.g. {changed[0]!r}). Their captures "
+                    "and drafts describe other content. Use a fresh --out/--captures-dir.",
+                    file=sys.stderr,
+                )
+                return 2, {}
             # "Done" is DRAFTED, not captured. Keying resume on the capture
             # alone meant a document whose capture succeeded and whose draft
             # failed was never retried: the re-run made 0 calls, reported no
@@ -416,11 +437,15 @@ def run(
             elif capture_fn is None:  # pragma: no cover - guarded by main()
                 raise RuntimeError("no capture callable and --from-captures not set")
             else:
+                digest = file_sha256(document)
                 capture = capture_fn(document)
                 # Written BEFORE anything is derived from it: this is the
                 # only durable copy of what the extraction cost, and the
                 # 24-hour window does not reopen.
                 write_private_json(_capture_path(captures_dir, document_id), capture)
+                digests = read_json_if_present(captures_dir / DIGESTS_FILE)
+                digests[document_id] = digest
+                write_private_json(captures_dir / DIGESTS_FILE, digests)
             entry, notes = _draft_one(capture, document_id)
         except Exception as exc:  # noqa: BLE001 - INV-02: type name only, never str(exc)
             # One handler, not two: the capture callable is injected and
