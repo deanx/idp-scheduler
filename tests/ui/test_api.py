@@ -23,6 +23,7 @@ import pytest
 fastapi = pytest.importorskip("fastapi", reason="the `ui` extra is not installed")
 from fastapi.testclient import TestClient  # noqa: E402
 
+from idp_regression.orchestration.run_artifact import artifact_envelope  # noqa: E402
 from idp_regression.ui import workspace  # noqa: E402
 from idp_regression.ui.api import create_app  # noqa: E402
 
@@ -269,7 +270,10 @@ class TestReads:
         artifacts = tmp_path / ".idp-regression-run-artifacts"
         artifacts.mkdir()
         (artifacts / "r1.json").write_text(
-            json.dumps({"r1": {"a.pdf": {"total": {"verdict": "match", "critical": False}}}}),
+            json.dumps(artifact_envelope(
+                "r1", {"a.pdf": {"total": {"verdict": "match", "critical": False}}},
+                status="complete",
+            )),
             encoding="utf-8",
         )
         assert client.get("/api/runs/r1?baseline=absent").status_code == 404

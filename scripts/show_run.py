@@ -5,7 +5,8 @@ The local run artifact (`.idp-regression-run-artifacts/<run_id>.json`,
 ADR-0007) is the only place the *values* live -- the evaluation platform
 deliberately stores verdicts only (DEBT-18 option B). That makes the
 artifact the right place to answer "what happened across all N documents",
-but it is raw JSON keyed `run_id -> document_id -> field -> verdict`, which
+but it is raw JSON (`run_artifact.ARTIFACT_FORMAT`: run id, status, then
+`document_id -> field -> verdict`), which
 is not readable at a glance.
 
 This reads that file and prints:
@@ -58,8 +59,13 @@ disclosure.
 
 The per-document gate is RECOMPUTED here with the classifier's own
 `overall_gate`, not read from a stored field -- the artifact holds verdict
-maps, not gates. Same pure function the run itself used, so this cannot
-disagree with the exit code.
+maps, not gates. Same pure function the run itself used -- but a gate over
+the documents PRESENT is only the run's gate if the run finished. An
+aborted run leaves a partial artifact, and this once printed "all 0
+documents passed" and exited 0 for a run whose `run_eval` exited 1
+(DEBT-91). So the overall line is `run_artifact.run_level_gate`: PASS only
+for a run that recorded `complete`, INCOMPLETE (exit 1) for an aborted run
+or a legacy artifact that cannot say, FAIL whenever a document failed.
 """
 
 from __future__ import annotations
@@ -76,6 +82,11 @@ from typing import Any
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 from idp_regression.classifier import overall_gate
+from idp_regression.orchestration.run_artifact import (
+    RunArtifact,
+    parse_run_artifact,
+    run_level_gate,
+)
 
 ARTIFACT_DIR = ".idp-regression-run-artifacts"
 
@@ -307,9 +318,9 @@ def main(argv: list[str] | None = None) -> int:
 
     path = _resolve(args.run)
     with open(path, encoding="utf-8") as fh:
-        data = json.load(fh)
-    run_id = next(iter(data))
-    documents: dict[str, Any] = data[run_id]
+        artifact = parse_run_artifact(json.load(fh))
+    run_id = artifact.run_id
+    documents: dict[str, Any] = artifact.documents
 
     baseline: dict[str, tuple[float, int]] = {}
     baseline_report: dict[str, Any] = {}
@@ -329,6 +340,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"\nrun_id   {run_id}")
     print(f"artifact {path}")
+    print(f"status   {_status_line(artifact)}")
     print(f"documents {len(documents)}\n")
 
     gates: dict[str, str] = {}
@@ -386,6 +398,7 @@ def main(argv: list[str] | None = None) -> int:
     for fields in documents.values():
         total += _counts(fields)
     failed = [d for d, g in gates.items() if g == "FAIL"]
+    run_gate = run_level_gate(gates.values(), artifact.status)
     print(
         f"\ntotals   match={total['match']} wrong_value={total['wrong_value']} "
         f"missing={total['missing']} wrong_format={total['wrong_format']} "
@@ -393,9 +406,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     if failed:
         tail = f"  ({len(failed)} of {len(documents)} documents: {', '.join(sorted(failed))})"
+    elif run_gate == "INCOMPLETE":
+        tail = (
+            f"  ({len(documents)} document(s) recorded, none failing -- but this is NOT a "
+            f"pass: {_status_line(artifact)})"
+        )
     else:
         tail = f"  (all {len(documents)} documents passed)"
-    print(f"OVERALL  {'FAIL' if failed else 'PASS'}{tail}")
+    print(f"OVERALL  {run_gate}{tail}")
     if comparison and failed:
         noise_only = sorted(
             doc for doc in failed if _failure_rests_on_noise(documents[doc], comparison)
@@ -420,7 +438,9 @@ def main(argv: list[str] | None = None) -> int:
     print()
     # The exit code is the GATE's, never the floor's: a run that fails is
     # a run that fails, however well its failure is explained (INV-08).
-    return 1 if failed else 0
+    # An INCOMPLETE run is not a pass either (DEBT-91): `run_eval` exited
+    # non-zero on it, and this must not be the command that says otherwise.
+    return 0 if run_gate == "PASS" else 1
 
 
 def _floor_note(label: str, baseline: dict[str, tuple[float, int]]) -> str:
@@ -491,6 +511,14 @@ def _print_baseline_section(
             f"  {key:32} {c['run_rate']:>6.0%} of {c['run_observations']:<5} "
             f"{floor_cell:>14}   {label[c['status']]}"
         )
+
+
+def _status_line(artifact: RunArtifact) -> str:
+    if artifact.status == "complete":
+        return "complete"
+    if artifact.status == "aborted":
+        return f"ABORTED ({artifact.abort_reason or 'reason not recorded'}) -- results are partial"
+    return "UNKNOWN -- this artifact predates completeness recording, so it cannot say it finished"
 
 
 def _fails(cell: dict[str, Any]) -> bool:

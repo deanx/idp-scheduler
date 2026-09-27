@@ -15,16 +15,27 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
+from idp_regression.orchestration.run_artifact import artifact_envelope
 from idp_regression.ui import reader
 
 
-def write_artifact(root: Path, run_id: str, documents: dict[str, Any]) -> None:
+def write_artifact(
+    root: Path,
+    run_id: str,
+    documents: dict[str, Any],
+    *,
+    status: Literal["complete", "aborted"] = "complete",
+    abort_reason: str | None = None,
+) -> None:
     root.mkdir(parents=True, exist_ok=True)
-    (root / f"{run_id}.json").write_text(json.dumps({run_id: documents}), encoding="utf-8")
+    (root / f"{run_id}.json").write_text(
+        json.dumps(artifact_envelope(run_id, documents, status=status, abort_reason=abort_reason)),
+        encoding="utf-8",
+    )
 
 
 def field(
@@ -287,3 +298,47 @@ class TestPins:
 
     def test_an_absent_store_is_empty(self, tmp_path: Path) -> None:
         assert reader.list_pins(tmp_path / "absent") == []
+
+
+class TestCompleteness:
+    """DEBT-91: the console read an aborted run's partial artifact as PASS."""
+
+    def test_an_aborted_run_is_incomplete_in_the_list_and_the_detail(
+        self, tmp_path: Path
+    ) -> None:
+        write_artifact(
+            tmp_path, "r1", {"a.pdf": {"total": field("match", critical=True)}},
+            status="aborted", abort_reason="timeout",
+        )
+        [run] = reader.list_runs(tmp_path)
+        assert (run["gate"], run["status"], run["abort_reason"]) == (
+            "INCOMPLETE", "aborted", "timeout",
+        )
+        detail = reader.read_run("r1", artifact_dir=tmp_path)
+        assert detail["gate"] == "INCOMPLETE"
+        assert detail["abort_reason"] == "timeout"
+
+    def test_an_abort_before_the_first_document_is_not_an_empty_pass(
+        self, tmp_path: Path
+    ) -> None:
+        write_artifact(tmp_path, "r1", {}, status="aborted", abort_reason="auth_failure")
+        [run] = reader.list_runs(tmp_path)
+        assert run["gate"] == "INCOMPLETE"
+
+    def test_a_legacy_artifact_is_incomplete_because_it_cannot_say(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "r1.json").write_text(
+            json.dumps({"r1": {"a.pdf": {"total": field("match", critical=True)}}}),
+            encoding="utf-8",
+        )
+        [run] = reader.list_runs(tmp_path)
+        assert (run["gate"], run["status"]) == ("INCOMPLETE", None)
+
+    def test_a_known_failure_in_an_aborted_run_still_reads_fail(self, tmp_path: Path) -> None:
+        write_artifact(
+            tmp_path, "r1", {"a.pdf": {"total": field("missing", critical=True, actual=None)}},
+            status="aborted", abort_reason="timeout",
+        )
+        [run] = reader.list_runs(tmp_path)
+        assert run["gate"] == "FAIL"

@@ -69,10 +69,16 @@ def test_write_run_artifact_persists_the_full_verdict_map_keyed_by_run_id_then_d
     monkeypatch.chdir(tmp_path)
     run_id = "0123456789abcdef0123456789abcdef"
 
-    run_artifact.write_run_artifact(run_id, _SAMPLE_VERDICT_MAPS)
+    run_artifact.write_run_artifact(run_id, _SAMPLE_VERDICT_MAPS, status="complete")
 
     written = json.loads(Path(run_artifact.artifact_path(run_id)).read_text(encoding="utf-8"))
-    assert written == {run_id: _SAMPLE_VERDICT_MAPS}
+    assert written == {
+        "format": run_artifact.ARTIFACT_FORMAT,
+        "run_id": run_id,
+        "status": "complete",
+        "abort_reason": None,
+        "documents": _SAMPLE_VERDICT_MAPS,
+    }
 
 
 def test_write_run_artifact_creates_the_directory_if_absent(
@@ -81,7 +87,7 @@ def test_write_run_artifact_creates_the_directory_if_absent(
     monkeypatch.chdir(tmp_path)
     assert not (tmp_path / run_artifact.ARTIFACT_DIR_NAME).exists()
 
-    run_artifact.write_run_artifact("run-a", _SAMPLE_VERDICT_MAPS)
+    run_artifact.write_run_artifact("run-a", _SAMPLE_VERDICT_MAPS, status="complete")
 
     assert (tmp_path / run_artifact.ARTIFACT_DIR_NAME).is_dir()
 
@@ -103,7 +109,8 @@ def test_write_run_artifact_never_raises_on_a_write_failure(
     monkeypatch.setattr(os, "makedirs", _boom)
 
     with caplog.at_level(logging.WARNING):
-        run_artifact.write_run_artifact("run-a", _SAMPLE_VERDICT_MAPS)  # must not raise
+        # must not raise
+        run_artifact.write_run_artifact("run-a", _SAMPLE_VERDICT_MAPS, status="complete")
 
     assert not (tmp_path / run_artifact.ARTIFACT_DIR_NAME).exists()
     assert "OSError" in caplog.text
@@ -125,7 +132,7 @@ def test_write_run_artifact_failure_never_leaks_the_exception_message(
     monkeypatch.setattr(os, "makedirs", _boom)
 
     with caplog.at_level(logging.WARNING):
-        run_artifact.write_run_artifact("run-a", _SAMPLE_VERDICT_MAPS)
+        run_artifact.write_run_artifact("run-a", _SAMPLE_VERDICT_MAPS, status="complete")
 
     assert sentinel not in caplog.text
 
@@ -170,7 +177,7 @@ def test_write_run_artifact_creates_the_directory_owner_only(
     default-umask `0755` `os.makedirs` would otherwise produce."""
     monkeypatch.chdir(tmp_path)
 
-    run_artifact.write_run_artifact("run-a", _SAMPLE_VERDICT_MAPS)
+    run_artifact.write_run_artifact("run-a", _SAMPLE_VERDICT_MAPS, status="complete")
 
     mode = os.stat(run_artifact.ARTIFACT_DIR_NAME).st_mode
     assert stat.S_IMODE(mode) & 0o077 == 0, oct(stat.S_IMODE(mode))
@@ -186,7 +193,7 @@ def test_write_run_artifact_writes_the_file_owner_only(
     monkeypatch.chdir(tmp_path)
     run_id = "0123456789abcdef0123456789abcdef"
 
-    run_artifact.write_run_artifact(run_id, _SAMPLE_VERDICT_MAPS)
+    run_artifact.write_run_artifact(run_id, _SAMPLE_VERDICT_MAPS, status="complete")
 
     mode = os.stat(run_artifact.artifact_path(run_id)).st_mode
     assert stat.S_IMODE(mode) & 0o077 == 0, oct(stat.S_IMODE(mode))
@@ -204,7 +211,7 @@ def test_write_run_artifact_tightens_a_pre_existing_world_readable_directory(
     os.chmod(run_artifact.ARTIFACT_DIR_NAME, 0o755)
     assert stat.S_IMODE(os.stat(run_artifact.ARTIFACT_DIR_NAME).st_mode) == 0o755
 
-    run_artifact.write_run_artifact("run-a", _SAMPLE_VERDICT_MAPS)
+    run_artifact.write_run_artifact("run-a", _SAMPLE_VERDICT_MAPS, status="complete")
 
     mode = stat.S_IMODE(os.stat(run_artifact.ARTIFACT_DIR_NAME).st_mode)
     assert mode & 0o077 == 0, oct(mode)
@@ -224,7 +231,8 @@ def test_write_run_artifact_never_raises_on_an_open_or_dump_failure(
     monkeypatch.setattr(os, "open", _boom)
 
     with caplog.at_level(logging.WARNING):
-        run_artifact.write_run_artifact("run-a", _SAMPLE_VERDICT_MAPS)  # must not raise
+        # must not raise
+        run_artifact.write_run_artifact("run-a", _SAMPLE_VERDICT_MAPS, status="complete")
 
     assert not (tmp_path / run_artifact.artifact_path("run-a")).exists()
     assert "OSError" in caplog.text
@@ -240,7 +248,8 @@ def test_write_run_artifact_rejects_a_run_id_with_a_path_separator(
     monkeypatch.chdir(tmp_path)
 
     with caplog.at_level(logging.WARNING):
-        run_artifact.write_run_artifact("../escape", _SAMPLE_VERDICT_MAPS)  # must not raise
+        # must not raise
+        run_artifact.write_run_artifact("../escape", _SAMPLE_VERDICT_MAPS, status="complete")
 
     assert not (tmp_path.parent / "escape.json").exists()
     assert not (tmp_path / run_artifact.ARTIFACT_DIR_NAME).exists()
@@ -255,6 +264,71 @@ def test_write_run_artifact_accepts_a_well_formed_uuid4_hex_run_id(
     monkeypatch.chdir(tmp_path)
     run_id = "0123456789abcdef0123456789abcdef"
 
-    run_artifact.write_run_artifact(run_id, _SAMPLE_VERDICT_MAPS)
+    run_artifact.write_run_artifact(run_id, _SAMPLE_VERDICT_MAPS, status="complete")
 
     assert Path(run_artifact.artifact_path(run_id)).exists()
+
+
+# --- DEBT-91: completeness travels with the verdicts ------------------------
+
+
+def test_an_aborted_run_writes_its_status_and_reason(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    run_artifact.write_run_artifact(
+        "run-a", _SAMPLE_VERDICT_MAPS, status="aborted", abort_reason="auth_failure"
+    )
+    written = json.loads(Path(run_artifact.artifact_path("run-a")).read_text(encoding="utf-8"))
+    parsed = run_artifact.parse_run_artifact(written)
+    assert (parsed.status, parsed.abort_reason) == ("aborted", "auth_failure")
+    assert parsed.documents == _SAMPLE_VERDICT_MAPS
+
+
+def test_a_legacy_artifact_still_parses_but_cannot_claim_it_completed() -> None:
+    parsed = run_artifact.parse_run_artifact({"r1": {"a.pdf": {}}})
+    assert parsed.run_id == "r1"
+    assert parsed.status is None
+    assert parsed.documents == {"a.pdf": {}}
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"format": "idp-regression-run-artifact/999", "run_id": "r", "status": "complete",
+         "documents": {}},
+        {"format": run_artifact.ARTIFACT_FORMAT, "run_id": "r", "status": "done",
+         "documents": {}},
+        {"format": run_artifact.ARTIFACT_FORMAT, "run_id": "r", "status": "complete",
+         "documents": []},
+        {"format": run_artifact.ARTIFACT_FORMAT, "run_id": "", "status": "complete",
+         "documents": {}},
+        {"a": {}, "b": {}},
+        [],
+    ],
+)
+def test_anything_that_is_not_an_artifact_is_refused(data: object) -> None:
+    with pytest.raises(ValueError):
+        run_artifact.parse_run_artifact(data)
+
+
+@pytest.mark.parametrize(
+    ("gates", "status", "expected"),
+    [
+        (["PASS", "PASS"], "complete", "PASS"),
+        (["PASS", "FAIL"], "complete", "FAIL"),
+        # A known failure stays known however the run ended.
+        (["FAIL"], "aborted", "FAIL"),
+        (["FAIL"], None, "FAIL"),
+        # The DEBT-91 cases: none of these is a pass.
+        (["PASS"], "aborted", "INCOMPLETE"),
+        ([], "aborted", "INCOMPLETE"),
+        (["PASS"], None, "INCOMPLETE"),
+        (["PASS", "UNKNOWN"], "complete", "INCOMPLETE"),
+        ([], "complete", "INCOMPLETE"),
+    ],
+)
+def test_run_level_gate_is_pass_only_for_a_complete_run_of_passing_documents(
+    gates: list[str], status: run_artifact.RunStatus | None, expected: str
+) -> None:
+    assert run_artifact.run_level_gate(gates, status) == expected

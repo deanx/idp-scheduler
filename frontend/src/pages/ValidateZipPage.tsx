@@ -673,6 +673,12 @@ function JobPanel({
               the gate working, not the tool failing — the exit code <em>is</em> the gate.
             </p>
           )}
+          {verdict === "RUN FAILED" && job.summary?.run_incomplete && (
+            <p className="small muted" style={{ marginBottom: 0 }}>
+              The validation run aborted ({job.summary.run_incomplete}). Its partial results are
+              not counted: the documents it did not reach were never measured.
+            </p>
+          )}
           {verdict === "RUN FAILED" && (
             <p className="small muted" style={{ marginBottom: 0 }}>
               The batch did not complete. Extractions already spent are not refunded; re-running

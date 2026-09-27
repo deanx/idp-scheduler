@@ -23,6 +23,7 @@ import pytest
 fastapi = pytest.importorskip("fastapi", reason="the `ui` extra is not installed")
 from fastapi.testclient import TestClient  # noqa: E402
 
+from idp_regression.orchestration.run_artifact import artifact_envelope  # noqa: E402
 from idp_regression.ui import jobs, preflight, workspace  # noqa: E402
 from idp_regression.ui.api import create_app  # noqa: E402
 
@@ -258,7 +259,7 @@ def test_a_run_read_against_a_floor_still_fails_the_gate(tmp_path: Path) -> None
             }
         }
         (artifacts / f"{run_id}.json").write_text(
-            json.dumps({run_id: documents}), encoding="utf-8"
+            json.dumps(artifact_envelope(run_id, documents, status="complete")), encoding="utf-8"
         )
 
         floors = workspace.noise_floor_dir()
@@ -304,7 +305,11 @@ def test_a_floor_job_never_claims_a_run_artifact(tmp_path: Path) -> None:
         run_id = "9999" * 8
         (artifacts / f"{run_id}.json").write_text(
             json.dumps(
-                {run_id: {"someone-elses.pdf": {"total": {"verdict": "match", "critical": True}}}}
+                artifact_envelope(
+                    run_id,
+                    {"someone-elses.pdf": {"total": {"verdict": "match", "critical": True}}},
+                    status="complete",
+                )
             ),
             encoding="utf-8",
         )

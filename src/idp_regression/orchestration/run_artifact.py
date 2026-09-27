@@ -48,6 +48,19 @@ path), and swallowed. `write_run_artifact` NEVER raises and NEVER
 influences `run_eval`'s exit code — the gate is the contract (INV-08,
 CT-04), and a debugging convenience must not be able to turn an
 otherwise-passing run into a failed one, or vice versa.
+
+**Completeness travels with the verdicts (DEBT-91).** An aborted run
+writes an artifact too -- whatever was classified before the abort -- and
+the original envelope, `{run_id: {document_id: fields}}`, did not say so.
+Every reader then recomputed the gate from the documents that happened to
+be present, so an abort before the first document read back as "all 0
+documents passed" and `show_run` exited 0 on a run whose `run_eval`
+exited 1. The envelope is now `ARTIFACT_FORMAT` and records `status`
+(`complete` / `aborted`) and, for an abort, a reason from the taxonomy.
+Readers go through `parse_run_artifact` + `run_level_gate`, and a run is
+`PASS` only when it says it completed: an aborted run, a pre-DEBT-91
+artifact that cannot say, or a document whose gate cannot be computed is
+`INCOMPLETE`, never `PASS`. A known failure still reads `FAIL`.
 """
 
 from __future__ import annotations
@@ -56,6 +69,8 @@ import json
 import logging
 import os
 import re
+from collections.abc import Iterable
+from typing import Any, Literal, NamedTuple
 
 from idp_regression.classifier.types import VerdictMap
 from idp_regression.orchestration.log_sanitize import frame_location
@@ -95,15 +110,94 @@ def artifact_path(run_id: str) -> str:
     return os.path.join(ARTIFACT_DIR_NAME, f"{run_id}.json")
 
 
-def write_run_artifact(run_id: str, verdict_maps: dict[str, VerdictMap]) -> None:
+#: The envelope written since DEBT-91. A top-level `format` key is what
+#: tells it apart from the legacy single-key `{run_id: documents}` shape,
+#: which `parse_run_artifact` still reads (status unknown).
+ARTIFACT_FORMAT = "idp-regression-run-artifact/2"
+
+RunStatus = Literal["complete", "aborted"]
+RunGate = Literal["PASS", "FAIL", "INCOMPLETE"]
+
+
+class RunArtifact(NamedTuple):
+    run_id: str
+    #: None only for a legacy artifact, which never recorded it.
+    status: RunStatus | None
+    abort_reason: str | None
+    documents: dict[str, Any]
+
+
+def artifact_envelope(
+    run_id: str,
+    verdict_maps: dict[str, VerdictMap] | dict[str, Any],
+    *,
+    status: RunStatus,
+    abort_reason: str | None = None,
+) -> dict[str, Any]:
+    """The JSON document `write_run_artifact` writes. Pure, so a test can
+    build a real artifact without re-typing the shape."""
+    return {
+        "format": ARTIFACT_FORMAT,
+        "run_id": run_id,
+        "status": status,
+        "abort_reason": abort_reason if status == "aborted" else None,
+        "documents": verdict_maps,
+    }
+
+
+def parse_run_artifact(data: Any) -> RunArtifact:
+    """Read either envelope. Raises `ValueError` on anything else --
+    a reader must be able to tell "not an artifact" from "a run"."""
+    if isinstance(data, dict) and "format" in data:
+        if data.get("format") != ARTIFACT_FORMAT:
+            raise ValueError(f"unknown run artifact format {data.get('format')!r}")
+        run_id, status, documents = data.get("run_id"), data.get("status"), data.get("documents")
+        if not isinstance(run_id, str) or not run_id:
+            raise ValueError("run artifact has no run_id")
+        if status not in ("complete", "aborted"):
+            raise ValueError(f"run {run_id}: unknown status {status!r}")
+        if not isinstance(documents, dict):
+            raise ValueError(f"run {run_id} does not hold a document map")
+        reason = data.get("abort_reason")
+        return RunArtifact(run_id, status, reason if isinstance(reason, str) else None, documents)
+    if isinstance(data, dict) and len(data) == 1:
+        run_id = next(iter(data))
+        documents = data[run_id]
+        if not isinstance(documents, dict):
+            raise ValueError(f"run {run_id} does not hold a document map")
+        return RunArtifact(run_id, None, None, documents)
+    raise ValueError("not a run artifact (expected a format envelope or one run id)")
+
+
+def run_level_gate(document_gates: Iterable[str], status: RunStatus | None) -> RunGate:
+    """The one rule every reader applies. `FAIL` if any document failed --
+    a known failure stays known however the run ended. Otherwise `PASS`
+    only for a run that recorded `complete` and whose every document gate
+    is `PASS`; anything else (aborted, legacy/unknown, an uncomputable
+    document, no documents at all) is `INCOMPLETE`. Fail-closed: the
+    absence of evidence of a failure is not evidence of a pass."""
+    gates = list(document_gates)
+    if "FAIL" in gates:
+        return "FAIL"
+    if status == "complete" and gates and all(g == "PASS" for g in gates):
+        return "PASS"
+    return "INCOMPLETE"
+
+
+def write_run_artifact(
+    run_id: str,
+    verdict_maps: dict[str, VerdictMap],
+    *,
+    status: RunStatus,
+    abort_reason: str | None = None,
+) -> None:
     """Write `verdict_maps` (keyed `document_id -> field -> verdict
     entry`, one entry per document processed so far — a full run's set
     on success, or whatever was collected before an abort) to
-    `artifact_path(run_id)`, wrapped one level further by `run_id` itself
-    (`{run_id: {document_id: {field: verdict_entry}}}`) so the file's own
-    top-level content states which run it is, matching the ADR's literal
-    "keyed run_id -> document_id -> field" address, not merely the
-    filename.
+    `artifact_path(run_id)` inside `artifact_envelope`, which names the
+    run in the file's own content (not merely the filename) and records
+    whether it completed -- `status` is required so no call site can
+    forget to say (DEBT-91).
 
     Best-effort: see the module docstring's "Failure posture". Never
     raises, never returns a value a caller could branch on — the whole
@@ -134,7 +228,12 @@ def write_run_artifact(run_id: str, verdict_maps: dict[str, VerdictMap]) -> None
         os.chmod(ARTIFACT_DIR_NAME, _DIR_MODE)  # makedirs ignores mode for an existing dir
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, _FILE_MODE)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({run_id: verdict_maps}, fh, indent=2, sort_keys=True)
+            json.dump(
+                artifact_envelope(run_id, verdict_maps, status=status, abort_reason=abort_reason),
+                fh,
+                indent=2,
+                sort_keys=True,
+            )
     except Exception as exc:  # noqa: BLE001 - best-effort by design, must never raise
         logger.warning(
             "run_eval: run artifact write failed: %s at %s",

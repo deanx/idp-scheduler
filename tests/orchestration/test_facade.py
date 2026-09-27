@@ -2404,7 +2404,9 @@ def test_run_eval_writes_the_full_verdict_map_to_the_local_run_artifact_on_succe
     written = json.loads(
         Path(run_artifact.artifact_path("artifact-run-id-1")).read_text(encoding="utf-8")
     )
-    assert written["artifact-run-id-1"]["doc-1"]["total"] == {
+    assert written["status"] == "complete"
+    assert written["run_id"] == "artifact-run-id-1"
+    assert written["documents"]["doc-1"]["total"] == {
         "verdict": "match",
         "expected": "1250.00",
         "actual": "1250.00",
@@ -2452,7 +2454,11 @@ def test_run_eval_writes_a_partial_local_run_artifact_on_an_abort(
     written = json.loads(
         Path(run_artifact.artifact_path("artifact-run-id-2")).read_text(encoding="utf-8")
     )
-    assert list(written["artifact-run-id-2"].keys()) == ["doc-1"]
+    assert list(written["documents"].keys()) == ["doc-1"]
+    # DEBT-91: the partial map must SAY it is partial, or every reader
+    # recomputes a PASS from the one document that made it.
+    assert written["status"] == "aborted"
+    assert written["abort_reason"] == "auth_failure"
 
 
 def test_run_eval_exit_code_is_unaffected_by_a_run_artifact_write_failure(
@@ -2793,10 +2799,48 @@ def test_the_run_artifact_records_every_document_the_gate_consumed(
     written = sorted(Path(run_artifact.ARTIFACT_DIR_NAME).glob("*.json"))
     assert len(written) == 1, "exactly one artifact per run"
     recorded = json.loads(written[0].read_text(encoding="utf-8"))
-    (documents,) = recorded.values()  # {run_id: {document_id: verdicts}}
+    documents = recorded["documents"]
 
     assert len(documents) == len(items), (
         f"the gate consumed {len(items)} documents but the artifact records "
         f"{len(documents)} -- the evidence file disagrees with the exit code"
     )
     assert set(documents) == {item["document_id"] for item in items}
+
+
+def test_an_unexpected_error_mid_run_records_the_artifact_as_aborted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: object,
+) -> None:
+    """DEBT-91, the catch-all path: an untyped exception on the second
+    document must leave an artifact that says it is partial, with a fixed
+    reason rather than anything from the exception (INV-02)."""
+    from idp_regression.orchestration import run_artifact
+
+    dataset = _two_item_dataset()
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    monkeypatch.setattr(facade, "make_platform", lambda: _FakePlatform(dataset))
+    monkeypatch.setattr(facade, "generate_run_id", lambda: "artifact-run-id-3")
+
+    path1, actual1 = _matching_actual_for("/documents", "doc-1")
+    fake_idp = _FakeIDPAdapter({path1: actual1})
+
+    def _extract(document_path: str, action_id: str, version: str) -> object:
+        if document_path == path1:
+            return actual1
+        raise RuntimeError("secret-looking detail that must not be recorded")
+
+    fake_idp.extract = _extract  # type: ignore[method-assign]
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda org_id: fake_idp)
+
+    exit_code = run_eval(
+        "12345678-1234-1234-1234-123456789012", "1.0", "nightly", "idp-regression-golden", "org-t"
+    )
+
+    assert exit_code != 0
+    text = Path(run_artifact.artifact_path("artifact-run-id-3")).read_text(encoding="utf-8")
+    written = json.loads(text)
+    assert written["status"] == "aborted"
+    assert written["abort_reason"] == "unexpected_error"
+    assert "secret-looking" not in text

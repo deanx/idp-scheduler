@@ -5,7 +5,7 @@ export function Badge({ kind, children }: { kind: string; children: ReactNode })
   return <span className={`badge ${kind}`}>{children}</span>;
 }
 
-export function Gate({ value }: { value: "PASS" | "FAIL" | "UNKNOWN" }) {
+export function Gate({ value }: { value: "PASS" | "FAIL" | "INCOMPLETE" | "UNKNOWN" }) {
   const kind = value === "PASS" ? "pass" : value === "FAIL" ? "solid-fail" : "muted";
   return <Badge kind={kind}>{value}</Badge>;
 }

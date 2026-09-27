@@ -17,13 +17,14 @@ import json
 import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
 fastapi = pytest.importorskip("fastapi", reason="the `ui` extra is not installed")
 from fastapi.testclient import TestClient  # noqa: E402
 
+from idp_regression.orchestration.run_artifact import artifact_envelope  # noqa: E402
 from idp_regression.ui import jobs, preflight, workspace  # noqa: E402
 from idp_regression.ui.api import create_app  # noqa: E402
 
@@ -159,7 +160,10 @@ class TestF2ExperimentPrefixAttribution:
     @staticmethod
     def write(directory: Path, run_id: str) -> None:
         (directory / f"{run_id}.json").write_text(
-            json.dumps({run_id: {"a.pdf": {"total": {"verdict": "match", "critical": True}}}}),
+            json.dumps(artifact_envelope(
+                run_id, {"a.pdf": {"total": {"verdict": "match", "critical": True}}},
+                status="complete",
+            )),
             encoding="utf-8",
         )
 
@@ -223,12 +227,19 @@ class TestF3ArtifactMustAgreeWithTheExitCode:
         workspace.set_workspace(previous)
 
     @staticmethod
-    def write(directory: Path, run_id: str, *, failing: bool) -> None:
+    def write(
+        directory: Path,
+        run_id: str,
+        *,
+        failing: bool,
+        status: Literal["complete", "aborted"] = "complete",
+    ) -> None:
         verdict = "missing" if failing else "match"
         (directory / f"{run_id}.json").write_text(
             json.dumps(
-                {
-                    run_id: {
+                artifact_envelope(
+                    run_id,
+                    {
                         "a.pdf": {
                             "total": {
                                 "verdict": verdict,
@@ -237,8 +248,10 @@ class TestF3ArtifactMustAgreeWithTheExitCode:
                                 "actual": None if failing else "1.00",
                             }
                         }
-                    }
-                }
+                    },
+                    status=status,
+                    abort_reason="auth_failure" if status == "aborted" else None,
+                )
             ),
             encoding="utf-8",
         )
@@ -256,6 +269,23 @@ class TestF3ArtifactMustAgreeWithTheExitCode:
         assert summary["run_id"] is None
         assert summary["changed_documents"] is None
         assert "disagrees with this job" in summary["artifact_discrepancy"]
+
+    def test_an_aborted_artifact_is_never_counted_as_still_valid_documents(
+        self, artifacts: Path
+    ) -> None:
+        """DEBT-91: an aborted run leaves a PARTIAL artifact with no failing
+        document in it. Its gate is INCOMPLETE -- consistent with the job's
+        non-zero exit, so it is claimed -- but the documents it happens to
+        hold are not "still valid", and neither is any count derived from
+        them. The summary names the abort instead."""
+        run_id = "eeee4444" + "4" * 24
+        self.write(artifacts, run_id, failing=False, status="aborted")
+        summary = jobs.summarize([f"experiment=x-{run_id[:8]}"], 1, since=0.0)
+        assert summary["run_id"] == run_id
+        assert summary["run_incomplete"] == "auth_failure"
+        assert summary["still_valid_documents"] is None
+        assert summary["changed_documents"] is None
+        assert summary["verdict"] == "RUN FAILED"
 
     def test_a_failing_artifact_under_a_passing_job_is_not_claimed(
         self, artifacts: Path

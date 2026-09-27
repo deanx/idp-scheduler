@@ -22,10 +22,18 @@ export interface RunSummary {
   recorded_at: string;
   documents?: number;
   failing_documents?: number;
-  gate?: "PASS" | "FAIL";
+  /** INCOMPLETE: the run aborted, or its artifact predates completeness
+   *  recording — never a pass (DEBT-91). */
+  gate?: RunGate;
+  status?: RunStatus;
+  abort_reason?: string | null;
   verdicts?: Record<string, number>;
   error?: string;
 }
+
+export type RunGate = "PASS" | "FAIL" | "INCOMPLETE";
+/** `null` for an artifact written before completeness was recorded. */
+export type RunStatus = "complete" | "aborted" | null;
 
 export interface Leaf {
   label: string;
@@ -60,7 +68,9 @@ export interface FieldComparison {
 export interface RunDetail {
   run_id: string;
   recorded_at: string;
-  gate: "PASS" | "FAIL";
+  gate: RunGate;
+  status: RunStatus;
+  abort_reason: string | null;
   baseline: { name: string; summary: unknown; fields_with_floor: number } | null;
   field_comparison: Record<string, FieldComparison>;
   documents: RunDocument[];
@@ -189,6 +199,9 @@ export interface Job {
     /** Why a result is missing, when one is. */
     note?: string;
     artifact_discrepancy?: string;
+    /** Set when the run artifact says the run aborted (DEBT-91): the
+     *  reason, and no document counts. */
+    run_incomplete?: string;
     /** From the run artifact and the authoritative gate — not scraped text. */
     run_id?: string | null;
     documents?: number | null;

@@ -28,6 +28,11 @@ from pathlib import Path
 from typing import Any
 
 from idp_regression.classifier.gate import overall_gate
+from idp_regression.orchestration.run_artifact import (
+    RunArtifact,
+    parse_run_artifact,
+    run_level_gate,
+)
 from idp_regression.ui import workspace
 from idp_regression.ui.scripts_bridge import load
 
@@ -61,22 +66,15 @@ def _mtime(path: Path) -> str:
 # Runs
 # --------------------------------------------------------------------------
 
-def _artifact_payload(path: Path) -> tuple[str, dict[str, Any]]:
-    """`(run_id, {document_id: verdict_map})` from one artifact file.
-
-    The artifact is `{run_id: {document_id: fields}}` -- a single-key
-    envelope, so the run id survives a renamed file.
-    """
+def _artifact_payload(path: Path) -> RunArtifact:
+    """One artifact file, through `run_artifact.parse_run_artifact` -- the
+    single reader of both envelopes, so completeness (DEBT-91) cannot be
+    read one way here and another way in `show_run`."""
     data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict) or len(data) != 1:
-        raise ValueError(
-            f"{path.name} is not a run artifact (expected one run id at the top level)"
-        )
-    run_id = next(iter(data))
-    documents = data[run_id]
-    if not isinstance(documents, dict):
-        raise ValueError(f"{path.name}: run {run_id} does not hold a document map")
-    return run_id, documents
+    try:
+        return parse_run_artifact(data)
+    except ValueError as exc:
+        raise ValueError(f"{path.name}: {exc}") from None
 
 
 def _document_gate(fields: dict[str, Any]) -> str:
@@ -106,22 +104,23 @@ def list_runs(artifact_dir: Path | None = None) -> list[dict[str, Any]]:
     runs: list[dict[str, Any]] = []
     for path in sorted(root.glob("*.json"), key=lambda p: -p.stat().st_mtime):
         try:
-            run_id, documents = _artifact_payload(path)
+            artifact = _artifact_payload(path)
         except (ValueError, json.JSONDecodeError, OSError) as exc:
             runs.append({"run_id": path.stem, "error": str(exc), "recorded_at": _mtime(path)})
             continue
         counts: Counter[str] = Counter()
-        failing = 0
-        for fields in documents.values():
+        gates: list[str] = []
+        for fields in artifact.documents.values():
             counts.update(show_run._counts(fields))
-            if _document_gate(fields) == "FAIL":
-                failing += 1
+            gates.append(_document_gate(fields))
         runs.append({
-            "run_id": run_id,
+            "run_id": artifact.run_id,
             "recorded_at": _mtime(path),
-            "documents": len(documents),
-            "failing_documents": failing,
-            "gate": "FAIL" if failing else "PASS",
+            "documents": len(artifact.documents),
+            "failing_documents": gates.count("FAIL"),
+            "gate": run_level_gate(gates, artifact.status),
+            "status": artifact.status,
+            "abort_reason": artifact.abort_reason,
             "verdicts": dict(sorted(counts.items())),
         })
     return runs
@@ -137,7 +136,7 @@ def _resolve_artifact(run_id: str, artifact_dir: Path | None = None) -> Path:
     # renamed artifact is still reachable.
     for path in root.glob("*.json"):
         try:
-            if _artifact_payload(path)[0] == run_id:
+            if _artifact_payload(path).run_id == run_id:
                 return path
         except (ValueError, json.JSONDecodeError, OSError):
             continue
@@ -165,7 +164,8 @@ def read_run(
     """
     show_run = _show_run()
     path = _resolve_artifact(run_id, artifact_dir)
-    resolved_id, documents = _artifact_payload(path)
+    artifact = _artifact_payload(path)
+    resolved_id, documents = artifact.run_id, artifact.documents
 
     comparison: dict[str, dict[str, Any]] = {}
     baseline_meta: dict[str, Any] | None = None
@@ -212,7 +212,9 @@ def read_run(
     return {
         "run_id": resolved_id,
         "recorded_at": _mtime(path),
-        "gate": "FAIL" if any(d["gate"] == "FAIL" for d in out_documents) else "PASS",
+        "gate": run_level_gate((d["gate"] for d in out_documents), artifact.status),
+        "status": artifact.status,
+        "abort_reason": artifact.abort_reason,
         "baseline": baseline_meta,
         "field_comparison": comparison,
         "documents": out_documents,

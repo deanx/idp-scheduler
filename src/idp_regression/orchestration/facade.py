@@ -945,7 +945,7 @@ def run_eval(
         # ADR-0007 Option E: best-effort, whatever was classified before
         # the abort -- never affects the exit code below (INV-08/CT-04),
         # see `write_run_artifact`'s own docstring for the failure posture.
-        write_run_artifact(run_id, verdict_maps)
+        write_run_artifact(run_id, verdict_maps, status="aborted", abort_reason=exc.reason)
         logger.error("run_eval: %s: %s", exc.reason, sanitize_for_log(str(exc)))
         _log_run_end("aborted", 1, pass_count=passed_count, fail_count=failed_count)
         return 1
@@ -973,7 +973,9 @@ def run_eval(
         # ADR-0007 Option E: same best-effort shape as the marker above --
         # whatever was classified before the unexpected error, never
         # touching the exit code (INV-08/CT-04).
-        write_run_artifact(run_id, verdict_maps)
+        write_run_artifact(
+            run_id, verdict_maps, status="aborted", abort_reason="unexpected_error"
+        )
         logger.error(
             "run_eval: unexpected error: %s at %s",
             type(exc).__name__,
@@ -988,7 +990,7 @@ def run_eval(
     # best-effort, never able to turn this otherwise-passing run into a
     # failure (INV-08/CT-04 -- the exit code a few lines down never reads
     # anything this call did or didn't do).
-    write_run_artifact(run_id, verdict_maps)
+    write_run_artifact(run_id, verdict_maps, status="complete")
 
     # ADR-0005 #9 step 5: mark_run_status("complete", ...), best-effort --
     # INV-08 holds trivially, the exit code below never reads this marker

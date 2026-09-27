@@ -42,6 +42,15 @@ export function RunDetailPage({
         {run.data && <Gate value={run.data.gate} />}
       </div>
 
+      {run.data && run.data.gate === "INCOMPLETE" && (
+        <div className="panel fail">
+          <strong>This run did not finish, so it is not a pass.</strong>{" "}
+          {run.data.status === "aborted"
+            ? `It aborted (${run.data.abort_reason ?? "reason not recorded"}); the documents below are only those classified before the abort.`
+            : "Its artifact predates completeness recording, so it cannot say whether every document was measured."}
+        </div>
+      )}
+
       <div className="panel">
         <div className="row">
           <div>

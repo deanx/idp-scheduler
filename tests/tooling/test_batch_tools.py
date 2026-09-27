@@ -27,9 +27,11 @@ import stat
 import sys
 from pathlib import Path
 from types import ModuleType
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pytest
+
+from idp_regression.orchestration.run_artifact import artifact_envelope
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
@@ -1122,7 +1124,7 @@ def _artifact(tmp_path: Path, documents: dict[str, Any]) -> Path:
     artifact_dir = tmp_path / ".idp-regression-run-artifacts"
     artifact_dir.mkdir()
     path = artifact_dir / "runid.json"
-    path.write_text(json.dumps({"runid": documents}))
+    path.write_text(json.dumps(artifact_envelope("runid", documents, status="complete")))
     return path
 
 
@@ -2646,3 +2648,58 @@ def test_pin_refuses_a_path_unsafe_action_or_version(tmp_path: Path) -> None:
     )
 
     assert (exit_code, summary) == (2, {})
+
+
+# --- DEBT-91: show_run must not report an aborted run as a pass ------------
+
+
+def _write_envelope(tmp_path: Path, envelope: dict[str, Any]) -> Path:
+    artifact_dir = tmp_path / ".idp-regression-run-artifacts"
+    artifact_dir.mkdir(exist_ok=True)
+    path = artifact_dir / "runid.json"
+    path.write_text(json.dumps(envelope))
+    return path
+
+
+@pytest.mark.parametrize(
+    ("documents", "status"),
+    [
+        ({}, "aborted"),  # aborted before the first document
+        ({"a.pdf": {"total": _cell("match")}}, "aborted"),  # aborted after a passing one
+    ],
+)
+def test_show_run_never_reports_an_aborted_run_as_a_pass(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    documents: dict[str, Any],
+    status: Literal["complete", "aborted"],
+) -> None:
+    path = _write_envelope(
+        tmp_path,
+        artifact_envelope("runid", documents, status=status, abort_reason="auth_failure"),
+    )
+    rc = show_run.main([str(path)])
+    out = capsys.readouterr().out
+    assert rc == 1, "run_eval exited non-zero on this run; show_run must not say otherwise"
+    assert "OVERALL  INCOMPLETE" in out
+    assert "ABORTED (auth_failure)" in out
+    assert "OVERALL  PASS" not in out
+
+
+def test_show_run_cannot_vouch_for_a_legacy_artifact(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_envelope(tmp_path, {"runid": {"a.pdf": {"total": _cell("match")}}})
+    assert show_run.main([str(path)]) == 1
+    assert "OVERALL  INCOMPLETE" in capsys.readouterr().out
+
+
+def test_show_run_still_passes_a_complete_passing_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _write_envelope(
+        tmp_path,
+        artifact_envelope("runid", {"a.pdf": {"total": _cell("match")}}, status="complete"),
+    )
+    assert show_run.main([str(path)]) == 0
+    assert "OVERALL  PASS" in capsys.readouterr().out

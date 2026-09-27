@@ -893,13 +893,24 @@ def summarize(
     # verdict to another run's document counts would present a fiction as
     # fact to someone deciding whether a model swap is safe -- so the
     # counts are dropped and the mismatch is named, rather than shown.
-    if (detail.get("gate") == "FAIL") != (returncode != 0):
+    # A run that did not PASS (FAIL, or INCOMPLETE -- aborted, DEBT-91)
+    # must be one that exited non-zero, and vice versa.
+    if (detail.get("gate") != "PASS") != (returncode != 0):
         summary["run_id"] = None
         summary["artifact_discrepancy"] = (
             f"a run artifact was found but its gate ({detail.get('gate')}) disagrees with this "
             f"job's exit code ({returncode}); it is not this job's result, so no per-document "
             "counts are shown"
         )
+        return summary
+
+    # DEBT-91: an aborted run's artifact holds only what was classified
+    # before the abort. Counting those as "still valid" would present a
+    # partial measurement as a result, so an INCOMPLETE run reports the
+    # abort and no counts. It is a broken run, not a regression.
+    if detail.get("gate") == "INCOMPLETE":
+        summary["verdict"] = "RUN FAILED"
+        summary["run_incomplete"] = detail.get("abort_reason") or "status not recorded"
         return summary
 
     documents = detail.get("documents", [])
