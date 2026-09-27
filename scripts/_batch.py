@@ -206,16 +206,59 @@ def ensure_private_dir(path: Path) -> None:
     os.chmod(path, DIR_MODE)
 
 
+def make_private_parents(path: Path) -> None:
+    """Create every MISSING directory of `path`, owner-only. An existing
+    directory is never touched.
+
+    `ensure_private_dir` tightens an existing directory on purpose, for
+    directories a tool OWNS (a captures dir, an extraction target). Applied
+    to the parent of an arbitrary output file it chmodded whatever the
+    operator happened to name: `--out golden.json` set the working directory
+    to 0700, `--extract-to ~/x` their folder, and `--out /tmp/floor.json`
+    raised PermissionError on root-owned `/tmp` -- in `noise_floor`, AFTER
+    every extraction had been paid for (DEBT-99). An output file is
+    protected by its own 0600 mode; its parent is the operator's."""
+    missing: list[Path] = []
+    current = path
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    for directory in reversed(missing):
+        # A umask can only REMOVE bits, so 0o700 cannot come out wider.
+        directory.mkdir(mode=DIR_MODE)
+
+
+class OutputNotWritableError(Exception):
+    """The output path cannot be written -- raised BEFORE any quota is spent."""
+
+
+def assert_writable_output(path: Path) -> None:
+    """Fail before spending, not after. Creates missing parents (owner-only,
+    as `make_private_parents` does) and checks the directory accepts a new
+    file. A report that cannot be written after N extractions is N
+    extractions lost."""
+    try:
+        make_private_parents(path.parent)
+    except OSError as exc:
+        raise OutputNotWritableError(
+            f"cannot create {path.parent} for the output ({type(exc).__name__})"
+        ) from None
+    if not os.access(path.parent, os.W_OK | os.X_OK):
+        raise OutputNotWritableError(f"{path.parent} is not writable by this user")
+
+
 def write_private_json(path: Path, payload: object) -> None:
     """Write `payload` as JSON, owner-only, via a same-directory temp
     file and an atomic rename -- so a crash mid-write leaves the previous
     good file, never a truncated one a later `--resume` would fail to
-    parse."""
-    ensure_private_dir(path.parent)
+    parse. The temp file is CREATED 0600 (never written first and chmodded
+    after), and an existing parent directory is left as it is (DEBT-99)."""
+    make_private_parents(path.parent)
     tmp = path.with_name(f".{path.name}.partial")
-    with open(tmp, "w", encoding="utf-8") as fh:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, FILE_MODE)
+    os.fchmod(fd, FILE_MODE)  # a pre-existing .partial keeps its old mode otherwise
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-    os.chmod(tmp, FILE_MODE)
     os.replace(tmp, path)
 
 

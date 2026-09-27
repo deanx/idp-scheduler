@@ -3470,3 +3470,48 @@ def test_run_outcome_calls_an_unreadable_artifact_a_failed_run(tmp_path: Path) -
     arts.mkdir()
     (arts / "bad.json").write_text("{not json")
     assert batch.run_outcome(1, since=0.0, artifact_dir=arts)[0] == "RUN FAILED"
+
+
+# --- DEBT-99: an output file never chmods the operator's directory ----------
+
+
+def test_writing_an_output_leaves_an_existing_parent_alone(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    os.chmod(shared, 0o755)
+    batch.write_private_json(shared / "golden.json", {"a": 1})
+    assert stat.S_IMODE(shared.stat().st_mode) == 0o755, "the operator's directory is theirs"
+    assert stat.S_IMODE((shared / "golden.json").stat().st_mode) == 0o600
+
+
+def test_writing_an_output_creates_missing_parents_owner_only(tmp_path: Path) -> None:
+    target = tmp_path / "new" / "deeper" / "report.json"
+    batch.write_private_json(target, {})
+    assert stat.S_IMODE((tmp_path / "new").stat().st_mode) == 0o700
+    assert stat.S_IMODE((tmp_path / "new" / "deeper").stat().st_mode) == 0o700
+
+
+def test_a_stale_partial_file_is_rewritten_owner_only(tmp_path: Path) -> None:
+    stale = tmp_path / ".report.json.partial"
+    stale.write_text("old")
+    os.chmod(stale, 0o644)
+    batch.write_private_json(tmp_path / "report.json", {})
+    assert stat.S_IMODE((tmp_path / "report.json").stat().st_mode) == 0o600
+
+
+def test_noise_floor_refuses_an_unwritable_report_path_before_spending(tmp_path: Path) -> None:
+    """A report written once, at the end, to a path that cannot take it
+    used to lose every extraction the run had paid for."""
+    document_dir = _documents(tmp_path, 1)
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    os.chmod(locked, 0o500)
+    adapter = _ScriptedAdapter({"doc-001.pdf": [_normalized(), _normalized()]})
+    try:
+        exit_code, _ = noise_floor.run(
+            _noise_args(tmp_path, document_dir, out=locked / "floor.json"), adapter
+        )
+    finally:
+        os.chmod(locked, 0o700)
+    assert exit_code == 2
+    assert adapter.calls == 0

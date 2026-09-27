@@ -97,9 +97,11 @@ if str(_REPO_ROOT / "src") not in sys.path:
 from _batch import (  # noqa: E402
     DEFAULT_DOCUMENT_PATTERNS,
     DocumentFailedError,
+    OutputNotWritableError,
     QuotaRefusedError,
     SupportsExtract,
     ZipRejectedError,
+    assert_writable_output,
     confirm_cost,
     discover_documents,
     extract_documents_from_zip,
@@ -352,6 +354,19 @@ def run(args: argparse.Namespace, adapter: SupportsExtract | None) -> tuple[int,
         documents = discover_documents(document_dir, args.glob, args.max_documents)
     print(f"noise_floor: {len(documents)} document(s) sampled", file=sys.stderr)
 
+    # Where the report goes is decided and CHECKED before anything is spent:
+    # it is written once, at the end, so an unwritable path used to lose the
+    # whole paid-for measurement (DEBT-99).
+    out = args.out or DEFAULT_OUT_DIR / (
+        f"noise-floor-{dt.datetime.now(dt.UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
+    )
+    if not args.plan:
+        try:
+            assert_writable_output(out)
+        except OutputNotWritableError as exc:
+            print(f"noise_floor: refusing to start — {exc}", file=sys.stderr)
+            return 2, {}
+
     try:
         confirm_cost(
             documents=len(documents), extractions_each=args.repeats, approved=args.yes or args.plan
@@ -456,9 +471,6 @@ def run(args: argparse.Namespace, adapter: SupportsExtract | None) -> tuple[int,
     if args.include_values:
         report["comparisons"] = comparisons
 
-    out = args.out or DEFAULT_OUT_DIR / (
-        f"noise-floor-{dt.datetime.now(dt.UTC).strftime('%Y%m%dT%H%M%SZ')}.json"
-    )
     write_private_json(out, report)
     report["_out"] = str(out)
     return (1 if failures else 0), report
