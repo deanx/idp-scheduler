@@ -1028,3 +1028,94 @@ def test_an_unsafe_prompt_name_is_rejected() -> None:
     with pytest.raises(MalformedIDPOutputError) as excinfo:
         normalize(raw, success_statuses={"SUCCEEDED"})
     assert excinfo.value.reason == "unsafe_prompt_key"
+
+
+# ---- DEBT-69(a) /test gate findings F-1..F-5 (2026-09-27) ------------------
+
+
+def test_a_question_shared_by_two_pages_is_a_duplicate() -> None:
+    """F-1 (M15/M17): the pages-vs-pages rule, unchanged by the map shape.
+    The same question answered on two pages is two claims for one key."""
+    raw = {
+        "status": "SUCCEEDED",
+        "pages": [
+            {"prompts": {"a": {"prompt": "vendor?", "answer": {"value": "A"}}}},
+            {"prompts": {"b": {"prompt": "vendor?", "answer": {"value": "B"}}}},
+        ],
+    }
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "duplicate_prompt"
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ({"value": "Acme", "confidenceScore": 88.0}, 0.88),  # the live 0-100 key (REG-11 D2)
+        ({"value": "Acme", "confidence": 0.7}, 0.7),
+        ({"value": "Acme"}, None),
+    ],
+)
+def test_a_prompt_answers_confidence_is_read_like_a_fields(
+    answer: dict[str, object], expected: float | None
+) -> None:
+    """F-2 (M09/M10): the REG-11 D2 class, on the one branch its pins did not
+    cover. A `confidenceScore` of 88 must arrive as 0.88, not be dropped."""
+    raw = {"status": "SUCCEEDED",
+           "prompts": {"v": {"prompt": "Who is the vendor?", "answer": answer}}}
+    got = normalize(raw, success_statuses={"SUCCEEDED"})["prompts"]["Who is the vendor?"]
+    if expected is None:
+        assert got.get("confidence") is None
+    else:
+        assert got.get("confidence") == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    "prompts",
+    [
+        {"SECRET-NAME\n": {"prompt": "ok?", "answer": {"value": "A"}}},
+        {"n": {"prompt": "SECRET-QUESTION\n", "answer": {"value": "A"}}},
+        {"n": "SECRET-ENTRY"},
+        {
+            "a": {"prompt": "SECRET-DUP", "answer": {"value": "A"}},
+            "b": {"prompt": "SECRET-DUP", "answer": {"value": "B"}},
+        },
+    ],
+)
+def test_no_prompt_name_question_or_entry_is_echoed_in_the_error(prompts: object) -> None:
+    """F-3 (M21-M24): INV-02 on every new raise."""
+    raw = {"status": "SUCCEEDED", "pages": [{"prompts": prompts}]}
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert "SECRET" not in str(excinfo.value)
+    assert "SECRET" not in repr(excinfo.value.__cause__)
+
+
+@pytest.mark.parametrize(
+    ("name", "ok"),
+    [
+        ("company main business?", True),  # outside the field-name charset, allowed here
+        ("x" * 200, True),
+        ("x" * 201, False),
+        ("", False),
+    ],
+)
+def test_the_prompt_name_follows_the_prompt_key_rule(name: str, ok: bool) -> None:
+    """F-4 (M06/M28/M29): the name's charset and 1..200 bounds."""
+    raw = {"status": "SUCCEEDED",
+           "pages": [{"prompts": {name: {"prompt": "q?", "answer": {"value": "A"}}}}]}
+    if ok:
+        assert normalize(raw, success_statuses={"SUCCEEDED"})["prompts"]["q?"]["answer"] == "A"
+    else:
+        with pytest.raises(MalformedIDPOutputError) as excinfo:
+            normalize(raw, success_statuses={"SUCCEEDED"})
+        assert excinfo.value.reason == "unsafe_prompt_key"
+
+
+def test_a_non_string_prompt_source_is_rejected() -> None:
+    """F-5 (M11)."""
+    raw = {"status": "SUCCEEDED",
+           "pages": [{"prompts": {"n": {"prompt": "q?", "source": 7, "answer": {"value": "A"}}}}]}
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize(raw, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "invalid_page"
