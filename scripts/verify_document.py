@@ -38,6 +38,7 @@ import argparse
 import datetime as dt
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,7 @@ from _batch import (  # noqa: E402
     extract_documents_from_zip,
     pinned_elsewhere,
     read_json_if_present,
+    run_outcome,
 )
 
 DEFAULT_STORE = Path(".idp-regression-pins")
@@ -361,6 +363,7 @@ def run(args: argparse.Namespace, run_eval: Any) -> tuple[int, dict[str, Any]]:
         file=sys.stderr,
     )
 
+    started = time.time()
     gate = run_eval(
         action,
         args.version,
@@ -386,6 +389,7 @@ def run(args: argparse.Namespace, run_eval: Any) -> tuple[int, dict[str, Any]]:
         "action": action_id,
         "goldens_dir": str(goldens_dir),
         "gate": gate,
+        "started": started,
     }
 
 
@@ -403,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
     if not summary:
         return exit_code
 
-    verdict = "STILL VALID" if exit_code == 0 else "CHANGED"
+    verdict, reason = run_outcome(exit_code, since=summary["started"])
     print("", file=sys.stderr)
     print("=" * 72, file=sys.stderr)
     print(
@@ -411,7 +415,14 @@ def main(argv: list[str] | None = None) -> int:
         f"{summary['trusted_version']}, re-read with {summary['version']}",
         file=sys.stderr,
     )
-    if exit_code != 0:
+    if verdict == "RUN FAILED":
+        print(
+            f"  Not a verdict on the new version: {reason}. Nothing here says the files "
+            "changed -- fix the cause and re-run.",
+            file=sys.stderr,
+        )
+    elif exit_code != 0:
+        print(f"  {reason}.", file=sys.stderr)
         print(
             "  A critical field's value differs from what the trusted version read.\n"
             "  See the detail:  .venv/bin/python scripts/show_run.py --failures-only",

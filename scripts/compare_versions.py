@@ -53,6 +53,7 @@ import argparse
 import hashlib
 import importlib.util
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +72,7 @@ from _batch import (  # noqa: E402
     extract_documents_from_zip,
     read_json_if_present,
     refuse_over_ceiling,
+    run_outcome,
 )
 
 DEFAULT_STORE = Path(".idp-regression-pins")
@@ -312,6 +314,7 @@ def run(args: argparse.Namespace, pin: Any, verify: Any) -> tuple[int, dict[str,
         verify_argv.append("--allow-missing")
     if args.run_name:
         verify_argv += ["--run", args.run_name]
+    verify_started = time.time()
     gate = verify.main(verify_argv)
 
     return gate, {
@@ -322,6 +325,7 @@ def run(args: argparse.Namespace, pin: Any, verify: Any) -> tuple[int, dict[str,
         "candidate_version": args.candidate_version,
         "pin_exit_code": pin_rc,
         "gate_exit_code": gate,
+        "verify_started": verify_started,
     }
 
 
@@ -338,7 +342,7 @@ def main(argv: list[str] | None = None) -> int:
     if not summary or "gate_exit_code" not in summary:
         return exit_code
 
-    verdict = "STILL VALID" if exit_code == 0 else "CHANGED"
+    verdict, reason = run_outcome(exit_code, since=summary["verify_started"])
     print("", file=sys.stderr)
     print("=" * 72, file=sys.stderr)
     print(
@@ -348,15 +352,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"  goldens     dataset {summary['dataset']!r}", file=sys.stderr)
     print(f"  documents   {summary['document_dir']}", file=sys.stderr)
-    if exit_code != 0:
+    if verdict == "RUN FAILED":
         print(
-            "\\n  A critical field's value differs from what the trusted version read.\\n"
+            f"\n  Not a verdict on {summary['candidate_version']}: {reason}. Nothing here "
+            "says the documents changed -- fix the cause and re-run.",
+            file=sys.stderr,
+        )
+    elif exit_code != 0:
+        print(
+            f"\n  {reason}: a critical field's value differs from what the trusted "
+            "version read.\n"
             "  Detail:  .venv/bin/python scripts/show_run.py --failures-only",
             file=sys.stderr,
         )
     else:
         print(
-            f"\\n  The goldens stay pinned: re-check a later version with\\n"
+            f"\n  The goldens stay pinned: re-check a later version with\n"
             f"    scripts/verify_document.py --all --dataset {summary['dataset']} "
             "--version <next> --yes",
             file=sys.stderr,

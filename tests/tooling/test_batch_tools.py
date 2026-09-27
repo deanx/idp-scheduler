@@ -3284,3 +3284,44 @@ def test_a_failing_re_provisioning_keeps_the_run_red(tmp_path: Path) -> None:
         _pin_args(tmp_path, document), lambda path: _raw(), _FakeStage(exit_code=1)
     )
     assert exit_code == 1 and summary["failures"]
+
+
+# --- DEBT-98: CHANGED means a document changed, nothing else ----------------
+
+
+def _outcome_artifact(
+    directory: Path, documents: dict[str, Any], status: Literal["complete", "aborted"]
+) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "r.json").write_text(
+        json.dumps(artifact_envelope("r", documents, status=status, abort_reason="timeout"))
+    )
+
+
+def test_run_outcome_calls_only_a_recorded_failure_changed(tmp_path: Path) -> None:
+    arts = tmp_path / "arts"
+    assert batch.run_outcome(0, since=0.0, artifact_dir=arts)[0] == "STILL VALID"
+    # A refusal before run_eval (rc 2), or an abort before any artifact.
+    verdict, reason = batch.run_outcome(2, since=0.0, artifact_dir=arts)
+    assert verdict == "RUN FAILED" and "before writing a result" in reason
+
+    _outcome_artifact(arts, {"a.pdf": {"total": _cell("wrong_value")}}, "complete")
+    assert batch.run_outcome(1, since=0.0, artifact_dir=arts)[0] == "CHANGED"
+
+    _outcome_artifact(arts, {"a.pdf": {"total": _cell("match")}}, "aborted")
+    verdict, reason = batch.run_outcome(1, since=0.0, artifact_dir=arts)
+    assert verdict == "RUN FAILED" and "aborted (timeout)" in reason
+
+
+def test_run_outcome_ignores_an_artifact_older_than_this_run(tmp_path: Path) -> None:
+    arts = tmp_path / "arts"
+    _outcome_artifact(arts, {"a.pdf": {"total": _cell("wrong_value")}}, "complete")
+    later = (arts / "r.json").stat().st_mtime + 60
+    assert batch.run_outcome(1, since=later, artifact_dir=arts)[0] == "RUN FAILED"
+
+
+def test_run_outcome_names_an_abort_after_a_real_failure(tmp_path: Path) -> None:
+    arts = tmp_path / "arts"
+    _outcome_artifact(arts, {"a.pdf": {"total": _cell("wrong_value")}}, "aborted")
+    verdict, reason = batch.run_outcome(1, since=0.0, artifact_dir=arts)
+    assert verdict == "CHANGED" and "ABORTED (timeout)" in reason

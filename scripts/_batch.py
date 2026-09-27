@@ -484,3 +484,69 @@ def extract_documents_from_zip(
             extracted.append(target)
 
     return sorted(extracted), skipped
+
+
+# ── what a validation run concluded ───────────────────────────────────
+
+
+def run_outcome(
+    returncode: int, *, since: float, artifact_dir: Path | None = None
+) -> tuple[str, str]:
+    """`(verdict, reason)` for a verification: STILL VALID, CHANGED or
+    RUN FAILED -- read from the RUN ARTIFACT, never from the exit code alone.
+
+    `run_eval` returns 1 for a gate FAIL and for an abort alike, and
+    `verify_document` returns 2 for its own refusals, so labelling every
+    non-zero exit `CHANGED -- a critical field's value differs` blamed the
+    model for plumbing failures (DEBT-98). The console's `jobs.summarize`
+    already read the artifact; this is the same rule for the CLI. Only a
+    run whose artifact records a failing document is CHANGED.
+
+    `since` bounds which artifact is this run's (the newest written after
+    it started). Two runs finishing in the same directory at once can
+    confuse that -- the console serialises jobs with a lock; a CLI user
+    running two at once gets the verdict of whichever wrote last."""
+    if returncode == 0:
+        return "STILL VALID", ""
+    from idp_regression.classifier.gate import overall_gate
+    from idp_regression.orchestration.run_artifact import (
+        ARTIFACT_DIR_NAME,
+        parse_run_artifact,
+        run_level_gate,
+    )
+
+    directory = artifact_dir if artifact_dir is not None else Path(ARTIFACT_DIR_NAME)
+    candidates = (
+        sorted(
+            (p for p in directory.glob("*.json") if p.stat().st_mtime >= since),
+            key=lambda p: p.stat().st_mtime,
+        )
+        if directory.is_dir()
+        else []
+    )
+    if not candidates:
+        return "RUN FAILED", "it stopped before writing a result -- see the messages above"
+    try:
+        artifact = parse_run_artifact(json.loads(candidates[-1].read_text(encoding="utf-8")))
+    except (ValueError, OSError):
+        return "RUN FAILED", "its result could not be read"
+    gates: list[str] = []
+    for fields in artifact.documents.values():
+        try:
+            gates.append(overall_gate(fields))
+        except Exception:  # noqa: BLE001 - an unreadable map is UNKNOWN, never a pass
+            gates.append("UNKNOWN")
+    gate = run_level_gate(gates, artifact.status)
+    if gate == "FAIL":
+        failed = gates.count("FAIL")
+        suffix = (
+            f"; the run then ABORTED ({artifact.abort_reason}), so documents after it "
+            "were not measured"
+            if artifact.status == "aborted"
+            else ""
+        )
+        return "CHANGED", f"{failed} document(s) failed the gate{suffix}"
+    if artifact.status == "aborted":
+        return "RUN FAILED", f"the run aborted ({artifact.abort_reason or 'reason not recorded'})"
+    return "RUN FAILED", "the exit code was non-zero but the result records no failure"
+
