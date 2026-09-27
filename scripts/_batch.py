@@ -248,6 +248,20 @@ def assert_writable_output(path: Path) -> None:
         raise OutputNotWritableError(f"{path.parent} is not writable by this user")
 
 
+def write_private_text(path: Path, text: str) -> None:
+    """`text` to `path`, owner-only, atomically -- for a text output that
+    carries extracted values (the reconciliation worklist). An existing
+    parent is left as it is (DEBT-99), so the FILE's own mode is the only
+    protection and it must never be the umask's."""
+    make_private_parents(path.parent)
+    tmp = path.with_name(f".{path.name}.partial")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, FILE_MODE)
+    os.fchmod(fd, FILE_MODE)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
 def write_private_json(path: Path, payload: object) -> None:
     """Write `payload` as JSON, owner-only, via a same-directory temp
     file and an atomic rename -- so a crash mid-write leaves the previous

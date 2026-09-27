@@ -3608,3 +3608,53 @@ def test_verify_asks_run_eval_for_exact_document_matches(tmp_path: Path) -> None
     verify_document.run(_verify_args(tmp_path, all=True), run_eval)
     (_, kwargs), = run_eval.calls
     assert kwargs["exact_documents"] is True
+
+
+# --- DEBT-100/99 review round: --from-captures and the worklist -------------
+
+
+def test_from_captures_refuses_a_document_whose_bytes_changed(tmp_path: Path) -> None:
+    document_dir = _documents(tmp_path, 2)
+    bootstrap.run(_bootstrap_args(tmp_path, document_dir), lambda d: _raw())
+    (document_dir / "doc-001.pdf").write_bytes(b"%PDF-a-different-invoice")
+    exit_code, _ = bootstrap.run(
+        _bootstrap_args(tmp_path, document_dir, from_captures=True), lambda d: _raw()
+    )
+    assert exit_code == 2
+
+
+def test_from_captures_without_a_document_dir_says_it_cannot_check(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    document_dir = _documents(tmp_path, 1)
+    bootstrap.run(_bootstrap_args(tmp_path, document_dir), lambda d: _raw())
+    capsys.readouterr()
+    exit_code, _ = bootstrap.run(
+        _bootstrap_args(tmp_path, None, from_captures=True), lambda d: _raw()
+    )
+    assert exit_code == 0
+    assert "NOT checked" in capsys.readouterr().err
+
+
+def test_the_review_worklist_is_owner_only_in_an_existing_open_directory(
+    tmp_path: Path,
+) -> None:
+    """It carries every drafted value. Once DEBT-99 stopped chmodding an
+    existing parent, nothing else was keeping it private."""
+    open_dir = tmp_path / "open"
+    open_dir.mkdir()
+    os.chmod(open_dir, 0o755)
+    document_dir = _documents(tmp_path, 1)
+    args = _bootstrap_args(tmp_path, document_dir, out=open_dir / "draft.json")
+
+    _, summary = bootstrap.run(args, lambda d: _raw())
+
+    assert stat.S_IMODE(Path(summary["review"]).stat().st_mode) == 0o600
+
+
+def test_a_stale_partial_worklist_is_rewritten_owner_only(tmp_path: Path) -> None:
+    stale = tmp_path / ".review.md.partial"
+    stale.write_text("old")
+    os.chmod(stale, 0o644)
+    batch.write_private_text(tmp_path / "review.md", "values")
+    assert stat.S_IMODE((tmp_path / "review.md").stat().st_mode) == 0o600

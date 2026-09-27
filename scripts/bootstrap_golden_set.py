@@ -97,6 +97,7 @@ from _batch import (  # noqa: E402
     read_json_if_present,
     refuse_over_ceiling,
     write_private_json,
+    write_private_text,
 )
 
 from idp_regression.orchestration.dotenv_support import load_dotenv  # noqa: E402
@@ -376,6 +377,30 @@ def run(
     if args.from_captures:
         sources = sorted(captures_dir.glob("*.raw.json"))
         documents = [Path(p.name.removesuffix(".raw.json")) for p in sources]
+        # Re-drafting reuses captures, so it needs the same byte check as
+        # --resume (DEBT-100 review): a file replaced under its name since it
+        # was captured must not be re-drafted from the old capture. Checkable
+        # only when the source directory is named; otherwise say so.
+        if document_dir:
+            changed = changed_since_recorded(
+                [Path(document_dir) / d.name for d in documents],
+                read_json_if_present(captures_dir / DIGESTS_FILE),
+            )
+            if changed:
+                print(
+                    f"bootstrap_golden_set: {len(changed)} document(s) differ from the "
+                    f"bytes they were captured from (e.g. {changed[0]!r}). Re-drafting "
+                    "from those captures would describe other content.",
+                    file=sys.stderr,
+                )
+                return 2, {}
+        else:
+            print(
+                "bootstrap_golden_set: --from-captures without --document-dir: the "
+                "captures are NOT checked against the current files. Pass --document-dir "
+                "to verify they are still the bytes that were captured.",
+                file=sys.stderr,
+            )
     else:
         # Refused BEFORE the resume filter: the ceiling is about the corpus,
         # and capping first is what made --resume re-select the same first
@@ -482,7 +507,10 @@ def run(
         write_private_json(args.out, golden_set)
 
     review_path = args.out.with_suffix(".review.md")
-    review_path.write_text(_review_worklist(golden_set, notes_by_key, args.review_sample))
+    # Every drafted value is in this file. It used to be written at the
+    # umask's mode, private only because writing the golden set had just
+    # chmodded its directory; DEBT-99 stopped that, so it protects itself.
+    write_private_text(review_path, _review_worklist(golden_set, notes_by_key, args.review_sample))
 
     summary = {
         "document_dir": str(document_dir) if document_dir else "",
