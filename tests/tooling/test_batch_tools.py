@@ -4154,3 +4154,15 @@ def test_mypys_configured_scope_matches_what_ci_checks() -> None:
         s["run"] for s in workflow["jobs"]["typecheck"]["steps"] if "mypy" in s.get("run", "")
     )
     assert ci_run.split()[1:] == configured
+
+
+def test_every_knob_the_adapter_reads_is_documented_in_env_example() -> None:
+    """DEBT-78: `.env.example` listed two of the five timing knobs, so an
+    operator reading it concluded the other three did not exist."""
+    import re
+
+    source = (REPO_ROOT / "src/idp_regression/adapter/idp_client.py").read_text()
+    read = set(re.findall(r'_(?:timing_env|int_env|statuses)\(\s*"(IDP_[A-Z_]+)"', source))
+    documented = (REPO_ROOT / ".env.example").read_text()
+    assert read, "the knob pattern matched nothing -- this test would pass vacuously"
+    assert {name for name in read if name not in documented} == set()
