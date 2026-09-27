@@ -161,8 +161,14 @@ main() {
   chmod 0700 "${LOG_DIR}"
 
   TS="$(date -u +%Y%m%dT%H%M%SZ)"
-  LOG_FILE="${LOG_DIR}/run-${TS}.log"
-  FAILURE_MARKER="${LOG_DIR}/FAILED-${TS}.marker"
+  # DEBT-113: the timestamp alone has one-second resolution, so a manual run
+  # and a launchd run starting in the same second shared a log, a status file
+  # and a failure marker -- the lock-busy one could delete the holder's status
+  # file, or report the holder's result as its own. The PID is unique among
+  # processes alive at the same moment, which is exactly the collision case.
+  RUN_KEY="${TS}-$$"
+  LOG_FILE="${LOG_DIR}/run-${RUN_KEY}.log"
+  FAILURE_MARKER="${LOG_DIR}/FAILED-${RUN_KEY}.marker"
 
   # L9 fix (resilience review, 2026-09-23, reproduced live with
   # `lockf … /bin/bash -c 'exit 75'`): the prior version read `lockf`'s own
@@ -176,7 +182,7 @@ main() {
   # the locked region, on its own channel -- `lockf`'s own exit code is
   # used ONLY to detect "did the wrapped command run at all", never to
   # stand in for the command's own exit status.
-  STATUS_FILE="${LOG_DIR}/.status-${TS}"
+  STATUS_FILE="${LOG_DIR}/.status-${RUN_KEY}"
   rm -f "${STATUS_FILE}"
 
   {

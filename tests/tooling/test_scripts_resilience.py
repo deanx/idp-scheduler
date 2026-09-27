@@ -606,3 +606,45 @@ def test_regression_run_workflow_passes_untrusted_input_only_via_env(tmp_path: P
     # L10: a timeout and a concurrency guard exist.
     assert job.get("timeout-minutes")
     assert doc.get("concurrency", {}).get("group")
+
+
+def test_two_runs_started_in_the_same_second_keep_separate_files(tmp_path: Path) -> None:
+    """DEBT-113. A fake `date` pins every call to ONE timestamp, so the
+    same-second collision is certain rather than a race to win. Named by
+    timestamp alone, the lock-busy second run deleted the holder's status
+    file (the holder then reported a false infrastructure failure) and both
+    wrote one log."""
+    scratch = _make_scratch_checkout(
+        tmp_path,
+        run_eval_local_body="#!/bin/bash\nsleep 3\nexit 0\n",
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_date = fake_bin / "date"
+    fake_date.write_text("#!/bin/bash\necho 20260927T120000Z\n")
+    fake_date.chmod(0o755)
+    env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+
+    first = subprocess.Popen(
+        ["bash", str(scratch / "scripts" / "run_eval_scheduled.sh")],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
+    try:
+        time.sleep(1)
+        second = subprocess.run(
+            ["bash", str(scratch / "scripts" / "run_eval_scheduled.sh")],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+    finally:
+        first.wait(timeout=30)
+
+    assert first.returncode == 0, "the holder's result must not be clobbered"
+    assert second.returncode == 0, "the second run is a lock-busy skip"
+    log_dir = scratch / "logs" / "scheduled-runs"
+    assert len(list(log_dir.glob("run-*.log"))) == 2
+    assert not list(log_dir.glob("FAILED-*.marker"))
