@@ -354,3 +354,17 @@ def test_an_uncomputable_document_makes_a_complete_run_incomplete(tmp_path: Path
     [run] = reader.list_runs(tmp_path)
     assert run["gate"] == "INCOMPLETE"
     assert reader.read_run("r1", artifact_dir=tmp_path)["gate"] == "INCOMPLETE"
+
+
+def test_a_critical_table_row_is_gate_failing_in_the_console(tmp_path: Path) -> None:
+    """DEBT-96, console side: `read_run` reuses show_run's leaf helpers."""
+    write_artifact(tmp_path, "r1", {"a.pdf": {"line_items": {
+        "critical": True,
+        "verdict": "detail",
+        "rows": [{"match_key": "SKU-1", "column": "amount", "verdict": "wrong_value",
+                  "expected": "1.00", "actual": "2.00"}],
+    }}})
+    detail = reader.read_run("r1", artifact_dir=tmp_path)
+    [doc] = detail["documents"]
+    assert doc["gate"] == "FAIL"
+    assert [leaf["gate_failing"] for leaf in doc["leaves"]] == [True]

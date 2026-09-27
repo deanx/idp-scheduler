@@ -125,14 +125,25 @@ def _counts(fields: dict[str, Any]) -> Counter[str]:
 
 
 def _leaves(fields: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
-    """(label, cell) for every leaf, tables flattened to name[key].column."""
+    """(label, cell) for every leaf, tables flattened to name[key].column.
+
+    A table ROW carries no `critical` of its own -- `overall_gate` fails a
+    table on its BLOCK's `critical` (a critical block with a missing /
+    wrong_value row). So each row leaf inherits the block's `critical`, and
+    never a `format_critical` (a table's wrong_format does not gate). Without
+    this, `_fails` never saw a table failure: table rows got no "FAILS THE
+    GATE" flag, and a document failing on a table column ABOVE the floor plus
+    a within-floor field was named as resting ENTIRELY on noise (DEBT-96)."""
     out: list[tuple[str, dict[str, Any]]] = []
     for name, entry in fields.items():
         if entry.get("verdict") == "detail":
+            block_critical = bool(entry.get("critical", False))
             for row in entry.get("rows", []):
                 col = row.get("column")
                 label = f"{name}[{row.get('match_key')}]" + (f".{col}" if col else "")
-                out.append((label, row))
+                out.append(
+                    (label, {**row, "critical": block_critical, "format_critical": False})
+                )
         else:
             out.append((name, entry))
     return out

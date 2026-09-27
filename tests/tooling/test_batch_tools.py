@@ -3190,3 +3190,54 @@ def test_calibrate_keeps_a_human_demotion_of_a_table() -> None:
 
     assert calibrated["d2"]["tables"]["line_items"]["critical"] is False
     assert calibrated["d3"]["tables"]["line_items"]["critical"] is True
+
+
+# --- DEBT-96: show_run sees a table failure ---------------------------------
+
+
+def _table(verdict: str, *, critical: bool = True) -> dict[str, Any]:
+    return {
+        "verdict": "detail",
+        "critical": critical,
+        "rows": [
+            {"match_key": "A", "column": "amount", "verdict": verdict,
+             "expected": "1.00", "actual": "2.00" if verdict != "match" else "1.00"},
+        ],
+    }
+
+
+def test_show_run_never_calls_a_table_regression_noise(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """d0 fails on `line_items.amount` (floor 0% -> ABOVE) and on `total`
+    (within the floor). The table failure is real, so d0 must NOT be named
+    as resting entirely on noise."""
+    documents = {
+        f"doc-{i:03d}.pdf": {
+            "total": _cell("wrong_value" if i <= 4 else "match"),
+            "line_items": _table("wrong_value" if i == 1 else "match"),
+        }
+        for i in range(1, 31)
+    }
+    artifact = _artifact(tmp_path, documents)
+    floor = _floor_report(
+        tmp_path,
+        {
+            "total": {"observations": 50, "unstable": 7, "instability_rate": 0.14},
+            "line_items.amount": {"observations": 50, "unstable": 0, "instability_rate": 0.0},
+        },
+    )
+
+    rc = show_run.main([str(artifact), "--baseline", str(floor)])
+
+    out = capsys.readouterr().out
+    assert rc == 1
+    noise_block = out.split("rest ENTIRELY", 1)[1] if "rest ENTIRELY" in out else ""
+    assert "doc-001.pdf" not in noise_block
+    assert "doc-002.pdf" in noise_block, "a total-only failure is still explained by the floor"
+    assert "line_items[A].amount" in out and "FAILS THE GATE" in out
+
+
+def test_a_non_critical_tables_difference_is_not_flagged_as_failing() -> None:
+    fields = {"line_items": _table("wrong_value", critical=False)}
+    assert not any(show_run._fails(cell) for _, cell in show_run._leaves(fields))
