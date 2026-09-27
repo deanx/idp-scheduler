@@ -2924,7 +2924,9 @@ def test_compare_refuses_a_document_already_pinned_for_another_dataset(tmp_path:
     _pins_file(tmp_path, {"new.pdf": {"dataset": "other", "document_dir": "/elsewhere"}})
     archive = _zip(tmp_path, {"new.pdf": b"%PDF"})
     pin = _FakeStage()
-    exit_code, _ = compare_versions.run(_compare_args(tmp_path, zip_path=archive), pin, _FakeStage())
+    exit_code, _ = compare_versions.run(
+        _compare_args(tmp_path, zip_path=archive), pin, _FakeStage()
+    )
     assert exit_code == 2 and pin.calls == []
     # --repin re-reads it into THIS dataset, so it is no longer a conflict.
     exit_code, _ = compare_versions.run(
@@ -2959,7 +2961,8 @@ def test_noise_floor_samples_only_the_archive_it_unpacked(tmp_path: Path) -> Non
     archive = _zip(tmp_path, {"doc-001.pdf": b"%PDF"})
     adapter = _ScriptedAdapter({"doc-001.pdf": [_normalized(), _normalized()]})
     _, report = noise_floor.run(
-        _noise_args(tmp_path, None, zip_path=archive, extract_to=shared), adapter
+        _noise_args(tmp_path, tmp_path / "unused", zip_path=archive, extract_to=shared),
+        adapter,
     )
     assert adapter.calls == 2, "exactly the priced 1 document x 2 repeats"
     assert report["summary"]["documents"] == 1
