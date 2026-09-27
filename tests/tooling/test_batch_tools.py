@@ -3573,3 +3573,28 @@ def test_bootstrap_resume_refuses_a_document_whose_bytes_changed(tmp_path: Path)
         _bootstrap_args(tmp_path, document_dir, resume=True), lambda d: _record(calls, d)
     )
     assert exit_code == 2 and calls == []
+
+
+# --- DEBT-102: documents sharing a stem are never collapsed -----------------
+
+
+def test_bootstrap_keeps_both_documents_that_share_a_stem(tmp_path: Path) -> None:
+    document_dir = tmp_path / "docs"
+    document_dir.mkdir()
+    (document_dir / "inv.pdf").write_bytes(b"%PDF-invoice")
+    (document_dir / "inv.png").write_bytes(b"\x89PNG-scan")
+    args = _bootstrap_args(tmp_path, document_dir, glob="*.pdf,*.png")
+
+    exit_code, _ = bootstrap.run(args, lambda d: _raw())
+
+    assert exit_code == 0
+    golden = json.loads(args.out.read_text())
+    assert sorted(e["document_id"] for e in golden.values()) == ["inv.pdf", "inv.png"]
+    assert len(golden) == 2
+
+
+def test_a_redraft_keeps_the_key_a_document_was_first_drafted_under(tmp_path: Path) -> None:
+    golden = {"inv": {"document_id": "inv.png"}}
+    assert bootstrap._golden_key("inv.png", golden) == "inv"
+    assert bootstrap._golden_key("inv.pdf", golden) == "inv.pdf"
+    assert bootstrap._golden_key("other.pdf", golden) == "other"

@@ -151,6 +151,23 @@ def _make_capture_fn(org_id: str, action_id: str, version: str) -> SupportsCaptu
     return capture
 
 
+def _golden_key(document_id: str, golden_set: dict[str, Any]) -> str:
+    """The golden-set key for `document_id`: its filename stem, unless that
+    stem already belongs to a DIFFERENT document, in which case the full
+    filename.
+
+    Keyed by stem alone, `inv.pdf` and `inv.png` collided and the later one
+    overwrote the earlier -- both captures paid for, nothing recorded, one
+    document silently out of the gate. The default `--glob` includes images,
+    so a scan corpus makes this likely (DEBT-102). A document keeps the key
+    it was first drafted under, so re-drafting it is still an update."""
+    for key, entry in golden_set.items():
+        if isinstance(entry, dict) and entry.get("document_id") == document_id:
+            return key
+    stem = document_id.rsplit(".", 1)[0]
+    return stem if stem not in golden_set else document_id
+
+
 #: `document_id -> sha256` of the bytes each capture was taken from (DEBT-100).
 DIGESTS_FILE = "_digests.json"
 
@@ -428,7 +445,7 @@ def run(
     total = len(documents)
     for index, document in enumerate(documents, start=1):
         document_id = document.name
-        key = document_id.rsplit(".", 1)[0]
+        key = _golden_key(document_id, golden_set)
         progress(index, total, document_id, started)
         try:
             if args.from_captures or document_id in redraft_free:
