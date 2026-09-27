@@ -105,6 +105,7 @@ from _batch import (  # noqa: E402
     discover_documents,
     ensure_private_dir,
     extract_documents_from_zip,
+    pinned_elsewhere,
     progress,
     read_json_if_present,
     refuse_over_ceiling,
@@ -348,6 +349,21 @@ def run(args: argparse.Namespace, capture_fn: Any, provision: Any) -> tuple[int,
     documents, failure = _resolve_documents(args)
     if failure:
         return failure, {}
+
+    elsewhere = pinned_elsewhere(
+        args.store, args.dataset, {d.name for d in documents}, goldens_dir
+    )
+    if elsewhere:
+        name, where = next(iter(sorted(elsewhere.items())))
+        print(
+            f"pin_document: {len(elsewhere)} document(s) are already pinned for dataset "
+            f"{args.dataset!r} at another action/version (e.g. {name!r} at {where}). The "
+            "platform holds ONE item per (dataset, document), so pinning here would "
+            "overwrite that golden and a later verify against it would compare against "
+            "this one. Use a separate --dataset per trusted version.",
+            file=sys.stderr,
+        )
+        return 2, {}
 
     # "Already pinned" is now the existence of that document's file under
     # THIS action/version -- so the same document pinned at another version

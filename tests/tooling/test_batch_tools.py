@@ -2010,6 +2010,7 @@ def _pinned(
     document_dir: str | None = None,
     action: str = "a",
     version: str = "1.0.0",
+    dataset: str = "ds",
 ) -> Path:
     """Build a pin store in the shipped layout:
     `goldens/<action>/<version>/<document>.json` + `_pins.json`."""
@@ -2024,7 +2025,7 @@ def _pinned(
             {
                 document_id: {
                     "document_dir": document_dir or str(tmp_path / "docs"),
-                    "dataset": "ds",
+                    "dataset": dataset,
                     "org": "o",
                 }
                 for document_id in document_ids
@@ -2561,17 +2562,18 @@ def test_compare_main_requires_exactly_one_source(
 def test_the_same_document_can_be_pinned_at_two_versions(tmp_path: Path) -> None:
     """The point of `goldens/<action>/<version>/<document>.json`: two
     versions of the same action produce two goldens for one document, and
-    neither overwrites the other."""
+    neither overwrites the other -- on disk AND on the platform, which is
+    why each version goes to its own dataset (DEBT-89)."""
     document = tmp_path / "inv-001.pdf"
     document.write_bytes(b"%PDF")
 
     pin_document.run(
-        _pin_args(tmp_path, document, version="1.0.0"),
+        _pin_args(tmp_path, document, version="1.0.0", dataset="ds-v1"),
         lambda path: _raw(total="10.00"),
         _FakeStage(),
     )
     pin_document.run(
-        _pin_args(tmp_path, document, version="2.0.0"),
+        _pin_args(tmp_path, document, version="2.0.0", dataset="ds-v2"),
         lambda path: _raw(total="20.00"),
         _FakeStage(),
     )
@@ -2605,7 +2607,7 @@ def test_verify_refuses_to_guess_between_two_pinned_versions(
 
 
 def test_verify_takes_the_named_pin_set(tmp_path: Path) -> None:
-    _pinned(tmp_path, "a.pdf", version="1.0.0")
+    _pinned(tmp_path, "a.pdf", version="1.0.0", dataset="ds-v1")
     _pinned(tmp_path, "a.pdf", "b.pdf", version="2.0.0")
     run_eval = _RecordingRunEval()
 
@@ -2966,3 +2968,45 @@ def test_noise_floor_samples_only_the_archive_it_unpacked(tmp_path: Path) -> Non
     )
     assert adapter.calls == 2, "exactly the priced 1 document x 2 repeats"
     assert report["summary"]["documents"] == 1
+
+
+# --- DEBT-89: one (dataset, document) is pinned at one version --------------
+
+
+def test_pinning_a_document_again_into_the_same_dataset_at_another_version_is_refused(
+    tmp_path: Path,
+) -> None:
+    """The platform item id is `uuid5(dataset|document_id)` -- no version --
+    so the second pin would overwrite the first ON THE PLATFORM while both
+    survived on disk, and a verify "against 1.0.0" would compare against
+    2.0.0's reading."""
+    document = tmp_path / "inv-001.pdf"
+    document.write_bytes(b"%PDF")
+    pin_document.run(
+        _pin_args(tmp_path, document, version="1.0.0"), lambda path: _raw(), _FakeStage()
+    )
+    calls: list[Path] = []
+    provision = _FakeStage()
+    exit_code, _ = pin_document.run(
+        _pin_args(tmp_path, document, version="2.0.0"),
+        lambda path: _record(calls, path),
+        provision,
+    )
+    assert exit_code == 2
+    assert calls == [] and provision.calls == [], "refused before any extraction"
+
+
+def test_verify_refuses_a_pin_set_whose_documents_are_pinned_at_another_version_too(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A store already in that state (written before the pin-time check)
+    must not verify: the platform item is whichever was pinned last."""
+    _pinned(tmp_path, "a.pdf", version="1.0.0")
+    _pinned(tmp_path, "a.pdf", version="2.0.0")
+    run_eval = _RecordingRunEval()
+    exit_code, _ = verify_document.run(
+        _verify_args(tmp_path, all=True, action="a", trusted_version="1.0.0", version="3.0.0"),
+        run_eval,
+    )
+    assert exit_code == 2 and run_eval.calls == []
+    assert "DEBT-89" in capsys.readouterr().err

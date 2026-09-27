@@ -107,6 +107,37 @@ def discover_documents(document_dir: Path, pattern: str, limit: int | None) -> l
     return sorted(found) if limit is None else sorted(found)[:limit]
 
 
+def pinned_elsewhere(
+    store: Path, dataset: str, names: set[str], own_dir: Path
+) -> dict[str, str]:
+    """`{document: "action/version"}` for each of `names` that the store also
+    has pinned for `dataset` under a DIFFERENT `goldens/<action>/<version>/`.
+
+    The platform keys a pinned item on `uuid5(dataset|document_id)` -- no
+    action, no version. So one document pinned into one dataset at two
+    versions is two goldens on disk but ONE item on the platform, holding
+    whichever was provisioned last; verifying "against v1" then compares
+    against v2's reading and says `pinned against v1` (DEBT-89). A
+    (dataset, document) may therefore be pinned at one action/version only.
+    Reads the store's own `_pins.json` files: a second store writing the
+    same dataset is outside what this can see."""
+    root = store / "goldens"
+    conflicts: dict[str, str] = {}
+    if not root.is_dir():
+        return conflicts
+    own = own_dir.resolve()
+    for pins_file in sorted(root.glob("*/*/_pins.json")):
+        if pins_file.parent.resolve() == own:
+            continue
+        pins = read_json_if_present(pins_file)
+        for name, record in pins.items():
+            if name in names and isinstance(record, dict) and record.get("dataset") == dataset:
+                conflicts.setdefault(
+                    name, f"{pins_file.parent.parent.name}/{pins_file.parent.name}"
+                )
+    return conflicts
+
+
 class CorpusTooLargeError(Exception):
     """More documents than the ceiling -- refused, never truncated."""
 

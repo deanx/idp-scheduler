@@ -53,6 +53,7 @@ from _batch import (  # noqa: E402
     confirm_cost,
     discover_documents,
     extract_documents_from_zip,
+    pinned_elsewhere,
     read_json_if_present,
 )
 
@@ -256,6 +257,19 @@ def run(args: argparse.Namespace, run_eval: Any) -> tuple[int, dict[str, Any]]:
             )
             return 2, {}
         selected = [document_id]
+
+    elsewhere = pinned_elsewhere(args.store, args.dataset, set(selected), goldens_dir)
+    if elsewhere:
+        name, where = next(iter(sorted(elsewhere.items())))
+        print(
+            f"verify_document: {len(elsewhere)} selected document(s) are ALSO pinned for "
+            f"dataset {args.dataset!r} at another action/version (e.g. {name!r} at {where}). "
+            "The platform holds one item per (dataset, document) -- whichever was pinned "
+            f"last -- so this run could compare against that reading while reporting "
+            f"'pinned against {trusted}'. Refusing (DEBT-89).",
+            file=sys.stderr,
+        )
+        return 2, {}
 
     # Where the bytes come from. By default, wherever each file was when
     # it was pinned; with --zip/--document-dir, from there instead -- the
