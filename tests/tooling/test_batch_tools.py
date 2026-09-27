@@ -4023,3 +4023,79 @@ def test_provision_refuses_two_entries_naming_one_document(
     err = capsys.readouterr().err
     assert "'same.pdf' by a, b" in err
     assert "87.48" not in err
+
+
+# --- DEBT-110: the REAL pin -> verify wiring, end to end ---------------------
+
+
+class _RealHalf:
+    """Drives a real script's `run` through its real argv parser, exactly as
+    compare_versions calls `main`. Only the IDP and platform seams are
+    stubbed, so every decision between the two halves is the real one."""
+
+    def __init__(self, module: ModuleType, *seams: Any) -> None:
+        self.module, self.seams = module, seams
+        self.summaries: list[dict[str, Any]] = []
+
+    def main(self, argv: list[str]) -> int:
+        code, summary = self.module.run(self.module._parse_args(argv), *self.seams)
+        self.summaries.append(summary)
+        return int(code)
+
+
+def test_compare_versions_end_to_end_through_the_real_pin_and_verify(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("IDP_DOCUMENT_DIR", raising=False)
+    archive = _zip(tmp_path, {"inv-1.pdf": b"%PDF-1", "inv-2.pdf": b"%PDF-2"})
+    extracted: list[str] = []
+
+    def _capture(path: Path) -> dict[str, Any]:
+        extracted.append(Path(path).name)
+        return _raw()
+
+    run_eval = _RecordingRunEval()
+    pin = _RealHalf(pin_document, _capture, _FakeStage())
+    verify = _RealHalf(verify_document, run_eval)
+
+    exit_code, summary = compare_versions.run(
+        _compare_args(tmp_path, zip_path=archive), pin, verify
+    )
+
+    assert exit_code == 0
+    # The trusted half read exactly this archive, once per document.
+    assert sorted(extracted) == ["inv-1.pdf", "inv-2.pdf"]
+    # The goldens landed where verify looks, with their bytes recorded.
+    pins = json.loads((tmp_path / "pins" / "goldens" / "a" / "1.0.0" / "_pins.json").read_text())
+    assert sorted(pins) == ["inv-1.pdf", "inv-2.pdf"]
+    assert all(record["sha256"] for record in pins.values())
+    # The candidate half measured exactly the documents the trusted half
+    # pinned, against the same directory, with exact matching.
+    (args, kwargs), = run_eval.calls
+    assert args[1] == "2.0.0" and args[3] == "ds"
+    assert kwargs["documents"] == ["inv-1.pdf", "inv-2.pdf"]
+    assert kwargs["exact_documents"] is True
+    assert os.environ["IDP_DOCUMENT_DIR"] == summary["document_dir"]
+
+
+def test_a_rerun_of_the_same_archive_pays_only_for_the_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-sending the same archive unpacks to the same per-archive
+    directory, the pins are the same bytes, and nothing is re-pinned."""
+    monkeypatch.chdir(tmp_path)
+    archive = _zip(tmp_path, {"inv-1.pdf": b"%PDF-1"})
+    extracted: list[str] = []
+
+    def _capture(path: Path) -> dict[str, Any]:
+        extracted.append(Path(path).name)
+        return _raw()
+
+    for _ in range(2):
+        compare_versions.run(
+            _compare_args(tmp_path, zip_path=archive),
+            _RealHalf(pin_document, _capture, _FakeStage()),
+            _RealHalf(verify_document, _RecordingRunEval()),
+        )
+    assert extracted == ["inv-1.pdf"], "the second run re-pinned nothing"
