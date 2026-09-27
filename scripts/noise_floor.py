@@ -336,16 +336,20 @@ def run(args: argparse.Namespace, adapter: SupportsExtract | None) -> tuple[int,
             print(f"    skipped {note}", file=sys.stderr)
         if len(skipped) > 10:
             print(f"    ... and {len(skipped) - 10} more skipped", file=sys.stderr)
+        # Sampled from what THIS archive unpacked, never by re-listing the
+        # shared directory: that held every earlier corpus, so a plan of 2
+        # extractions spent 14 and the report described a mixed corpus
+        # (DEBT-90). Same `sorted()[:N]` rule as `discover_documents`.
+        documents = sorted(unpacked)[: args.max_documents]
         if args.plan:
-            documents = unpacked[: args.max_documents]
             print(f"noise_floor: {len(documents)} document(s) sampled", file=sys.stderr)
             confirm_cost(
                 documents=len(documents), extractions_each=args.repeats, approved=True
             )
             print("noise_floor: --plan, stopping before any IDP call.", file=sys.stderr)
             return 0, {}
-
-    documents = discover_documents(document_dir, args.glob, args.max_documents)
+    else:
+        documents = discover_documents(document_dir, args.glob, args.max_documents)
     print(f"noise_floor: {len(documents)} document(s) sampled", file=sys.stderr)
 
     try:

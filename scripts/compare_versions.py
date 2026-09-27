@@ -50,6 +50,7 @@ Already pinned these files? Then you do not need this command -- run
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import sys
 from pathlib import Path
@@ -68,6 +69,7 @@ from _batch import (  # noqa: E402
     confirm_cost,
     discover_documents,
     extract_documents_from_zip,
+    read_json_if_present,
     refuse_over_ceiling,
 )
 
@@ -129,13 +131,63 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     return ap.parse_args(argv)
 
 
+def _archive_digest(archive: Path) -> str:
+    digest = hashlib.sha256()
+    with open(archive, "rb") as fh:
+        while chunk := fh.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()[:16]
+
+
+def _pin_set_conflict(args: argparse.Namespace, corpus: set[str]) -> str | None:
+    """Why the existing pins at (action, trusted version) would make this
+    comparison measure something other than THIS corpus -- checked before
+    anything is spent (DEBT-90/DEBT-93).
+
+    Pins are keyed by document name under `goldens/<action>/<version>/`,
+    and the verify half selects every pin of the dataset. So (a) a pin of
+    this dataset that is not in this corpus would be verified too, or
+    refused as MISSING after the pin half has already paid; and (b) a
+    document in this corpus already pinned for ANOTHER dataset would be
+    skipped by the pin half as "already pinned" and never reach this
+    dataset. Either way, `STILL VALID` would describe a different set of
+    documents from the one the operator sent."""
+    pins = read_json_if_present(
+        args.store / "goldens" / args.action / args.trusted_version / "_pins.json"
+    )
+    foreign = sorted(n for n, r in pins.items() if r.get("dataset") == args.dataset
+                     and n not in corpus)
+    if foreign:
+        return (
+            f"dataset {args.dataset!r} already has {len(foreign)} document(s) pinned at "
+            f"{args.action}/{args.trusted_version} that are not in this corpus "
+            f"(e.g. {foreign[0]}). Use a new --dataset or --store for a different corpus."
+        )
+    elsewhere = sorted(n for n, r in pins.items() if n in corpus
+                       and r.get("dataset") not in (None, args.dataset))
+    if elsewhere and not args.repin:
+        return (
+            f"{len(elsewhere)} document(s) of this corpus are already pinned at "
+            f"{args.action}/{args.trusted_version} for ANOTHER dataset (e.g. {elsewhere[0]}); "
+            "they would be skipped and never reach this one. Use a separate --store."
+        )
+    return None
+
+
 def run(args: argparse.Namespace, pin: Any, verify: Any) -> tuple[int, dict[str, Any]]:
     """`pin` and `verify` are the two scripts, injected so the tests drive
     the whole comparison without an IDP or a platform."""
     # Unpacked ONCE, here, and both halves are pointed at the result --
     # see the module docstring.
     if args.zip_path:
-        document_dir = args.extract_to or (args.store / "documents")
+        # One directory PER ARCHIVE, named by its content. The shared
+        # `<store>/documents/` accumulated every earlier archive, and the pin
+        # half -- pointed at the directory -- pinned all of them: a plan of 4
+        # extractions spent 9 (DEBT-90). The same archive re-sent lands in
+        # the same directory, so a re-run still skips what is pinned.
+        document_dir = args.extract_to or (
+            args.store / "documents" / _archive_digest(args.zip_path)
+        )
         try:
             documents, skipped = extract_documents_from_zip(
                 args.zip_path, document_dir, patterns=args.glob, dry_run=args.plan
@@ -150,6 +202,20 @@ def run(args: argparse.Namespace, pin: Any, verify: Any) -> tuple[int, dict[str,
         )
         for note in skipped[:10]:
             print(f"    skipped {note}", file=sys.stderr)
+        if not args.plan:
+            # The pin half lists the DIRECTORY, so the directory must hold
+            # exactly this archive -- an --extract-to that already held other
+            # documents would be priced as N and spent as more.
+            listed = {p.name for p in discover_documents(document_dir, args.glob, None)}
+            extra = sorted(listed - {p.name for p in documents})
+            if extra:
+                print(
+                    f"compare_versions: {document_dir} already holds {len(extra)} "
+                    f"document(s) that are not in {args.zip_path.name} (e.g. {extra[0]}); "
+                    "the pin half would pay for them too. Unpack to an empty --extract-to.",
+                    file=sys.stderr,
+                )
+                return 2, {}
     else:
         document_dir = args.document_dir
         documents = discover_documents(document_dir, args.glob, None)
@@ -162,6 +228,10 @@ def run(args: argparse.Namespace, pin: Any, verify: Any) -> tuple[int, dict[str,
     count = len(documents)
     if not count:
         print("compare_versions: no documents found", file=sys.stderr)
+        return 2, {}
+    conflict = _pin_set_conflict(args, {p.name for p in documents})
+    if conflict:
+        print(f"compare_versions: {conflict}", file=sys.stderr)
         return 2, {}
 
     if args.trusted_version == args.candidate_version:

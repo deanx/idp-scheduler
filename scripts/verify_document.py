@@ -224,7 +224,25 @@ def run(args: argparse.Namespace, run_eval: Any) -> tuple[int, dict[str, Any]]:
         return 2, {}
 
     if args.all:
-        selected = pinned_ids
+        # Only THIS dataset's pins (DEBT-93). A pin records the dataset it
+        # was provisioned into; selecting another dataset's pins made a
+        # second corpus in the same store unverifiable (refused as MISSING
+        # after its pin half had spent) and turned foreign pins into
+        # `--document` selectors that `select_items`' substring fallback
+        # could resolve to OTHER items. A pin with no record predates the
+        # field and is kept: `run_eval` refuses a selector it cannot match,
+        # before any submit.
+        selected = [
+            name for name in pinned_ids
+            if pins.get(name, {}).get("dataset", args.dataset) == args.dataset
+        ]
+        if not selected:
+            print(
+                f"verify_document: nothing pinned for dataset {args.dataset!r} at "
+                f"{action_id}/{trusted}",
+                file=sys.stderr,
+            )
+            return 2, {}
     else:
         if not args.file:
             print("verify_document: pass --file or --all", file=sys.stderr)

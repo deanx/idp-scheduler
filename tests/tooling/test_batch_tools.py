@@ -2865,3 +2865,101 @@ def test_noise_floor_still_counts_invented_content_as_unstable(tmp_path: Path) -
     _, report = noise_floor.run(_noise_args(tmp_path, document_dir), adapter)
     assert report["by_field"]["po_number"]["instability_rate"] == 1.0
     assert report["by_field"]["po_number"]["verdicts"] == {"wrong_value": 1}
+
+
+# --- DEBT-90 / DEBT-93: spend what was priced, measure what was sent --------
+
+
+def _pins_file(tmp_path: Path, records: dict[str, dict[str, str]]) -> None:
+    goldens = tmp_path / "pins" / "goldens" / "a" / "1.0.0"
+    goldens.mkdir(parents=True, exist_ok=True)
+    for name in records:
+        (goldens / f"{name}.json").write_text(json.dumps({name: _golden_entry(name, total="1")}))
+    (goldens / "_pins.json").write_text(json.dumps(records))
+
+
+def test_compare_unpacks_each_archive_into_its_own_directory(tmp_path: Path) -> None:
+    """A plan of 4 once spent 9: every archive shared `<store>/documents/`,
+    and the pin half, pointed at the directory, pinned all of them."""
+    first = _zip(tmp_path, {"a1.pdf": b"%PDF-1", "a2.pdf": b"%PDF-2"}, name="first.zip")
+    second = _zip(tmp_path, {"b1.pdf": b"%PDF-3"}, name="second.zip")
+    dirs = []
+    for archive in (first, second):
+        pin = _FakeStage()
+        exit_code, summary = compare_versions.run(
+            _compare_args(tmp_path, zip_path=archive, dataset=archive.stem), pin, _FakeStage()
+        )
+        assert exit_code == 0
+        dirs.append(Path(summary["document_dir"]))
+    assert dirs[0] != dirs[1]
+    assert sorted(p.name for p in dirs[1].iterdir()) == ["b1.pdf"]
+
+
+def test_compare_refuses_an_extract_to_that_already_holds_other_documents(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "unpack"
+    target.mkdir()
+    (target / "stale.pdf").write_bytes(b"%PDF-old")
+    archive = _zip(tmp_path, {"new.pdf": b"%PDF-new"})
+    pin = _FakeStage()
+    exit_code, _ = compare_versions.run(
+        _compare_args(tmp_path, zip_path=archive, extract_to=target), pin, _FakeStage()
+    )
+    assert exit_code == 2 and pin.calls == []
+
+
+def test_compare_refuses_when_the_dataset_already_holds_pins_of_another_corpus(
+    tmp_path: Path,
+) -> None:
+    _pins_file(tmp_path, {"old.pdf": {"dataset": "ds", "document_dir": "/elsewhere"}})
+    archive = _zip(tmp_path, {"new.pdf": b"%PDF"})
+    pin, verify = _FakeStage(), _FakeStage()
+    exit_code, _ = compare_versions.run(_compare_args(tmp_path, zip_path=archive), pin, verify)
+    assert exit_code == 2
+    assert pin.calls == [] and verify.calls == [], "refused before the pin half spends"
+
+
+def test_compare_refuses_a_document_already_pinned_for_another_dataset(tmp_path: Path) -> None:
+    _pins_file(tmp_path, {"new.pdf": {"dataset": "other", "document_dir": "/elsewhere"}})
+    archive = _zip(tmp_path, {"new.pdf": b"%PDF"})
+    pin = _FakeStage()
+    exit_code, _ = compare_versions.run(_compare_args(tmp_path, zip_path=archive), pin, _FakeStage())
+    assert exit_code == 2 and pin.calls == []
+    # --repin re-reads it into THIS dataset, so it is no longer a conflict.
+    exit_code, _ = compare_versions.run(
+        _compare_args(tmp_path, zip_path=archive, repin=True), pin, _FakeStage()
+    )
+    assert exit_code == 0
+
+
+def test_verify_all_selects_only_this_datasets_pins(tmp_path: Path) -> None:
+    docs = str(tmp_path / "docs")
+    _pins_file(
+        tmp_path,
+        {
+            "mine.pdf": {"dataset": "ds", "document_dir": docs, "org": "o"},
+            "theirs.pdf": {"dataset": "other", "document_dir": docs, "org": "o"},
+        },
+    )
+    run_eval = _RecordingRunEval()
+    exit_code, _ = verify_document.run(_verify_args(tmp_path, all=True), run_eval)
+    assert exit_code == 0
+    (_, kwargs), = run_eval.calls
+    assert kwargs["documents"] == ["mine.pdf"]
+
+
+def test_noise_floor_samples_only_the_archive_it_unpacked(tmp_path: Path) -> None:
+    """A plan of 2 once spent 14: the shared unpack directory still held
+    earlier corpora, and the run re-listed it."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    for i in range(6):
+        (shared / f"old-{i}.pdf").write_bytes(b"%PDF-old")
+    archive = _zip(tmp_path, {"doc-001.pdf": b"%PDF"})
+    adapter = _ScriptedAdapter({"doc-001.pdf": [_normalized(), _normalized()]})
+    _, report = noise_floor.run(
+        _noise_args(tmp_path, None, zip_path=archive, extract_to=shared), adapter
+    )
+    assert adapter.calls == 2, "exactly the priced 1 document x 2 repeats"
+    assert report["summary"]["documents"] == 1
