@@ -84,6 +84,7 @@ if str(_REPO_ROOT / "src") not in sys.path:
 
 from _batch import (  # noqa: E402
     DEFAULT_DOCUMENT_PATTERNS,
+    CorpusTooLargeError,
     QuotaRefusedError,
     ZipRejectedError,
     confirm_cost,
@@ -92,6 +93,7 @@ from _batch import (  # noqa: E402
     extract_documents_from_zip,
     progress,
     read_json_if_present,
+    refuse_over_ceiling,
     write_private_json,
 )
 
@@ -331,7 +333,12 @@ def run(
             print(f"    ... and {len(skipped) - 10} more skipped", file=sys.stderr)
         if args.plan:
             # Nothing was written, so there is nothing on disk to discover.
-            documents = unpacked[: args.max_documents]
+            documents = unpacked
+            try:
+                refuse_over_ceiling(documents, args.max_documents)
+            except CorpusTooLargeError as exc:
+                print(f"bootstrap_golden_set: {exc}", file=sys.stderr)
+                return 2, {}
             print(
                 f"bootstrap_golden_set: {len(documents)} document(s) to draft",
                 file=sys.stderr,
@@ -346,7 +353,15 @@ def run(
         sources = sorted(captures_dir.glob("*.raw.json"))
         documents = [Path(p.name.removesuffix(".raw.json")) for p in sources]
     else:
-        documents = discover_documents(document_dir, args.glob, args.max_documents)
+        # Refused BEFORE the resume filter: the ceiling is about the corpus,
+        # and capping first is what made --resume re-select the same first
+        # N forever on a larger one (DEBT-114).
+        documents = discover_documents(document_dir, args.glob, None)
+        try:
+            refuse_over_ceiling(documents, args.max_documents)
+        except CorpusTooLargeError as exc:
+            print(f"bootstrap_golden_set: {exc}", file=sys.stderr)
+            return 2, {}
         if args.resume:
             before = len(documents)
             documents = [d for d in documents if not _capture_path(captures_dir, d.name).exists()]

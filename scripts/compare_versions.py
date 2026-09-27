@@ -62,11 +62,13 @@ if str(_REPO_ROOT / "src") not in sys.path:
 
 from _batch import (  # noqa: E402
     DEFAULT_DOCUMENT_PATTERNS,
+    CorpusTooLargeError,
     QuotaRefusedError,
     ZipRejectedError,
     confirm_cost,
     discover_documents,
     extract_documents_from_zip,
+    refuse_over_ceiling,
 )
 
 DEFAULT_STORE = Path(".idp-regression-pins")
@@ -150,9 +152,14 @@ def run(args: argparse.Namespace, pin: Any, verify: Any) -> tuple[int, dict[str,
             print(f"    skipped {note}", file=sys.stderr)
     else:
         document_dir = args.document_dir
-        documents = discover_documents(document_dir, args.glob, args.max_documents)
+        documents = discover_documents(document_dir, args.glob, None)
 
-    count = min(len(documents), args.max_documents)
+    try:
+        refuse_over_ceiling(documents, args.max_documents)
+    except CorpusTooLargeError as exc:
+        print(f"compare_versions: {exc}", file=sys.stderr)
+        return 2, {}
+    count = len(documents)
     if not count:
         print("compare_versions: no documents found", file=sys.stderr)
         return 2, {}

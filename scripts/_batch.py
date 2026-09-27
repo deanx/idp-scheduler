@@ -66,8 +66,14 @@ class SupportsExtract(Protocol):
 DEFAULT_DOCUMENT_PATTERNS = "*.pdf,*.png,*.jpg,*.jpeg,*.tif,*.tiff,*.webp,*.bmp"
 
 
-def discover_documents(document_dir: Path, pattern: str, limit: int) -> list[Path]:
-    """Documents to process, sorted, capped at `limit`.
+def discover_documents(document_dir: Path, pattern: str, limit: int | None) -> list[Path]:
+    """Documents to process, sorted, capped at `limit` (`None`: every one).
+
+    **A cap is a SAMPLE.** Only the noise floor, which measures a sample
+    by design, should pass a number here. A tool that measures or pins a
+    CORPUS passes `None` and then calls `refuse_over_ceiling`: truncating
+    a corpus silently is how `compare_versions` once reported four
+    documents `STILL VALID` for a ten-document zip and exited 0 (DEBT-86).
 
     Sorted so two runs over an unchanged directory process the same
     documents in the same order -- a noise-floor number computed over a
@@ -97,7 +103,29 @@ def discover_documents(document_dir: Path, pattern: str, limit: int) -> list[Pat
                 continue
             seen.add(candidate)
             found.append(candidate)
-    return sorted(found)[:limit]
+    return sorted(found) if limit is None else sorted(found)[:limit]
+
+
+class CorpusTooLargeError(Exception):
+    """More documents than the ceiling -- refused, never truncated."""
+
+
+def refuse_over_ceiling(
+    documents: list[Path], limit: int, *, flag: str = "--max-documents"
+) -> None:
+    """Raise `CorpusTooLargeError` when a corpus exceeds its ceiling.
+
+    The ceiling is a guard against spending quota on a wrong `--glob`, and
+    the only honest response to tripping it is to stop -- the same rule
+    `run_eval` applies to `--max-documents-per-run` (ADR-0004 A10). Taking
+    the first N instead produces a result about N documents that every
+    downstream line reports as a result about the corpus (DEBT-86)."""
+    if len(documents) > limit:
+        raise CorpusTooLargeError(
+            f"{len(documents)} documents found, {flag} is {limit}. Refusing rather than "
+            f"measuring the first {limit} and reporting on the whole corpus -- raise "
+            f"{flag} to at least {len(documents)}, or narrow --glob / the source."
+        )
 
 
 # ── cost guard ────────────────────────────────────────────────────────

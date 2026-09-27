@@ -98,6 +98,7 @@ if str(_REPO_ROOT / "src") not in sys.path:
 
 from _batch import (  # noqa: E402
     DEFAULT_DOCUMENT_PATTERNS,
+    CorpusTooLargeError,
     QuotaRefusedError,
     ZipRejectedError,
     confirm_cost,
@@ -106,6 +107,7 @@ from _batch import (  # noqa: E402
     extract_documents_from_zip,
     progress,
     read_json_if_present,
+    refuse_over_ceiling,
     write_private_json,
 )
 
@@ -219,8 +221,15 @@ def _resolve_documents(args: argparse.Namespace) -> tuple[list[Path], int]:
             print(f"    skipped {note}", file=sys.stderr)
         if len(skipped) > 10:
             print(f"    ... and {len(skipped) - 10} more skipped", file=sys.stderr)
-        return unpacked[: args.max_documents], 0
-    return discover_documents(args.document_dir, args.glob, args.max_documents), 0
+        documents = unpacked
+    else:
+        documents = discover_documents(args.document_dir, args.glob, None)
+    try:
+        refuse_over_ceiling(documents, args.max_documents)
+    except CorpusTooLargeError as exc:
+        print(f"pin_document: {exc}", file=sys.stderr)
+        return [], 2
+    return documents, 0
 
 
 #: Path components come from operator input (`--action`, `--version`) and

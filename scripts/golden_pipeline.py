@@ -68,6 +68,7 @@ if str(_REPO_ROOT / "src") not in sys.path:
 
 from _batch import (  # noqa: E402
     DEFAULT_DOCUMENT_PATTERNS,
+    CorpusTooLargeError,
     QuotaRefusedError,
     ZipRejectedError,
     confirm_cost,
@@ -75,6 +76,7 @@ from _batch import (  # noqa: E402
     ensure_private_dir,
     extract_documents_from_zip,
     read_json_if_present,
+    refuse_over_ceiling,
     write_private_json,
 )
 
@@ -182,9 +184,14 @@ def run(args: argparse.Namespace, stages: Any) -> tuple[int, dict[str, Any]]:
             print(f"    ... and {len(skipped) - 10} more skipped", file=sys.stderr)
         found = unpacked
     else:
-        found = discover_documents(document_dir, args.glob, args.max_documents)
+        found = discover_documents(document_dir, args.glob, None)
 
-    documents = min(len(found), args.max_documents)
+    try:
+        refuse_over_ceiling(found, args.max_documents)
+    except CorpusTooLargeError as exc:
+        print(f"golden_pipeline: {exc}", file=sys.stderr)
+        return 2, {}
+    documents = len(found)
     measuring_floor = not (args.skip_noise_floor or args.noise_floor)
     sample = min(documents, args.noise_sample) if measuring_floor else 0
 

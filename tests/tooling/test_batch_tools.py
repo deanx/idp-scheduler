@@ -2703,3 +2703,78 @@ def test_show_run_still_passes_a_complete_passing_run(
     )
     assert show_run.main([str(path)]) == 0
     assert "OVERALL  PASS" in capsys.readouterr().out
+
+
+# --- DEBT-86 / DEBT-114: a corpus over its ceiling is REFUSED, never truncated ---
+
+
+def _record(calls: list[Path], path: Path) -> dict[str, Any]:
+    calls.append(path)
+    return _raw()
+
+
+def test_compare_refuses_a_zip_larger_than_its_ceiling_before_spending(tmp_path: Path) -> None:
+    """The primary use case once measured the first four of ten documents,
+    printed STILL VALID and exited 0. Six were never read."""
+    archive = _zip(tmp_path, {f"x{i:02d}.pdf": b"%PDF" for i in range(10)})
+    pin, verify = _FakeStage(), _FakeStage()
+
+    exit_code, _ = compare_versions.run(
+        _compare_args(tmp_path, zip_path=archive, max_documents=4), pin, verify
+    )
+
+    assert exit_code == 2
+    assert pin.calls == [] and verify.calls == [], "nothing may be spent on a truncated corpus"
+
+
+def test_compare_refuses_a_directory_larger_than_its_ceiling(tmp_path: Path) -> None:
+    document_dir = _documents(tmp_path, 5)
+    pin, verify = _FakeStage(), _FakeStage()
+    exit_code, _ = compare_versions.run(
+        _compare_args(tmp_path, document_dir=document_dir, max_documents=4), pin, verify
+    )
+    assert exit_code == 2 and pin.calls == []
+
+
+def test_compare_at_exactly_the_ceiling_still_runs(tmp_path: Path) -> None:
+    document_dir = _documents(tmp_path, 4)
+    pin, verify = _FakeStage(), _FakeStage()
+    exit_code, summary = compare_versions.run(
+        _compare_args(tmp_path, document_dir=document_dir, max_documents=4), pin, verify
+    )
+    assert exit_code == 0 and summary["documents"] == 4
+
+
+def test_pin_refuses_a_batch_larger_than_its_ceiling(tmp_path: Path) -> None:
+    document_dir = _documents(tmp_path, 3)
+    calls: list[Path] = []
+    exit_code, _ = pin_document.run(
+        _pin_args(tmp_path, None, document_dir=document_dir, all=True, max_documents=2),
+        lambda path: _record(calls, path),
+        _FakeStage(),
+    )
+    assert exit_code == 2 and calls == []
+
+
+def test_bootstrap_refuses_over_the_ceiling_even_with_resume(tmp_path: Path) -> None:
+    """DEBT-114: capping BEFORE the resume filter made --resume re-select
+    the same first N forever and report "0 to go"."""
+    document_dir = _documents(tmp_path, 3)
+    calls: list[Path] = []
+    for resume in (False, True):
+        exit_code, _ = bootstrap.run(
+            _bootstrap_args(tmp_path, document_dir, max_documents=2, resume=resume),
+            lambda document: _record(calls, document),
+        )
+        assert exit_code == 2
+    assert calls == []
+
+
+def test_pipeline_refuses_over_the_ceiling_before_any_stage(tmp_path: Path) -> None:
+    (tmp_path / "docs").mkdir()
+    for i in range(3):
+        (tmp_path / "docs" / f"doc-{i}.pdf").write_bytes(b"%PDF")
+    stages = _pipeline_stages(tmp_path)
+    exit_code, _ = golden_pipeline.run(_pipeline_args(tmp_path, max_documents=2), stages)
+    assert exit_code == 2
+    assert stages.noise_floor.calls == [] and stages.bootstrap_golden_set.calls == []
