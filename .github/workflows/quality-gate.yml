@@ -7,6 +7,13 @@ name: quality-gate
 # `continue-on-error` anywhere in this file. A red job fails the build;
 # that is the entire point of closing B-4.
 #
+# One exception to "blocking", and it is not a `continue-on-error`: the
+# `doc-lint` job (DEBT-29) is a REPORT. `scripts/doc_lint.py` exits 0 by
+# design and writes its findings to the job summary -- DEBT-29 asked for a
+# non-blocking report, and a prose check that failed builds would be
+# silenced with markers rather than read. Promote it with `--strict` once
+# the register stays clean.
+#
 # Four independent jobs (not one job with four steps) so a failure in one
 # gate is visible on its own line in the PR checks list, and so they run
 # concurrently rather than paying setup cost serially.
@@ -93,3 +100,24 @@ jobs:
 
       - name: pip-audit
         run: .venv/bin/pip-audit
+
+  doc-lint:
+    name: doc-lint (DEBT-29 -- report, non-blocking by exit code)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # The retired-name check reads `git log -p -- src/`; a shallow
+          # clone makes it skip itself (and say so) rather than pass.
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3.2.4 (resolves "v3")
+
+      - name: install from the lock file only (no re-resolution)
+        run: uv sync --locked --all-extras --dev
+
+      - name: doc-lint report
+        run: |
+          .venv/bin/python scripts/doc_lint.py | tee doc-lint.txt
+          { echo '### doc-lint (DEBT-29)'; echo '```'; cat doc-lint.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
