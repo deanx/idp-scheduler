@@ -57,7 +57,7 @@ jobs:
         run: .venv/bin/python -m pytest -q
 
   typecheck:
-    name: mypy src tests (strict)
+    name: mypy src tests scripts (strict)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -68,11 +68,11 @@ jobs:
       - name: install from the lock file only (no re-resolution)
         run: uv sync --locked --all-extras --dev
 
-      - name: mypy src tests
-        run: .venv/bin/mypy src tests
+      - name: mypy src tests scripts
+        run: .venv/bin/mypy src tests scripts
 
   lint:
-    name: ruff check src tests
+    name: ruff check src tests scripts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -84,7 +84,7 @@ jobs:
         run: uv sync --locked --all-extras --dev
 
       - name: ruff check
-        run: .venv/bin/ruff check src tests
+        run: .venv/bin/ruff check src tests scripts
 
   dependency-audit:
     name: pip-audit

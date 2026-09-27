@@ -388,6 +388,10 @@ def run(args: argparse.Namespace, adapter: SupportsExtract | None) -> tuple[int,
     # overstated the spend. An attempt that failed still counts: it may have
     # been submitted, and an over-report is the safe direction for quota.
     attempted = 0
+    if adapter is None:
+        # Only a --plan run is built without an adapter, and it returned above.
+        print("noise_floor: no IDP adapter to extract with", file=sys.stderr)
+        return 2, {}
 
     for index, document in enumerate(documents, start=1):
         document_id = document.name

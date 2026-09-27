@@ -67,14 +67,16 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 import jsonschema
 
 from idp_regression.adapter.normalize import normalize
+from idp_regression.adapter.types import NormalizedOutput
 from idp_regression.classifier.gate import validate_golden_structure
+from idp_regression.classifier.types import Golden
 from idp_regression.platform.schema import load_golden_schema
 
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -133,7 +135,7 @@ def _draft(capture: dict[str, Any], document_id: str) -> tuple[dict[str, Any], l
 
 
 def _draft_from_normalized(
-    normalized: dict[str, Any], document_id: str
+    normalized: NormalizedOutput, document_id: str
 ) -> tuple[dict[str, Any], list[str]]:
     """Draft from an ALREADY-normalized output -- the seam
     `scripts/noise_floor.py` needs, since it consumes `adapter.extract()`
@@ -246,7 +248,9 @@ def main() -> int:
 
     # Fail here, not at the platform, if the draft could never be provisioned.
     jsonschema.Draft7Validator(load_golden_schema()).validate(entry)
-    validate_golden_structure(entry)
+    # The schema check on the line above is what makes `entry` a Golden;
+    # the cast states that, it does not skip it.
+    validate_golden_structure(cast(Golden, entry))
 
     key = args.key or args.document_id.rsplit(".", 1)[0]
 

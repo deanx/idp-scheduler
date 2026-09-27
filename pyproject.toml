@@ -65,7 +65,9 @@ disallow_untyped_defs = true
 # DEBT-33 (scope leg): a bare `mypy` invocation must check the same file
 # set as the documented gate (`mypy src tests`) or the config silently
 # lies about what CI enforces. `files` mirrors that command exactly.
-files = ["src", "tests"]
+# DEBT-115: `scripts/` too -- the batch tools that spend quota and write
+# goldens had never been type-checked by anything.
+files = ["src", "tests", "scripts"]
 
 [tool.ruff]
 line-length = 99

@@ -139,7 +139,7 @@ Everything runs from the project venv; dependencies are uv-managed (`uv add`, `u
 | Tests | `.venv/bin/python -m pytest -q` |
 | One test | `.venv/bin/python -m pytest tests/platform/test_scoring.py::test_name` (or `-k <expr>`) |
 | Live/integration | `set -a; source .env; set +a; RUN_INTEGRATION_TESTS=1 .venv/bin/python -m pytest -q` |
-| Types + lint | `.venv/bin/mypy src tests` (strict) · `.venv/bin/ruff check src tests` |
+| Types + lint | `.venv/bin/mypy src tests scripts` (strict) · `.venv/bin/ruff check src tests scripts` — `scripts/` is in scope since DEBT-115 |
 | Dependency CVEs | `.venv/bin/pip-audit` |
 | Doc-lint (DEBT-29) | `.venv/bin/python scripts/doc_lint.py [--strict]` — prose in `docs/specs/`, `docs/adr/`, `docs/design/` naming a call, a `Class.member` or a git-retired name the code no longer has, plus `docs/state/DEBT.md` rows whose struck ID and Status cell disagree. A **report**: exit 0 unless `--strict`; CI's `doc-lint` job prints it to the summary. History is exempted explicitly — a Superseded ADR, `~~strike~~`, a line saying the name is gone, or a `<!-- doc-lint: history -->` … `<!-- doc-lint: end -->` region (inline on a table row). Run it before a `/qa` and before any Wave-3 re-stamp. |
 | Secret-scan hook | `./scripts/install-git-hooks.sh` — once per clone; sets `core.hooksPath=.githooks` (not versionable) |

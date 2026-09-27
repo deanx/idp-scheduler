@@ -43,6 +43,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT / "src"))
 
+from idp_regression.adapter.types import NormalizedOutput  # noqa: E402
+
 #: Same posture, and for the same reason, as `run_artifact._DIR_MODE` /
 #: `_FILE_MODE`: local disk is only a narrower disclosure surface than
 #: the platform if it is actually private to the invoking user.
@@ -55,7 +57,7 @@ class SupportsExtract(Protocol):
     Protocol so the tests can drive the whole batch loop with a fake and
     never touch the network."""
 
-    def extract(self, document_path: str, action_id: str, version: str) -> dict[str, Any]: ...
+    def extract(self, document_path: str, action_id: str, version: str) -> NormalizedOutput: ...
 
 
 # ── document discovery ────────────────────────────────────────────────
@@ -344,7 +346,7 @@ def extract_with_containment(
     action_id: str,
     version: str,
     attempt: int = 1,
-) -> dict[str, Any]:
+) -> NormalizedOutput:
     """`adapter.extract`, with every failure converted to a typed
     `DocumentFailedError` so one bad document cannot end a 1,000-document
     batch."""

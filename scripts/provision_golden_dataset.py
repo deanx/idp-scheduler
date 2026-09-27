@@ -78,7 +78,7 @@ import os
 import sys
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "src"))
@@ -86,6 +86,7 @@ sys.path.insert(0, str(_REPO_ROOT / "src"))
 import jsonschema  # noqa: E402
 
 from idp_regression.classifier.gate import validate_golden_structure  # noqa: E402
+from idp_regression.classifier.types import Golden  # noqa: E402
 from idp_regression.orchestration.dotenv_support import load_dotenv  # noqa: E402
 from idp_regression.orchestration.facade import (  # noqa: E402
     DEFAULT_MAX_DOCUMENTS_PER_RUN,
@@ -148,7 +149,8 @@ def _validation_error(entry: dict[str, Any]) -> str | None:
     """
     try:
         jsonschema.Draft7Validator(load_golden_schema()).validate(entry)
-        validate_golden_structure(entry)
+        # Schema-valid by the line above; the cast states that, it skips nothing.
+        validate_golden_structure(cast(Golden, entry))
     except jsonschema.ValidationError as exc:
         return f"schema: {exc.json_path} is invalid ({exc.validator})"
     except Exception as exc:  # noqa: BLE001 - INV-02: type name only, never str(exc)
