@@ -98,21 +98,18 @@ def classify_probe_response(
     is a wrong-org/wrong-action signal, not a confirmed absence, and
     classifies as ``UNKNOWN``."""
     if status_code == 400 and detail == _EXISTS_DETAIL:
-        # G-2 (Wave-1 Lane B): DELIBERATELY UNBOUND. Unlike the 404 ABSENT
-        # branch below, the 400 "Invalid query parameter 'file'" body
-        # carries no echo of the action/version this probe sent -- there is
-        # nothing in the response to bind `action_id`/`version` against, so
-        # this branch cannot apply the same wrong-org/wrong-action guard as
-        # ABSENT. A 400 from a DIFFERENT org/action/version than the one
-        # this probe addressed still classifies as EXISTS. Live
-        # consequence: a wrong-org or wrong-action 400 (e.g. after a silent
-        # credential/org swap) reads as "this version exists" -- the
-        # version-change detector can report a false new-version signal.
-        # Not closed here: (a) IDP has no separate control that could bind
-        # this without spending extraction quota, and (b) there is no live
-        # capture of a wrong-org 400 shape to build a binding check
-        # against (SR-1 -- do not invent one). Recorded, not silently
-        # accepted, per the S-01.2 /test stamp finding G-2.
+        # G-2: this branch cannot bind `action_id`/`version`, because the
+        # 400 "Invalid query parameter 'file'" body echoes neither. It does
+        # not need to, and that is now OBSERVED, not assumed (live probes,
+        # 2026-09-27, `tests/fixtures/live/version_probe_g2.README.md`). IDP
+        # resolves the org, then the action, then the version, and only then
+        # rejects the missing `file`. A wrong org returns 403 with no
+        # `detail`; a wrong action returns 404 "Action Id: <id>"; an unknown
+        # version returns the 404 ABSENT body below. Each of those is UNKNOWN
+        # or ABSENT here, never EXISTS. So this 400 is bound by the server's
+        # own check order. The feared "a credential or org swap reads as a
+        # new version" does not happen live. If IDP ever changes that order,
+        # the pinned captures are what should go red.
         return ProbeResult.EXISTS
     if status_code == 404 and isinstance(detail, str):
         match = _ABSENT_DETAIL_PATTERN.match(detail)

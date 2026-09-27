@@ -18,6 +18,10 @@ with open("tests/fixtures/live/version_probe_exists.raw.json") as _fh:
     LIVE_EXISTS_CAPTURE = json.load(_fh)
 with open("tests/fixtures/live/version_probe_absent.raw.json") as _fh:
     LIVE_ABSENT_CAPTURE = json.load(_fh)
+with open("tests/fixtures/live/version_probe_wrong_org.raw.json") as _fh:
+    LIVE_WRONG_ORG_CAPTURE = json.load(_fh)
+with open("tests/fixtures/live/version_probe_wrong_action.raw.json") as _fh:
+    LIVE_WRONG_ACTION_CAPTURE = json.load(_fh)
 
 
 # -- classify_probe_response: table-driven over ADR-0006 §A'.4 --------------
@@ -49,9 +53,9 @@ def test_exists_branch_is_deliberately_unbound_to_the_calling_action_id_and_vers
     # against (unlike the 404 ABSENT branch's R3 fix below), so a 400 for a
     # completely different action/version still classifies as EXISTS. This
     # pins that as a DECISION (see the comment on the EXISTS branch in
-    # version_probe.py), not an oversight -- and is exactly the false
-    # assurance the misleading parameters gave: a wrong-org/wrong-action 400
-    # reads as "this version exists".
+    # version_probe.py), not an oversight. It is SAFE because IDP never sends
+    # this 400 for a wrong org (403) or a wrong action (404), per the two
+    # `test_a_live_wrong_*` pins below, recorded 2026-09-27.
     result = classify_probe_response(
         LIVE_EXISTS_CAPTURE["status"],
         LIVE_EXISTS_CAPTURE["detail"],
@@ -59,6 +63,31 @@ def test_exists_branch_is_deliberately_unbound_to_the_calling_action_id_and_vers
         version="0.0.0",
     )
     assert result is ProbeResult.EXISTS
+
+
+def test_a_live_wrong_org_response_is_never_exists() -> None:
+    """G-2, closed against RECORDED responses (SR-1): a wrong org is a 403
+    with no `detail`, so it can never be mistaken for the EXISTS 400."""
+    result = classify_probe_response(
+        LIVE_WRONG_ORG_CAPTURE["status"],
+        LIVE_WRONG_ORG_CAPTURE.get("detail"),
+        action_id=_LIVE_ACTION_ID,
+        version=_LIVE_VERSION,
+    )
+    assert result is ProbeResult.UNKNOWN
+
+
+def test_a_live_wrong_action_response_is_never_exists_nor_absent() -> None:
+    """A wrong action is a 404 "Action Id: <id>" with no version in it. It
+    must not read as EXISTS, and not as a confirmed ABSENT either: it says
+    the ACTION is unknown, not that this version is missing."""
+    result = classify_probe_response(
+        LIVE_WRONG_ACTION_CAPTURE["status"],
+        LIVE_WRONG_ACTION_CAPTURE["detail"],
+        action_id="00000000-0000-4000-8000-000000000000",
+        version=_LIVE_VERSION,
+    )
+    assert result is ProbeResult.UNKNOWN
 
 
 def test_classifies_the_captured_live_absent_response_as_absent() -> None:
