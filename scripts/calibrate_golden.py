@@ -299,7 +299,14 @@ def calibrate(
     validator = jsonschema.Draft7Validator(load_golden_schema())
     for document_key, entry in calibrated.items():
         for name, spec in entry.get("fields", {}).items():
-            spec["critical"] = decisions[name]["critical"]
+            # DEMOTE-ONLY, as the module docstring has always said. Assigning
+            # the corpus decision outright also PROMOTED: it re-marked a
+            # per-document empty value `critical` (draft_golden had cleared
+            # it), and under the default classifier a critical empty expected
+            # value fails as `missing` or `wrong_value` on every run -- a
+            # permanent red no floor explains. It also undid a human's
+            # reconciliation on every re-run, in both directions (DEBT-95).
+            spec["critical"] = bool(spec.get("critical", False)) and decisions[name]["critical"]
             drafted = spec.get("type", "text")
             chosen = types[name]["chosen"]
             if chosen == drafted:
@@ -318,7 +325,7 @@ def calibrate(
                 types[name]["agreed"] = False
         for tname, block in entry.get("tables", {}).items():
             decision = table_decisions[tname]
-            block["critical"] = decision["critical"]
+            block["critical"] = bool(block.get("critical", False)) and decision["critical"]
             if decision["match_key"]:
                 block["match_key"] = decision["match_key"]
 

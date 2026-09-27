@@ -3146,3 +3146,47 @@ def test_bootstrap_resume_redrafts_a_failed_draft_from_its_capture_for_free(
     assert calls == [], "the capture was already paid for"
     assert sorted(json.loads(args.out.read_text())) == ["doc-001", "doc-002"]
     assert summary["failures"] == []
+
+
+# --- DEBT-95: calibration only ever demotes ---------------------------------
+
+
+def test_calibrate_never_marks_a_documents_empty_value_critical() -> None:
+    """`total` is stable and present corpus-wide, so it stays critical --
+    but not on the one document that read it empty: a critical empty
+    expected fails every run under the default classifier."""
+    golden: dict[str, Any] = {f"d{i}": _entry(f"d{i}.pdf") for i in range(19)}
+    blank = _entry("blank.pdf")
+    blank["fields"]["total"] = {"value": "", "type": "number", "critical": False}
+    golden["blank"] = blank
+
+    calibrated, _ = calibrate_golden.calibrate(golden, None)
+
+    assert calibrated["d0"]["fields"]["total"]["critical"] is True
+    assert calibrated["blank"]["fields"]["total"]["critical"] is False
+
+
+def test_calibrate_keeps_a_human_demotion_on_re_run() -> None:
+    golden: dict[str, Any] = {f"d{i}": _entry(f"d{i}.pdf") for i in range(20)}
+    golden["d3"]["fields"]["invoice_number"]["critical"] = False  # reconciled by hand
+
+    calibrated, _ = calibrate_golden.calibrate(golden, None)
+
+    assert calibrated["d3"]["fields"]["invoice_number"]["critical"] is False
+    assert calibrated["d4"]["fields"]["invoice_number"]["critical"] is True
+
+
+def test_calibrate_keeps_a_human_demotion_of_a_table() -> None:
+    golden: dict[str, Any] = {}
+    for i in range(10):
+        entry = _golden_entry(f"d{i}.pdf", total="1")
+        entry["tables"] = {
+            "line_items": {"match_key": "sku", "critical": True, "rows": [{"sku": f"S{i}"}]}
+        }
+        golden[f"d{i}"] = entry
+    golden["d2"]["tables"]["line_items"]["critical"] = False  # reconciled by hand
+
+    calibrated, _ = calibrate_golden.calibrate(golden, None)
+
+    assert calibrated["d2"]["tables"]["line_items"]["critical"] is False
+    assert calibrated["d3"]["tables"]["line_items"]["critical"] is True
