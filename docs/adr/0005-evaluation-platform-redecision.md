@@ -129,7 +129,7 @@ ADR-0001's STRIDE still applies: the platform API key is the only auth, TLS, BR5
    - `NAMESPACE` is a **committed, pinned UUID constant** in `src/idp_regression/platform/`. It is never generated at runtime and never changed; changing it would orphan every existing score id.
    - Retries within one invocation are idempotent (ADR-0004 #12). This closes DEBT-03 on the design side.
    - Two invocations that reuse a `run_name` can never overwrite each other's scores (N26).
-   - `write_scores` may now retry on 5xx within ADR-0004's absolute retry deadline.
+   - `write_scores` may now retry on 5xx within ADR-0004's absolute retry deadline. <!-- doc-lint: history -->
 6. **v4 `events_only` ingestion reshapes S-01.3.**
    - Traces and dataset-run linkage go through OTLP / a v4-capable SDK.
    - `/api/public/ingestion` accepts only score events.

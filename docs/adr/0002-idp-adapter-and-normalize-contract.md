@@ -117,7 +117,7 @@ Field names from IDP become platform score keys `field:<name>` (INV-03, BR11). A
 
 - **Adapter (GoF)** — `IDPAdapter` Protocol with one concrete implementation talking to IDP. Idiomatic: a `Protocol` + `MuleSoftIDPAdapter` class; `extract()` is the seam. The classifier never imports the adapter.
 - **Strategy (injectable function)** — `normalize()` is a pure function `normalize(raw: dict, success_statuses: set[str]) -> NormalizedOutput`, injectable for testing with sample raw bodies. Idiomatic: a module-level function, not a class.
-- **Repository (light)** — token caching is a small in-memory cache scoped to the run, held as a `TokenCache` **instance** on the adapter (not a module-level `_token` global). A module global is awkward for test isolation and any future concurrency; an instance is idiomatic, injectable in tests, and scoped to the adapter's lifetime. The Repository intent (a thin persistence facade over the token endpoint) fits; the form is a small class with `get()`/`refresh()`, not a module global.
+- **Repository (light)** — token caching is a small in-memory cache scoped to the run, held as a `TokenCache` **instance** on the adapter (not a module-level `_token` global). A module global is awkward for test isolation and any future concurrency; an instance is idiomatic, injectable in tests, and scoped to the adapter's lifetime. The Repository intent (a thin persistence facade over the token endpoint) fits; the form is a small class with `get()`/`invalidate()` (the refresh itself is the private `_refresh()`), not a module global.
 
 ## API contract (observable behaviors — Hyrum's Law)
 
