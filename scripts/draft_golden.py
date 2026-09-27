@@ -168,10 +168,11 @@ def _draft_from_normalized(
         if _is_ambiguous_slash_date(value):
             notes.append(
                 f"    ⚠️  AMBIGUOUS DATE: {value!r} reads as a different calendar "
-                "date under D/M/Y than under M/D/Y, and the classifier defaults to "
-                "M/D/Y (DEBT-81). If this corpus is not American, add "
-                '\'"date_format": "%d/%m/%Y"\' to this field -- otherwise every '
-                "verdict on it is confident about a date nobody chose."
+                "date under D/M/Y than under M/D/Y. Drafted as text, it is compared "
+                "only as text. To compare it as a DATE, set '\"type\": \"date\"' AND "
+                "'\"date_format\": \"%d/%m/%Y\"' (or \"%m/%d/%Y\" for an American "
+                "corpus), keeping the value as written. A date_format on a text field "
+                "is refused: it would be ignored (DEBT-103)."
             )
 
     entry: dict[str, Any] = {"document_id": document_id, "fields": fields}

@@ -8,6 +8,8 @@ I/O. The module never imports from ``adapter`` / ``platform`` /
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from datetime import datetime
 from typing import Literal, cast, get_args
 
 from idp_regression.classifier.canonical import compare_value, is_empty, match_key_form
@@ -101,6 +103,7 @@ def _validate_golden(golden: Golden) -> None:
             raise MalformedGoldenError(
                 f"golden field {name!r} format_critical must be bool"
             )
+        _validate_declared_date_format(name, spec)
 
     tables = golden.get("tables", {})
     if not isinstance(tables, dict):
@@ -310,6 +313,37 @@ def _classify_prompt(
 # those goldens must keep meaning exactly what they meant. Adopting this
 # change may not silently re-verdict an existing corpus.
 _TABLE_COLUMN_TYPE = "text"
+
+
+def _validate_declared_date_format(name: str, spec: Mapping[str, object]) -> None:
+    """A declared `date_format` must be one that can do something (DEBT-103).
+
+    It is honoured only on a `date` field, so on any other type it was
+    saved, looked declared, and changed nothing -- the "looks declared"
+    failure D2b's own ruling warned about. And a golden value written in the
+    declared format must actually parse under it, or the declaration is a
+    typo the fallback parser silently papers over. Both are refused here as
+    well as by the committed schema, because a golden can reach the
+    classifier without passing through provisioning. The message names the
+    field, never its value (INV-02)."""
+    if "date_format" not in spec:
+        return
+    declared = spec["date_format"]
+    if not isinstance(declared, str) or not declared.strip():
+        raise MalformedGoldenError(f"golden field {name!r} date_format must be a non-empty string")
+    if spec.get("type") != "date":
+        raise MalformedGoldenError(
+            f"golden field {name!r} declares date_format but is not type 'date' -- "
+            "it would be ignored"
+        )
+    value = spec.get("value")
+    if isinstance(value, str) and value.strip():
+        try:
+            datetime.strptime(value.strip(), declared)
+        except ValueError:
+            raise MalformedGoldenError(
+                f"golden field {name!r}: its value does not parse under its own date_format"
+            ) from None
 
 
 def _declared_date_format(spec: object) -> str | None:

@@ -15,9 +15,13 @@ from __future__ import annotations
 
 from typing import cast
 
+import jsonschema
+import pytest
+
 from idp_regression.classifier import classify
 from idp_regression.classifier.canonical import compare_value
-from idp_regression.classifier.types import Golden, NormalizedOutput
+from idp_regression.classifier.types import Golden, MalformedGoldenError, NormalizedOutput
+from idp_regression.platform.schema import load_golden_schema
 
 
 def _golden(date_format: str | None) -> dict[str, object]:
@@ -106,3 +110,65 @@ def test_compare_value_keeps_its_public_three_argument_form() -> None:
         compare_value("date", "03/04/2024", "2024-03-04", date_format="%d/%m/%Y")
         == "wrong_value"
     )
+
+
+# --- DEBT-103: a date_format must be able to do something -------------------
+
+
+def _entry(spec: dict[str, object]) -> dict[str, object]:
+    return {"document_id": "d.pdf", "fields": {"shipped": spec}}
+
+
+def _schema_valid(spec: dict[str, object]) -> bool:
+    return jsonschema.Draft7Validator(load_golden_schema()).is_valid(_entry(spec))
+
+
+def test_the_schema_accepts_a_date_written_in_its_declared_format() -> None:
+    """The golden D2b exists for: the value as the document writes it, plus
+    the format that says which date it is. The ISO-only rule used to reject
+    it, which left no valid way to write it at all."""
+    assert _schema_valid({"value": "03/04/2024", "type": "date", "date_format": "%d/%m/%Y"})
+
+
+def test_the_schema_still_requires_iso_for_an_undeclared_date() -> None:
+    assert not _schema_valid({"value": "03/04/2024", "type": "date"})
+    assert _schema_valid({"value": "2024-04-03", "type": "date"})
+
+
+def test_the_schema_refuses_a_date_format_on_a_non_date_field() -> None:
+    """On `text` it was saved, looked declared, and did nothing."""
+    assert not _schema_valid({"value": "03/04/2024", "type": "text", "date_format": "%d/%m/%Y"})
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"value": "03/04/2024", "type": "text", "date_format": "%d/%m/%Y", "critical": True},
+        {"value": "03/04/2024", "type": "date", "date_format": "%Y-%m-%d", "critical": True},
+        {"value": "03/04/2024", "type": "date", "date_format": "  ", "critical": True},
+    ],
+)
+def test_the_classifier_refuses_a_date_format_that_cannot_do_anything(
+    spec: dict[str, object],
+) -> None:
+    """Enforced here as well as in the schema: a golden can reach the
+    classifier without passing through provisioning."""
+    with pytest.raises(MalformedGoldenError) as excinfo:
+        classify(cast(Golden, {"fields": {"shipped": spec}}), cast(NormalizedOutput, _actual("x")))
+    assert "03/04/2024" not in str(excinfo.value), "INV-02: never the value"
+
+
+def test_an_empty_value_with_a_declared_format_is_allowed() -> None:
+    golden = {"fields": {"shipped": {"value": "", "type": "date", "date_format": "%d/%m/%Y",
+                                     "critical": False}}}
+    classify(cast(Golden, golden), cast(NormalizedOutput, _actual("")))
+
+
+def test_a_blank_date_format_is_refused_even_on_an_empty_value() -> None:
+    """With a value present, a blank format also fails to parse it; with an
+    empty value only the blank check itself stands between it and a
+    declaration that means nothing."""
+    golden = {"fields": {"shipped": {"value": "", "type": "date", "date_format": "  ",
+                                     "critical": False}}}
+    with pytest.raises(MalformedGoldenError):
+        classify(cast(Golden, golden), cast(NormalizedOutput, _actual("")))

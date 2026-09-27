@@ -82,6 +82,17 @@
                 "type": {
                   "const": "date"
                 }
+              },
+              "not": {
+                "type": "object",
+                "required": [
+                  "date_format"
+                ],
+                "properties": {
+                  "date_format": {
+                    "type": "string"
+                  }
+                }
               }
             },
             "then": {
@@ -133,6 +144,30 @@
               "properties": {
                 "value": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "type": "object",
+              "required": [
+                "date_format"
+              ],
+              "properties": {
+                "date_format": {
+                  "type": "string"
+                }
+              }
+            },
+            "then": {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "const": "date"
                 }
               }
             }

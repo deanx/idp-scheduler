@@ -209,6 +209,16 @@ It applies to the **format tier**, not the value tier: two spellings of one date
 a `wrong_format` (ADR-0003's rule), and declaring a format decides which date is meant,
 never whether the notation changed.
 
+**Where it is valid (amended 2026-09-27, DEBT-103).** `date_format` is honoured on a
+`type: "date"` field only, and such a field may hold its value **as the document writes
+it** (`03/04/2024` with `%d/%m/%Y`). The ISO rule applies to a `date` WITHOUT a declared
+format. Before this, the schema forced every `date` value to be ISO, and on a `text`
+field `date_format` was accepted and ignored, so the golden D2b was designed for could not
+be written validly at all. Both the committed schema and `_validate_golden` now refuse:
+a `date_format` on a non-date field; a blank one; and one the golden's own value does not
+parse under. The schema edit changes its hash, so an existing dataset aborts
+`schema_drift` until re-provisioned (`provision_golden_dataset.py`, no quota).
+
 **Undeclared remains a guess, and is recorded as one.** The default is pinned by
 `tests/classifier/test_date_format.py` so that changing it requires changing a test and
 saying why, and `scripts/draft_golden.py` flags every genuinely ambiguous slash-date in
