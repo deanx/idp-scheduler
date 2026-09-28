@@ -293,7 +293,7 @@ class MuleSoftIDPAdapter:
         access_token = body.get("access_token")
         if not isinstance(access_token, str) or not access_token:
             raise IDPAuthenticationError("OAuth token response is missing access_token")
-        if any(not ch.isprintable() for ch in access_token):
+        if any(not (ch.isascii() and ch.isprintable()) for ch in access_token):
             # /test Scenario B item 1 (primary defense): a token with CR/LF
             # or other control characters would otherwise be embedded
             # verbatim into an `Authorization: Bearer <token>` header,

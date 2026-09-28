@@ -388,7 +388,12 @@ def _send(req: urllib.request.Request, timeout_seconds: float) -> tuple[int, Any
         # reported as "headers were rejected"; anything else is an
         # ordinary transport failure with its (redacted) message included,
         # same as any other transport-level error.
-        if str(exc).startswith("Invalid header"):
+        # A `UnicodeEncodeError` is also a ValueError: http.client encodes
+        # header values as latin-1, and its message names the offending
+        # character and its offset in the value -- in the token, for an
+        # Authorization header (S-01.2 re-stamp F-2). No detail for that
+        # either.
+        if isinstance(exc, UnicodeError) or str(exc).startswith("Invalid header"):
             invalid_header_value = True
         else:
             other_value_error = str(exc)

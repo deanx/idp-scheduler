@@ -1598,7 +1598,9 @@ def test_no_time_time_reference_anywhere_under_adapter_package() -> None:
     assert offenders == [], f"time.time() referenced in adapter/: {offenders}"
 
 
-@pytest.mark.parametrize("bad_token", ["tok\r\ninjected", "tok\nvalue", "tok\x00null"])
+# "tok€en": printable, but not ASCII -- RFC 6750 b64token is ASCII, and
+# http.client would reject it with a message naming the character (F-2).
+@pytest.mark.parametrize("bad_token", ["tok\r\ninjected", "tok\nvalue", "tok\x00null", "tok€en"])
 def test_access_token_with_control_chars_is_rejected_at_fetch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_token: str
 ) -> None:

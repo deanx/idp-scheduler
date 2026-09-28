@@ -16,3 +16,11 @@
 # file class in the repo, because a captured fixture is exactly how a real
 # value gets committed by accident.
 353549d18af0f2128e5323d104b42a5bf292fcb0:tests/platform/test_langfuse_adapter.py:generic-api-key:305
+
+# S-01.2 re-stamp F-4 (2026-09-28): a second triaged false positive, same rule.
+# `demopack/env.demo.example` line 22 is `IDP_CLIENT_SECRET=` with an EMPTY
+# value; generic-api-key matched across the newline and took the next line
+# (`IDP_REGION=us-east-1`) as the "secret". It is a region name, not a
+# credential. Fingerprint only, per the note above: a real value on that
+# line in any later commit is still caught.
+188f36a31ab9d8a5db72e8dae91dccc860524096:demopack/env.demo.example:generic-api-key:22

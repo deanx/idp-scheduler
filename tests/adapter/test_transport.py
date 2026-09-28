@@ -500,3 +500,37 @@ def test_empty_body_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
     status, body = transport.post_json("https://x/y", {}, timeout_seconds=5.0)
     assert status == 204
     assert body is None
+
+
+def test_a_non_latin1_header_value_is_rejected_without_its_detail(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """S-01.2 re-stamp F-2 (INV-02): a printable but non-latin-1 token
+    character makes http.client raise `UnicodeEncodeError`, a ValueError
+    whose message names the character and its offset IN THE TOKEN. It took
+    the redacted-detail path, which kept both."""
+    def fake_urlopen(req: urllib.request.Request, timeout: float) -> _FakeResponse:
+        raise UnicodeEncodeError("latin-1", "Bearer tok€en", 10, 11, "ordinal not in range(256)")
+
+    monkeypatch.setattr(transport, "_urlopen", fake_urlopen)
+    with caplog.at_level(logging.DEBUG), pytest.raises(IDPTransportError) as excinfo:
+        transport.get_json("https://x/y", timeout_seconds=5.0,
+                           headers={"Authorization": "Bearer tok€en"})
+    for text in (str(excinfo.value), caplog.text, repr(excinfo.value.__context__)):
+        assert "€" not in text and "position" not in text and "latin-1" not in text
+
+
+def test_a_rejected_header_is_reported_statically_never_through_redact(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """S-01.2 re-stamp F-3: a tab-carrying token survives the Bearer regex
+    as bytes-repr text, so only the static no-detail message is safe."""
+    def fake_urlopen(req: urllib.request.Request, timeout: float) -> _FakeResponse:
+        raise ValueError("Invalid header value b'Bearer\\tSECRET'")
+
+    monkeypatch.setattr(transport, "_urlopen", fake_urlopen)
+    with caplog.at_level(logging.DEBUG), pytest.raises(IDPTransportError) as excinfo:
+        transport.get_json("https://x/y", timeout_seconds=5.0)
+    assert "SECRET" not in str(excinfo.value)
+    assert "SECRET" not in caplog.text
+    assert "headers were rejected" in str(excinfo.value)

@@ -60,7 +60,7 @@ def fetch_access_token(
     access_token = body.get("access_token")
     if not isinstance(access_token, str) or not access_token:
         raise IDPAuthenticationError("OAuth token response is missing access_token")
-    if any(not ch.isprintable() for ch in access_token):
+    if any(not (ch.isascii() and ch.isprintable()) for ch in access_token):
         raise IDPAuthenticationError(
             "OAuth token response's access_token contains invalid characters"
         )

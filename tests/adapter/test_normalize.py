@@ -1119,3 +1119,31 @@ def test_a_non_string_prompt_source_is_rejected() -> None:
     with pytest.raises(MalformedIDPOutputError) as excinfo:
         normalize(raw, success_statuses={"SUCCEEDED"})
     assert excinfo.value.reason == "invalid_page"
+
+
+# S-01.2 re-stamp F-1 (R2): the value-type obligation, derived from the
+# declared type rather than hand-listed. `FieldValue.value` is `str | None`.
+_NON_STRING_VALUES = [1, 1.5, True, ["x"], {"v": "x"}]
+
+
+def test_the_declared_cell_value_type_is_str_or_none() -> None:
+    from typing import get_type_hints
+
+    from idp_regression.classifier.types import FieldValue
+
+    assert get_type_hints(FieldValue)["value"] == str | None
+
+
+@pytest.mark.parametrize("value", _NON_STRING_VALUES)
+@pytest.mark.parametrize("where", ["field", "table_cell", "prompt_answer"])
+def test_a_non_string_cell_value_is_refused(where: str, value: object) -> None:
+    if where == "field":
+        page: dict[str, object] = {"fields": {"total": {"value": value, "confidence": None}}}
+    elif where == "table_cell":
+        page = {"tables": {"items": [{"sku": {"value": value, "confidence": None}}]}}
+    else:
+        page = {"prompts": _as_documented_map(
+            [{"prompt": "What?", "source": "document", "answer": {"value": value}}])}
+    with pytest.raises(MalformedIDPOutputError) as excinfo:
+        normalize({"status": "SUCCEEDED", "pages": [page]}, success_statuses={"SUCCEEDED"})
+    assert excinfo.value.reason == "invalid_cell_value"
