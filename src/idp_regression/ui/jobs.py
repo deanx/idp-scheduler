@@ -183,6 +183,7 @@ def build_compare_argv(
     allow_partial: bool = False,
     repin: bool = False,
     glob: str | None = None,
+    classifier: str | None = None,
 ) -> list[str]:
     """The exact command, as a list. Validated first.
 
@@ -197,6 +198,7 @@ def build_compare_argv(
         "action": action,
         "trusted_version": trusted_version,
         "candidate_version": candidate_version,
+        **({"classifier": classifier} if classifier else {}),
     })
     _require(
         trusted_version != candidate_version,
@@ -237,6 +239,12 @@ def build_compare_argv(
     if repin:
         # Spends an extra extraction per already-pinned document.
         argv.append("--repin")
+    if classifier:
+        # verify_document.py's own parser validates the name and
+        # restricts it to a pinned-file-based custom scorer -- nothing
+        # is duplicated here beyond the same grammar check every other
+        # value in this argv gets.
+        argv += ["--classifier", classifier]
     # `--plan` prints the real total and stops; `--yes` approves BOTH
     # halves' quota. Exactly one of them is ever present.
     argv.append("--plan" if plan_only else "--yes")

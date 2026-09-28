@@ -187,6 +187,38 @@ class TestQuotaBoundary:
         assert response.status_code == 503
         assert "IDP_CLIENT_ID" in response.json()["detail"]
 
+    def test_the_classifier_field_reaches_build_compare_argv(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`ValidateZipPage`'s scorer picker sends `classifier` in the
+        compare request; `_compare_argv` must forward it, not silently
+        drop it, to `jobs.build_compare_argv`."""
+        from idp_regression.ui import jobs
+
+        captured: dict[str, Any] = {}
+        real = jobs.build_compare_argv
+
+        def _spy(**kwargs: Any) -> list[str]:
+            captured.update(kwargs)
+            return real(**kwargs)
+
+        monkeypatch.setattr(jobs, "build_compare_argv", _spy)
+
+        client.post(
+            "/api/workflows/compare/plan",
+            json={
+                "document_dir": ".",
+                "dataset": "d",
+                "org": "o",
+                "action": "a",
+                "trusted_version": "1.0.0",
+                "candidate_version": "2.0.0",
+                "classifier": "my-pinned-rule",
+            },
+        )
+
+        assert captured["classifier"] == "my-pinned-rule"
+
     def test_starting_a_job_without_an_approved_count_is_refused(
         self, client: TestClient
     ) -> None:

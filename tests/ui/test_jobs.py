@@ -107,6 +107,27 @@ class TestArgvConstruction:
         with pytest.raises(jobs.JobRejectedError, match="between 1 and 1000"):
             argv_for(document_dir, max_documents=bad)
 
+    def test_a_named_classifier_is_forwarded_verbatim(self, document_dir: Path) -> None:
+        argv = argv_for(document_dir, classifier="my-pinned-rule")
+        assert "--classifier" in argv
+        assert argv[argv.index("--classifier") + 1] == "my-pinned-rule"
+
+    def test_no_classifier_named_means_no_flag_at_all(self, document_dir: Path) -> None:
+        assert "--classifier" not in argv_for(document_dir)
+
+    @pytest.mark.parametrize("bad", ["my rule", "my;rule", "a" * 129])
+    def test_a_classifier_that_is_not_the_expected_grammar_is_refused(
+        self, document_dir: Path, bad: str
+    ) -> None:
+        with pytest.raises(jobs.JobRejectedError, match="is not a valid value"):
+            argv_for(document_dir, classifier=bad)
+
+    def test_an_empty_classifier_is_treated_as_none_named(self, document_dir: Path) -> None:
+        """Matches `glob`'s own `if value:` convention -- an empty string
+        from a form's "no selection" default is "not provided", not a
+        malformed value to refuse."""
+        assert "--classifier" not in argv_for(document_dir, classifier="")
+
 
 class TestCostApproval:
     def test_a_job_will_not_start_against_a_cost_the_client_did_not_echo(

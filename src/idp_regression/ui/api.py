@@ -438,6 +438,7 @@ def create_app(*, dev_cors: bool = False, scorer_dir: Path | None = None) -> Fas
                 allow_partial=bool(payload.get("allow_partial", False)),
                 repin=bool(payload.get("repin", False)),
                 glob=payload.get("glob") or None,
+                classifier=payload.get("classifier") or None,
             )
         except jobs.JobRejectedError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
