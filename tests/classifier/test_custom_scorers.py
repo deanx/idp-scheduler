@@ -111,7 +111,7 @@ class TestMonotonicity:
     """The guarantee that makes an unaudited spec safe to run."""
 
     def test_a_spec_cannot_relax_a_verdict_to_match(self) -> None:
-        with pytest.raises(cs.SpecError, match="never relax one to `match`"):
+        with pytest.raises(cs.SpecError, match="a verdict the gate fails on"):
             cs.parse_spec(
                 spec(rules=[{"when": {"name_in": ["total"]}, "then": {"verdict": "match"}}])
             )
@@ -188,7 +188,10 @@ class TestMonotonicity:
         )
         problems = cs.verify_monotone(sneaky)
         assert problems, "a spec forcing `match` must be reported as non-monotone"
-        assert all("relaxes" in p for p in problems)
+        # Reported both ways: the old `match` check AND the per-outcome
+        # gate check (Wave C F-1) each name it.
+        assert any("relaxes" in p for p in problems)
+        assert any("turns a gate FAILURE" in p for p in problems)
 
 
 class TestCompilation:
@@ -221,10 +224,10 @@ class TestCompilation:
 
     def test_first_matching_rule_wins(self) -> None:
         scorer = cs.compile_spec(cs.parse_spec(spec(rules=[
-            {"when": {"field_type": "number"}, "then": {"verdict": "wrong_format"}},
+            {"when": {"field_type": "number"}, "then": {"verdict": "wrong_value"}},
             {"when": {"field_type": "number"}, "then": {"verdict": "missing"}},
         ])))
-        assert scorer(ctx()) == "wrong_format"
+        assert scorer(ctx()) == "wrong_value"
 
     def test_a_compiled_scorer_only_ever_returns_the_six_verdicts(self) -> None:
         """The same contract `tests/classifier/test_registry.py` holds a
@@ -247,3 +250,70 @@ class TestCompilation:
         scorer = cs.compile_spec(cs.parse_spec(spec()))
         context = ctx(confidence=0.4)
         assert scorer(context) == scorer(context) == scorer(context)
+
+
+# --- Wave C S-01.1 re-stamp F-1: a spec may never turn a FAIL into a PASS ----
+#
+# The old guarantee forbade only relaxing to `match`. But `overall_gate` fails
+# a field only on critical `missing`/`wrong_value` (or `wrong_format` with
+# `format_critical`), so rewriting a real `wrong_value` into `new_field`,
+# `new_line`, `new_table` or `wrong_format` turned a failing gate GREEN, and
+# `verify_monotone` approved it.
+
+_GOLDEN = cast(Golden, {"fields": {"total": {"value": "100.00", "type": "number",
+                                             "critical": True}}})
+_WRONG = cast(NormalizedOutput, {"status": "SUCCEEDED",
+                                 "fields": {"total": {"value": "999.00", "confidence": 0.9}}})
+
+
+@pytest.mark.parametrize("target", ["new_field", "new_line", "new_table", "wrong_format"])
+def test_a_rule_can_not_rewrite_a_failure_into_an_informational_verdict(target: str) -> None:
+    payload = {"name": "relax", "base": "regression",
+               "rules": [{"when": {"verdict_is": ["wrong_value", "missing"]},
+                          "then": {"verdict": target}}]}
+    with pytest.raises(cs.SpecError):
+        cs.parse_spec(payload)
+
+
+def test_only_gate_failing_verdicts_are_actionable() -> None:
+    assert set(cs.ACTIONABLE_VERDICTS) == {"missing", "wrong_value"}
+
+
+@pytest.mark.parametrize("target", ["new_field", "new_line", "wrong_format"])
+def test_verify_monotone_compares_gate_outcomes_not_just_match(target: str) -> None:
+    """Belt and braces: even a spec that got past parsing (built directly)
+    is caught by the per-OUTCOME check."""
+    spec = cs.ScorerSpec(
+        name="relax", description="", base="regression",
+        rules=(cs.Rule(when={"verdict_is": ["wrong_value"]}, then={"verdict": target}),),
+    )
+    assert cs.verify_monotone(spec), "a spec that turns a FAIL into a PASS must be named"
+
+
+def test_the_shipped_example_still_only_tightens() -> None:
+    """The documented confidence-floor spec stays valid and monotone."""
+    parsed = cs.parse_spec(spec())
+    assert cs.verify_monotone(parsed) == []
+    classifier = cs.build_classifier(parsed)
+    assert classifier.gate(classifier.classify(_GOLDEN, _WRONG)) == "FAIL"
+
+
+def test_verdict_is_refuses_new_table_a_scorer_never_sees() -> None:
+    """F-3: `new_table` is a table-EXISTENCE verdict, never a scorer's base
+    verdict, so a condition on it was dead."""
+    with pytest.raises(cs.SpecError):
+        cs.parse_spec({"name": "dead", "base": "regression",
+                       "rules": [{"when": {"verdict_is": ["new_table"]},
+                                  "then": {"critical": True}}]})
+
+
+def test_verify_monotone_catches_relaxing_a_format_critical_field() -> None:
+    """A `wrong_format` on a `format_critical` field fails the gate. A spec
+    rewriting it into `new_field` must be named -- and only the per-outcome
+    check can see that, since `wrong_format` was never `match`. The context
+    enumerator must therefore produce a format-only difference at all."""
+    spec = cs.ScorerSpec(
+        name="relax-format", description="", base="regression",
+        rules=(cs.Rule(when={"verdict_is": ["wrong_format"]}, then={"verdict": "new_field"}),),
+    )
+    assert any("turns a gate FAILURE ('wrong_format')" in p for p in cs.verify_monotone(spec))

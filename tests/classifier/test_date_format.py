@@ -180,3 +180,12 @@ def test_a_padded_value_is_parsed_the_way_the_comparison_reads_it() -> None:
     golden = {"fields": {"shipped": {"value": " 03/04/2024 ", "type": "date",
                                      "date_format": "%d/%m/%Y", "critical": True}}}
     classify(cast(Golden, golden), cast(NormalizedOutput, _actual("2024-04-03")))
+
+
+def test_a_declared_format_falls_back_for_an_actual_in_another_notation() -> None:
+    """Gate F-4 (M24): the declared pattern is tried first, then the lenient
+    parser. For an ISO actual a raw passthrough looks the same, so only a
+    third notation shows the fallback is there."""
+    assert compare_value("date", "03/04/2024", "April 3, 2024", date_format="%d/%m/%Y") == (
+        "wrong_format"
+    )

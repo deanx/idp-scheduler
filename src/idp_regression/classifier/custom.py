@@ -27,8 +27,14 @@ authored in a browser is further from review than Python is, so it is
 held to the STRONGER form of the same rule:
 
 * an action may set `critical`/`format_critical` only to **true**;
-* an action may **not** produce `match`. A spec can turn a match into a
-  failure; it can never turn a failure into a match.
+* an action may only produce a verdict the gate FAILS on -- `missing` or
+  `wrong_value`. A spec can turn a match into a failure; it can never turn
+  a failure into anything the gate passes. (Corrected 2026-09-27, Wave C
+  S-01.1 re-stamp F-1: the rule used to be "may not produce `match`", and
+  `new_field`, `new_line`, `new_table` and `wrong_format` are all things
+  `overall_gate` passes too, so a spec rewriting a real `wrong_value` into
+  any of them turned a failing gate GREEN. To make a format difference
+  gating, use the `format_critical: true` action.)
 
 Together those make every spec a pure tightening of its base classifier.
 That is a real restriction -- a "this mismatch is acceptable" rule is not
@@ -62,15 +68,22 @@ from idp_regression.classifier.scoring import (
     ScoreResult,
     VerdictLiteral,
 )
+from idp_regression.classifier.types import RowVerdictLiteral
 
-#: The six verdicts (INV-03). A spec may not invent a seventh -- the
+#: The seven verdicts (INV-03). A spec may not invent an eighth -- the
 #: score names, the remediation UI and the platform all know these and
 #: only these.
 VERDICTS: Final[tuple[str, ...]] = get_args(VerdictLiteral)
 
-#: What an action may produce. `match` is absent BY DESIGN: see the
-#: module docstring. This tuple is the monotonicity guarantee's teeth.
-ACTIONABLE_VERDICTS: Final[tuple[str, ...]] = tuple(v for v in VERDICTS if v != "match")
+#: The verdicts a SCORER can see as its base verdict -- every verdict but
+#: `new_table`, which is a statement about a table's existence and never a
+#: field/prompt/cell comparison. A `verdict_is` on it could never match.
+SCORER_VERDICTS: Final[tuple[str, ...]] = get_args(RowVerdictLiteral)
+
+#: What an action may produce: only verdicts the gate FAILS on. This tuple
+#: is the monotonicity guarantee's teeth -- see the module docstring for why
+#: "anything but `match`" was not enough.
+ACTIONABLE_VERDICTS: Final[tuple[str, ...]] = ("missing", "wrong_value")
 
 #: A spec may only build on a classifier that ships with the tool, so the
 #: base of every custom gate is code that went through review.
@@ -179,9 +192,7 @@ def _validate_condition(index: int, when: dict[str, Any]) -> None:
             _require(value in FIELD_TYPES, f"{where}.field_type must be one of {FIELD_TYPES}")
         elif key == "name_in":
             _require(
-                isinstance(value, list)
-                and bool(value)
-                and all(isinstance(v, str) for v in value),
+                isinstance(value, list) and bool(value) and all(isinstance(v, str) for v in value),
                 f"{where}.name_in must be a non-empty list of field names",
             )
         elif key == "name_matches":
@@ -198,8 +209,8 @@ def _validate_condition(index: int, when: dict[str, Any]) -> None:
             _require(
                 isinstance(value, list)
                 and bool(value)
-                and all(v in VERDICTS for v in value),
-                f"{where}.verdict_is must be a non-empty list drawn from {VERDICTS}",
+                and all(v in SCORER_VERDICTS for v in value),
+                f"{where}.verdict_is must be a non-empty list drawn from {SCORER_VERDICTS}",
             )
         elif key == "confidence_below":
             _require(
@@ -221,9 +232,9 @@ def _validate_action(index: int, then: dict[str, Any]) -> None:
         if key == "verdict":
             _require(
                 value in ACTIONABLE_VERDICTS,
-                f"{where}.verdict must be one of {ACTIONABLE_VERDICTS}. "
-                "A spec may tighten a verdict, never relax one to `match` -- "
-                "see the module docstring.",
+                f"{where}.verdict must be one of {ACTIONABLE_VERDICTS}: a spec may only "
+                "produce a verdict the gate fails on. To gate a format difference, use "
+                "`format_critical: true` -- see the module docstring.",
             )
         else:
             _require(
@@ -386,21 +397,43 @@ def _enumerate_contexts() -> list[ScoreContext]:
     for kind in KINDS:
         for field_type in FIELD_TYPES:
             for expected in (None, "", "1.00"):
-                for actual in (None, "", "1.00", "2.00"):
+                for actual in (
+                    None,
+                    "",
+                    "1.00",
+                    "2.00",
+                    "1,00",
+                ):  # "1,00": a format-only difference
                     for confidence in (None, 0.0, 0.5, 1.0):
                         for critical in (False, True):
-                            contexts.append(
-                                ScoreContext(
-                                    name="total",
-                                    kind=kind,  # type: ignore[arg-type]
-                                    field_type=field_type,
-                                    expected=expected,
-                                    actual=actual,
-                                    confidence=confidence,
-                                    critical=critical,
+                            for format_critical in (False, True):
+                                contexts.append(
+                                    ScoreContext(
+                                        name="total",
+                                        kind=kind,  # type: ignore[arg-type]
+                                        field_type=field_type,
+                                        expected=expected,
+                                        actual=actual,
+                                        confidence=confidence,
+                                        critical=critical,
+                                        format_critical=format_critical,
+                                    )
                                 )
-                            )
     return contexts
+
+
+def _fails_the_gate(ctx: ScoreContext, result: object) -> bool:
+    """Whether this one field fails `overall_gate`, given a scorer result:
+    the same rule `overall_gate` applies, with a ScoreResult's flags OR-ed
+    onto the golden's."""
+    verdict = result.verdict if isinstance(result, ScoreResult) else result
+    critical = ctx.critical or (isinstance(result, ScoreResult) and result.critical)
+    format_critical = ctx.format_critical or (
+        isinstance(result, ScoreResult) and result.format_critical
+    )
+    if verdict in ("missing", "wrong_value"):
+        return bool(critical)
+    return verdict == "wrong_format" and bool(format_critical)
 
 
 def verify_monotone(spec: ScorerSpec) -> list[str]:
@@ -425,6 +458,11 @@ def verify_monotone(spec: ScorerSpec) -> list[str]:
         verdict = after.verdict if isinstance(after, ScoreResult) else after
         critical = after.critical if isinstance(after, ScoreResult) else False
 
+        if _fails_the_gate(ctx, before) and not _fails_the_gate(ctx, after):
+            problems.append(
+                f"{ctx.kind}/{ctx.field_type} expected={ctx.expected!r} actual={ctx.actual!r}: "
+                f"turns a gate FAILURE ({base_verdict!r}) into a pass ({verdict!r})"
+            )
         if base_verdict != "match" and verdict == "match":
             problems.append(
                 f"{ctx.kind}/{ctx.field_type} expected={ctx.expected!r} actual={ctx.actual!r}: "
@@ -436,5 +474,3 @@ def verify_monotone(spec: ScorerSpec) -> list[str]:
                 "clears the base classifier's `critical`"
             )
     return sorted(set(problems))
-
-

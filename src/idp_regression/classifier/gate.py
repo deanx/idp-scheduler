@@ -124,6 +124,18 @@ def _validate_golden(golden: Golden) -> None:
                 )
         if not isinstance(block.get("critical", False), bool):
             raise MalformedGoldenError(f"golden table {tname!r} critical must be bool")
+        # Wave C S-01.1 re-stamp F-5: an unknown type (e.g. "integer") used to
+        # degrade silently to text -- saved, looked declared, compared as
+        # something else. Refused, as DEBT-103 refuses an inert date_format.
+        declared_types = block.get("types")
+        if declared_types is not None and (
+            not isinstance(declared_types, dict)
+            or not all(isinstance(t, str) and t in FIELD_TYPES for t in declared_types.values())
+        ):
+            raise MalformedGoldenError(
+                f"golden table {tname!r} types must map columns to one of "
+                f"{sorted(FIELD_TYPES)}"
+            )
 
     prompts = golden.get("prompts", {})
     if not isinstance(prompts, dict):
@@ -572,7 +584,7 @@ def classify_pinned_file(golden: Golden, actual: NormalizedOutput) -> VerdictMap
     that an empty expected value matched by an empty actual is a
     ``match`` rather than ``missing`` (see ``_classify_field``).
 
-    Same two-argument contract, same six verdicts, same score-name
+    Same two-argument contract, same seven verdicts, same score-name
     vocabulary (INV-03) -- it differs in one rule, which is why it shares
     the comparison engine rather than forking it. A golden pinned from a
     trusted Action version can therefore mark EVERY field critical,
@@ -718,7 +730,11 @@ def overall_gate(verdicts: VerdictMap) -> Literal["PASS", "FAIL"]:
     for key, entry in verdicts.items():
         if entry["verdict"] == "detail":
             for row in entry["rows"]:
-                if row["verdict"] not in _VALID_VERDICTS:
+                # The ROW set (6), not the verdict set (7): `new_table` is a
+                # table-level verdict, and a row carrying it is malformed. The
+                # 7-set let a caller-supplied `new_table` row through, and in a
+                # critical block that read PASS (Wave C S-01.1 re-stamp F-2).
+                if row["verdict"] not in _VALID_ROW_VERDICTS:
                     raise MalformedActualError(
                         f"table {key!r} row (column {row['column']!r}) has an "
                         "unrecognised verdict"

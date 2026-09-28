@@ -25,6 +25,7 @@ from idp_regression.classifier.types import (
     Golden,
     NormalizedOutput,
     RowVerdict,
+    RowVerdictLiteral,
     TableVerdict,
     Verdict,
     VerdictLiteral,
@@ -221,7 +222,11 @@ def test_valid_verdicts_is_derived_from_the_literal_not_a_hand_written_tuple() -
     assert frozenset(get_args(VerdictLiteral)) == _VALID_VERDICTS
 
 
-@pytest.mark.parametrize("verdict", get_args(VerdictLiteral))
+# The ROW verdicts (6): `new_table` is a table-level verdict and a row
+# carrying it is refused (Wave C S-01.1 re-stamp F-2), so it is not a
+# "legitimate row verdict" -- this parametrisation used to include it and
+# pinned the defect as correct.
+@pytest.mark.parametrize("verdict", get_args(RowVerdictLiteral))
 def test_all_legitimate_row_verdicts_inside_critical_detail_gate_correctly(
     verdict: str,
 ) -> None:
@@ -346,3 +351,59 @@ def test_non_bool_format_critical_is_a_malformed_golden() -> None:
     }
     with pytest.raises(MalformedGoldenError, match="format_critical must be bool"):
         classify(golden, _actual({"invoice_date": {"value": "2026-01-22"}}))
+
+
+def test_a_new_table_row_inside_a_detail_block_is_refused() -> None:
+    """Wave C S-01.1 re-stamp F-2: `new_table` is a table-level verdict; a
+    ROW carrying it is malformed. The row check used the 7-verdict set, so
+    a caller-supplied `new_table` row in a CRITICAL block returned PASS."""
+    from idp_regression.classifier.gate import overall_gate
+    from idp_regression.classifier.types import MalformedActualError
+
+    verdicts = {"line_items": {"verdict": "detail", "critical": True, "rows": [
+        {"match_key": "A", "column": "amount", "verdict": "new_table"},
+    ]}}
+    with pytest.raises(MalformedActualError):
+        overall_gate(verdicts)  # type: ignore[arg-type]
+
+
+def _table_golden(types: object) -> Golden:
+    return cast(Golden, {
+        "fields": {"total": {"value": "1", "type": "number", "critical": False}},
+        "tables": {"line_items": {"match_key": "sku", "critical": True, "types": types,
+                                  "rows": [{"sku": "A", "amount": "1250.00"}]}},
+    })
+
+
+def test_an_unknown_declared_column_type_is_refused() -> None:
+    """Gate F-5: "integer" used to degrade silently to text."""
+    from idp_regression.classifier.types import MalformedGoldenError
+
+    actual = cast(NormalizedOutput, {"status": "SUCCEEDED", "fields": {}, "tables": {}})
+    with pytest.raises(MalformedGoldenError, match="types"):
+        classify(_table_golden({"amount": "integer"}), actual)
+
+
+def test_row_pairing_uses_the_declared_column_type() -> None:
+    """Gate F-8 (M12): two actual rows share the key. Only a type-aware
+    affinity sees that `1,250.00` IS `1250.00` as a number and pairs it."""
+    actual = cast(NormalizedOutput, {"status": "SUCCEEDED", "fields": {}, "tables": {
+        "line_items": [
+            {"sku": {"value": "A"}, "amount": {"value": "999"}},
+            {"sku": {"value": "A"}, "amount": {"value": "1,250.00"}},
+        ]}})
+    verdicts = classify(_table_golden({"amount": "number"}), actual)
+    paired = [r for r in verdicts["line_items"]["rows"] if r["column"] == "amount"]  # type: ignore[typeddict-item]
+    assert paired and paired[0]["verdict"] in ("match", "wrong_format")
+
+
+def test_a_new_table_entry_never_gates() -> None:
+    """Gate F-6 (M08): a table the golden does not have is informational."""
+    golden = cast(Golden, {"fields": {"total": {"value": "1", "type": "number",
+                                                "critical": True}}})
+    actual = cast(NormalizedOutput, {"status": "SUCCEEDED",
+                                     "fields": {"total": {"value": "1"}},
+                                     "tables": {"freight": [{"a": {"value": "x"}}]}})
+    verdicts = classify(golden, actual)
+    assert verdicts["freight"]["verdict"] == "new_table"
+    assert verdicts["freight"]["critical"] is False

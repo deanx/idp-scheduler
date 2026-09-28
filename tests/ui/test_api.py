@@ -322,7 +322,25 @@ class TestScorers:
         }
         response = client.put("/api/scorers/confidence-floor", json=relaxing)
         assert response.status_code == 422
-        assert "match" in response.json()["detail"]
+        assert "a verdict the gate fails on" in response.json()["detail"]
+
+    def test_saving_a_spec_that_rewrites_a_failure_into_new_field_is_refused(
+        self, client: TestClient
+    ) -> None:
+        """Wave C S-01.1 re-stamp F-1, at the console: the unauthenticated
+        loopback port must refuse a spec that would turn a FAIL into a PASS."""
+        relaxing = {
+            **self.SPEC,
+            "rules": [{"when": {"verdict_is": ["wrong_value", "missing"]},
+                       "then": {"verdict": "new_field"}}],
+        }
+        response = client.put("/api/scorers/confidence-floor", json=relaxing)
+        assert response.status_code == 422
+
+    def test_the_editor_is_offered_only_verdicts_a_rule_can_use(self, client: TestClient) -> None:
+        vocabulary = client.get("/api/scorers").json()["vocabulary"]
+        assert set(vocabulary["actionable_verdicts"]) == {"missing", "wrong_value"}
+        assert "new_table" not in vocabulary["verdicts"]
 
     def test_a_body_that_names_a_different_scorer_is_refused(self, client: TestClient) -> None:
         assert client.put("/api/scorers/other", json=self.SPEC).status_code == 422

@@ -11,7 +11,8 @@ from __future__ import annotations
 
 from typing import Literal, NotRequired, TypedDict
 
-# The six verdicts that are the stable contract (glossary, ADR-0003, CT-02).
+# The seven verdicts that are the stable contract (glossary, ADR-0003, CT-02;
+# `new_table` added by ADR-0003 A2).
 #: The six LEAF verdicts: what a single expected/actual comparison can say.
 #: A table ROW sub-verdict is always one of these -- a row is a comparison,
 #: so it can be `new_line` (a row the golden does not have) but never
@@ -146,7 +147,7 @@ class RowVerdict(TypedDict):
 class TableVerdict(TypedDict):
     """A table-block container in the verdicts map (DATA-MODEL-01 §3, CT-02).
 
-    The six verdict literals apply to leaf verdicts (fields, prompt keys, and
+    The verdict literals apply to leaf verdicts (fields, prompt keys, and
     each row-column sub-verdict). A table entry is a *container* over its
     ``rows[]``; its own ``verdict`` is the literal ``"detail"``.
     """

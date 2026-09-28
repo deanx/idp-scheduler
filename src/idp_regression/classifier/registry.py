@@ -48,7 +48,7 @@ The fan-out over fields, prompts and table rows, the input validation and
 the gate are shared; a classifier does not restate them.
 `tests/classifier/test_registry.py` then holds it to the contract every
 classifier must satisfy — the pinned two-argument signature (CT-02), the
-six verdict literals, and a `gate` returning only PASS/FAIL — so a new
+seven verdict literals, and a `gate` returning only PASS/FAIL — so a new
 entry cannot quietly introduce a vocabulary the score names (INV-03) and
 the remediation UI do not know about.
 

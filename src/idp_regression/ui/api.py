@@ -215,7 +215,9 @@ def create_app(*, dev_cors: bool = False, scorer_dir: Path | None = None) -> Fas
             "vocabulary": {
                 "conditions": list(custom_scorers.CONDITION_KEYS),
                 "actions": list(custom_scorers.ACTION_KEYS),
-                "verdicts": list(custom_scorers.VERDICTS),
+                # What a `verdict_is` condition may name: the verdicts a scorer
+                # can see. `new_table` is table-level and never one of them.
+                "verdicts": list(custom_scorers.SCORER_VERDICTS),
                 "actionable_verdicts": list(custom_scorers.ACTIONABLE_VERDICTS),
                 "kinds": list(custom_scorers.KINDS),
                 "field_types": list(custom_scorers.FIELD_TYPES),
