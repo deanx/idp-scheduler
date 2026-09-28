@@ -1,6 +1,94 @@
 # /test stamp — SPEC-01 (S-01.2 IDP adapter + normalize)
 
 **Status:** ✅ PASSED WITH FINDINGS
+**Source:** /test re-stamp #4 (Wave C — delta re-gate of the fix for re-stamp #3's F-1..F-4; fresh-instance gate per `docs/process/REVIEW-RULES.md` R1–R3, P1–P7)
+**Files:** `src/idp_regression/adapter/{__init__,errors,idp_client,normalize,oauth,token_cache,transport,types,version_probe}.py` — the nine files, named (P5), all pinned to HEAD below
+**Sequence:** one delta commit, `6715968` — `src/` fix and its tests landed together (`git show --stat`, not self-reported). The commit message states each mutant was run red first (T1, T2, I1, O1, O2, M4); this gate re-derived its own matrix rather than trusting that list, and every one of those six is killed here by exactly the test the delta added.
+**Date:** 2026-09-28
+**Commit:** `671596898ec6f87218b39dce95b755dddd716c96` (`feat/S-01.2-idp-adapter`)
+**Author:** alex@divinocosta.com.br (solo)
+**Atchim TDD gate:** PASSED
+**Independence (R3):** fresh Atchim instance on **Fable 5.1**; implementer of `6715968` is **Opus 5.5** (different model). This instance issued **no** APPROVE, REQUEST CHANGES, PASS or FAIL on `6715968`, on `597b912`, or on any earlier S-01.2 commit, and did not run re-stamp #3 (a different instance, committed as `507f58c`). ✅ structural (different models, new instance).
+**Rigor:** SPEC-01 header is `Risk: high` ⇒ this stamp is required regardless of the `prototype` profile; a `src/` fix never qualifies for `re-gate skipped`. **Static:** mypy strict clean (151 files) · ruff clean.
+
+## Delta gated
+`597b912..6715968 -- src/idp_regression/adapter/` — 3 of 9 files, +8/−3: `transport.py` (`_send`: `UnicodeError` routed to the static no-detail path), `idp_client.py` (`_fetch_token` guard → `ch.isascii() and ch.isprintable()`), `oauth.py` (`fetch_access_token` guard, same). Tests: `tests/adapter/test_transport.py` (+2), `tests/adapter/test_oauth.py` (**new**, +2), `tests/adapter/test_normalize.py` (+2, one parametrized 3×5), `tests/adapter/test_idp_client.py` (+1 param). `.gitleaksignore` (+1 fingerprint). No live IDP or platform call was made; `.env` was not sourced.
+
+## Mechanical floor — actual numbers at `6715968`, `PYTHONDONTWRITEBYTECODE=1`, no stray `__pycache__` afterwards
+| gate | result |
+|---|---|
+| `pytest -q` | ✅ **1907 passed, 15 skipped**, 1 warning, 43.7 s (was 1884 at `597b912`: +23 = the delta's tests) |
+| `mypy src tests scripts` (strict) | ✅ no issues, 151 files |
+| `ruff check src tests scripts` | ✅ clean |
+| `gitleaks git --no-banner .` (398 commits) | ✅ **no leaks found** — re-stamp #3's F-4 hit is now fingerprinted; narrowness verified below |
+| Readability / Architecture / Performance axes | skipped: prototype profile |
+
+## Mutation matrix (R1 — each mutant names the invariant it came from; 7 of 16 sit on lines the delta did NOT change)
+Method (P2/P4): each of the six files copied to the scratchpad first (`restamp-s012b/`), mutated by exact single-occurrence string replacement, `pytest -q -p no:cacheprovider -x tests/adapter tests/orchestration` run **one mutant at a time**, restored with `cp`, verified byte-identical with `shasum` (all 16 ✅; the whole `adapter/` tree re-checked against the pre-gate `shasum` list at the end). The survivor was re-run against the full suite.
+
+| # | file · symbol | mutant | invariant / declared contract it attacks | line changed by delta? | result |
+|---|---|---|---|---|---|
+| T1 | `transport._send` | drop the `isinstance(exc, UnicodeError)` routing | INV-02: a token character/offset never reaches a message or log | yes | ✅ killed (`test_a_non_latin1_header_value_is_rejected_without_its_detail`) |
+| T2 | `transport._send` | route the `"Invalid header"` `ValueError` through the redacted-detail path | INV-02 defence-in-depth (re-stamp #3 F-3, the formerly-equivalent M19) | yes | ✅ killed (`test_a_rejected_header_is_reported_statically_never_through_redact`) — **M19 is no longer equivalent** |
+| T3 | `transport._send` | raise the no-detail error **inside** the `except ValueError` (deferred-raise structure removed) | INV-02: `__context__` chain must be empty | **no** | ✅ killed (`test_crlf_in_header_value_raises_typed_error_without_the_secret`) |
+| T4 | `transport._log_and_raise_transport_error` | `redact()` dropped | INV-02 on the detail path | **no** | ✅ killed (`test_bearer_token_never_appears_in_a_redacted_transport_error`) |
+| T5 | `transport._send` | `UnicodeError` → `UnicodeDecodeError` | the branch must catch the *encode* error `http.client` actually raises | yes | ✅ killed (1) |
+| I1 | `idp_client._fetch_token` | `isascii()` dropped | RFC 6750 b64token is ASCII; a non-latin-1 token must be refused at fetch | yes | ✅ killed (`…rejected_at_fetch[tok€en]`) |
+| I2 | `idp_client._fetch_token` | token guard removed | header-injection primary defence | yes | ✅ killed (`…rejected_at_fetch[tok\r\ninjected]`) |
+| I3 | `idp_client._fetch_token` | raise inside `except IDPTransportError` | INV-02 `__context__` chain | **no** | ✅ killed (`test_secrets_never_appear_in_a_token_fetch_failure_log`) |
+| O1 | `oauth.fetch_access_token` | `isascii()` dropped | as I1 | yes | ✅ killed (`test_a_token_outside_printable_ascii_is_refused_without_echoing_it[tok€en]`) |
+| O2 | `oauth.fetch_access_token` | token guard removed | as I2 | yes | ✅ killed (`…[tok\r\ninjected]`) |
+| O3 | `oauth.fetch_access_token` | `isprintable()` dropped (ASCII-only check) | CR/LF/NUL must still be refused | yes | ✅ killed (`…[tok\r\ninjected]`) |
+| **O4** | `oauth.fetch_access_token` | raise inside `except IDPTransportError` (deferred-raise removed) | INV-02 `__context__` chain — the exact mirror of I3 | **no** | ❌ **SURVIVED — full suite 1907 passed** (see F-1) |
+| N1 | `normalize._coerce_cell` | `str` guard removed (re-stamp #3's M4) | `FieldValue.value: str \| None` (R2 value-type obligation) | **no** | ✅ killed (`test_a_non_string_cell_value_is_refused[field-1]`) — **M4 is now killed** |
+| N2 | `normalize._merge_prompts` | prompt answer bypasses `_coerce_cell` | same obligation on the third `_coerce_cell` caller | **no** | ✅ killed (`test_a_prompt_answers_confidence_is_read_like_a_fields`) |
+| N3 | `normalize._coerce_cell` | `bool` accepted (an `int` subclass) | R2: the parametrization must include the subclass trap | **no** | ✅ killed (`…[field-True]`) |
+| C1 | `token_cache._refresh` | typed error re-wrapped `from exc` | chain hygiene (re-stamp #3 P-3) | **no** | ✅ killed (`test_secrets_never_appear_in_a_token_fetch_failure_log`) |
+
+**Equivalent mutants:** none. (T5 is close to trivial but not equivalent: the delta's test raises the encode error, so it distinguishes.)
+
+**Non-equivalent survivor:** O4. Under the mutant, `IDPAuthenticationError.__context__` holds the `IDPTransportError` (verified directly: `__context__ = IDPTransportError('POST https://anypoint... failed: <redacted detail>')`). The message it carries is already `redact()`ed at the transport boundary, so this is a **pin gap on a defence-in-depth layer, not a live leak** — the same class re-stamp #3's F-3 named for `_send`, now on `oauth.py`. `idp_client.py` has the pin (I3 killed); its acknowledged ~30-line twin does not.
+
+## "Try to break it" probes — real `http.client`, `127.0.0.1:9`, no live calls, no `.env`
+- **P-1 (RFC 6750 vs the guard):** b64token = `ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/"` then `*"="` — every character is ASCII-printable, so `isascii() and isprintable()` **cannot refuse a valid token** (`test_a_printable_ascii_token_is_accepted` pins `abc.DEF-123_~+/=`). In the other direction the guard is a strict superset of what `http.client` rejects: CR/LF/NUL (`isprintable` false) and non-latin-1 (`isascii` false) are refused at fetch; tab, obs-fold `\n `, DEL and latin-1 `é` are *accepted* by `http.client` (header goes to the wire — probed) and are refused by the guard anyway. Nothing the guard accepts can make `putheader` raise with detail.
+- **P-2 (every `_send` path, header + token):** non-latin-1 `€`, CR, bad header **name** → `request headers were rejected`, chain length 1, no character/offset/`latin-1` in message or log. tab / obs-fold / NUL / DEL / latin-1 → connection refused, redacted detail, `SECRET` absent from message, log and the 3-deep `URLError` chain. `post_empty_multipart` (the probe transport) with `€` → same static path. `unknown url type` → detail path, URL only.
+- **P-3 (classification nit, not a leak):** a **non-ASCII URL** makes `putrequest`'s `request.encode('ascii')` raise `UnicodeEncodeError`, which the new branch now reports as `request headers were rejected`. Misleading wording; the URL is already in the message and carries no secret, and every URL component reaching `_send` is validated against `^[A-Za-z0-9._-]` first, so unreachable in shipped code. Noted as N-1.
+- **P-4 (gitleaks narrowness):** with `.gitleaksignore` **removed from the tree** (copied to scratchpad, `rm`, scan, `cp` back, `shasum` OK) the scan reports **exactly 2** findings, both `generic-api-key`, both the two fingerprints in the file: `353549d1…:tests/platform/test_langfuse_adapter.py:305` (DEBT-45) and `188f36a3…:demopack/env.demo.example:22`, whose captured "secret" is literally `IDP_REGION=us-east-1` — the triage in the ignore-file comment is exact. The entry is `commit:file:rule:line`, no `paths`/allowlist stanza. (`--gitleaks-ignore-path <nonexistent>` silently falls back to the repo's file — 0 findings either way — so a future narrowness check must remove the file, as here.)
+
+## Findings
+| # | severity | file · symbol | scenario | suggested fix |
+|---|---|---|---|---|
+| **F-1** | **Low** (weak pin, INV-02 defence-in-depth) | `src/idp_regression/adapter/oauth.py` · `fetch_access_token` deferred-raise after `except IDPTransportError` | O4: collapsing the deferred raise into the `except` survives all 1907 tests; `__context__` then carries the (redacted) transport error. `_fetch_token`'s twin is pinned by `test_secrets_never_appear_in_a_token_fetch_failure_log`; `test_oauth.py` pins `__context__ is None` only on the guard path. | In `tests/adapter/test_oauth.py`: monkeypatch `transport.post_json` to raise `IDPTransportError("… Bearer SECRET …")`, assert `IDPAuthenticationError` with `__context__ is None`, `__cause__ is None`, `SECRET` absent from `str(exc)`. Run it red against O4 first (P7). Hand to Dunga: DEBT row, R1 "mirror of a pinned twin" class. |
+| N-1 | nit | `src/idp_regression/adapter/transport.py` · `_send` `except ValueError` | P-3: a `UnicodeEncodeError` from the request line (non-ASCII URL) is labelled "request headers were rejected". Wording only; no secret, unreachable via validated ids. | Optional: word the static reason as `request line or headers were rejected`, or leave as is with a comment. |
+
+Debt to surface to Dunga (`/debt add`): F-1. Re-stamp #3's F-1..F-4 are **closed by `6715968`** as verified here (N1/T1/T2/P-4); its P-3 `from exc` hygiene note stays as previously handed over (C1 shows the typed path is pinned).
+
+## What this stamp does NOT cover — read before trusting a green build
+1. Everything re-stamp #3 listed still holds: the `prompts` shape is unverified against a live response (SR-1 clause 3, DEBT-69(a) open — ⛔ do not fabricate a capture); live IDP submit/poll unexercised; the 10 s poll floor equals the default.
+2. The `UnicodeError` branch in `_send` is **dead in shipped paths** now that both token producers refuse non-ASCII — it is pinned only through a monkeypatched `_urlopen`. That is the intended defence-in-depth, stated so nobody later "removes dead code" and reopens F-2.
+3. Readability / Architecture / Performance axes: `skipped: prototype profile`.
+
+## Freshness (P5) — explicit file list pinned to `6715968`
+`git diff --stat 597b912..HEAD -- src/idp_regression/adapter/__init__.py src/idp_regression/adapter/errors.py src/idp_regression/adapter/idp_client.py src/idp_regression/adapter/normalize.py src/idp_regression/adapter/oauth.py src/idp_regression/adapter/token_cache.py src/idp_regression/adapter/transport.py src/idp_regression/adapter/types.py src/idp_regression/adapter/version_probe.py` → 3 files changed, +8/−3 (`idp_client.py`, `oauth.py`, `transport.py`; the other six unchanged).
+**Added-files check:** `git diff --name-status --diff-filter=ADR 597b912..HEAD -- src/idp_regression/adapter/` → none; `git ls-files` vs on-disk `*.py` → identical; `git status --untracked-files=all` on `src/idp_regression/adapter/`, `tests/adapter/`, `tests/fixtures/` → clean. Tests added in the delta: `tests/adapter/test_oauth.py` (new file, in scope of this gate).
+HEAD blob ids: `__init__.py` `79030c4` · `errors.py` `1bbd4eb` · `idp_client.py` `f2395ae` · `normalize.py` `e935942` · `oauth.py` `9f4d17e` · `token_cache.py` `67df578` · `transport.py` `1fbf455` · `types.py` `b56e82e` · `version_probe.py` `3f0381f`.
+Working tree after the gate: `git status --short` → only `docs/state/STATE.json` (pre-existing) plus this stamp; no `__pycache__` outside `.venv`/`frontend`.
+
+## Verdict
+✅ **PASSED WITH FINDINGS.** The delta answers all four of re-stamp #3's findings with real pins: M4 is killed (N1), the formerly-equivalent M19 is killed (T2), the `UnicodeEncodeError` route is closed both at the source (I1/O1) and in `_send` (T1), and the gitleaks fingerprint is exactly one commit × file × rule × line. 15 of 16 invariant-derived mutants killed, each by a single named test; the one survivor (O4) is a defence-in-depth pin gap on `oauth.py` mirroring a pin `idp_client.py` already has, with no live leak behind it. No fail-open and no INV-02 leak was found by hand-probing every header path through the real `http.client`.
+
+## History
+- 2026-09-22 — ✅ PASSED (superseded, stale per DEBT-46)
+- 2026-09-23 @ `a5805ec` — ✅ PASSED (/test re-gate, DEBT-46; superseded)
+- 2026-09-28 @ `597b912` — ✅ PASSED WITH FINDINGS (re-stamp #3, Wave C; F-1..F-4 → fixed in `6715968`; superseded by this stamp)
+- 2026-09-28 @ `6715968` — ✅ PASSED WITH FINDINGS (this stamp, re-stamp #4, Wave C)
+
+<details>
+<summary>Prior stamp (2026-09-28 @ <code>597b912</code>, re-stamp #3) — preserved verbatim, including its own History and the nested 2026-09-23 stamp</summary>
+
+# /test stamp — SPEC-01 (S-01.2 IDP adapter + normalize)
+
+**Status:** ✅ PASSED WITH FINDINGS
 **Source:** /test re-stamp #3 (Wave C — DEBT-46 staleness, DEBT-72, DEBT-77; fresh-instance gate per `docs/process/REVIEW-RULES.md` R1–R3, P1–P7)
 **Files:** `src/idp_regression/adapter/{__init__,errors,idp_client,normalize,oauth,token_cache,transport,types,version_probe}.py` — the nine files, named (P5), all pinned to HEAD below
 **Sequence:** delta commits `c1a36cb` (feat + tests + docs fixture in one commit), `771a661` (tests for gate findings F-1..F-5, after the feat by design), `57f5cca` (G-2: probe comment + tests + two live captures in one commit). Ordering read from `git show --stat`, not self-reported.
@@ -202,5 +290,7 @@ and are named rather than absorbed.
 ## History
 - 2026-09-22 — ✅ PASSED (superseded, stale per DEBT-46)
 - 2026-09-23 @ `a5805ec` — ✅ PASSED (this stamp)
+
+</details>
 
 </details>
