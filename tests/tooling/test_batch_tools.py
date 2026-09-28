@@ -2172,6 +2172,34 @@ def test_verify_parser_only_offers_pinned_file_based_custom_classifiers(
         )
 
 
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [(None, "pinned-file"), ("", "pinned-file"), ("pinned-file", "pinned-file")],
+)
+def test_resolve_classifier_defaults_to_pinned_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str | None, expected: str
+) -> None:
+    """F-7 (re-gate #2): the `None`/`""`/shipped-default leg of
+    `resolve_classifier`'s return value had no direct test."""
+    monkeypatch.chdir(tmp_path)
+    assert verify_document.resolve_classifier(name) == expected
+
+
+def test_resolve_classifier_returns_a_valid_custom_name_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    scorer_dir = tmp_path / ".idp-regression-scorers"
+    scorer_dir.mkdir()
+    (scorer_dir / "pin-rule.json").write_text(
+        json.dumps({"name": "pin-rule", "base": "pinned-file", "rules": [
+            {"when": {"confidence_below": 0.5, "verdict_is": ["match"]},
+             "then": {"verdict": "wrong_value", "critical": True}}
+        ]})
+    )
+    assert verify_document.resolve_classifier("pin-rule") == "pin-rule"
+
+
 def test_verify_narrows_the_run_to_the_one_pinned_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2574,8 +2602,67 @@ def test_compare_forwards_classifier_to_the_verify_half_only(tmp_path: Path) -> 
     assert verify_argv[verify_argv.index("--classifier") + 1] == "my-pinned-rule"
 
 
+def test_compare_verifies_a_valid_custom_classifier_after_the_pin_half_ran(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Epic E custom-scorer wiring re-gate #2 F-6: the F-1 fix made
+    `resolve_classifier` a SECOND in-process caller of
+    `register_custom_classifiers()` -- `compare_versions.run` calls it
+    (via `verify.resolve_classifier`) before the pin half runs, then
+    `verify.main()` (loaded and run in the SAME process by
+    `compare_versions.main`, not exercised by the `_FakeStage`-based
+    tests) calls it AGAIN. The second call's `parse_spec` shadow-guard
+    saw the name already in the (now-mutated) global `CLASSIFIERS` from
+    the FIRST call and refused it as "already a shipped classifier" --
+    so a VALID custom name crashed with an uncaught `SystemExit(2)`
+    AFTER the pin half had already spent. `resolve_classifier` must
+    resolve the allowed names WITHOUT registering anything -- only
+    `verify.main()` may be the actual registrar."""
+    from idp_regression.classifier.registry import CLASSIFIERS
+    from idp_regression.orchestration import facade
+
+    monkeypatch.chdir(tmp_path)
+    scorer_dir = tmp_path / ".idp-regression-scorers"
+    scorer_dir.mkdir()
+    (scorer_dir / "pin-rule.json").write_text(
+        json.dumps({
+            "name": "pin-rule", "base": "pinned-file",
+            "rules": [{"when": {"confidence_below": 0.5, "verdict_is": ["match"]},
+                      "then": {"verdict": "wrong_value", "critical": True}}],
+        })
+    )
+    # `pin` is a no-op double: the golden this test needs already exists
+    # (`_pinned`, below) -- what matters here is verify.main()'s OWN
+    # registration succeeding, not a real pin step.
+    _pinned(tmp_path, "inv-1.pdf", dataset="ds", action="a", version="1.0.0")
+    archive = _zip(tmp_path, {"inv-1.pdf": b"%PDF"})
+    pin = _FakeStage()
+    recorded: dict[str, Any] = {}
+
+    def _fake_run_eval(*args: Any, **kwargs: Any) -> int:
+        recorded["classifier"] = kwargs.get("classifier")
+        return 0
+
+    monkeypatch.setattr(facade, "run_eval", _fake_run_eval)
+
+    try:
+        with caplog.at_level(logging.WARNING):
+            exit_code, _ = compare_versions.run(
+                _compare_args(tmp_path, zip_path=archive, classifier="pin-rule"),
+                pin,
+                verify_document,
+            )
+    finally:
+        CLASSIFIERS.pop("pin-rule", None)
+
+    assert "already a shipped classifier" not in caplog.text
+    assert len(pin.calls) == 1, "the pin half must have run"
+    assert exit_code == 0
+    assert recorded.get("classifier") == "pin-rule"
+
+
 def test_compare_refuses_a_bad_classifier_before_the_pin_half_spends_anything(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Epic E custom-scorer wiring gate F-1: `verify_document.py`'s own
     argparse `choices` refuse a wrong-base/unregistered `--classifier`,
@@ -2586,7 +2673,13 @@ def test_compare_refuses_a_bad_classifier_before_the_pin_half_spends_anything(
     spend, then fail" shape the preflight check exists to prevent
     elsewhere. Reproduced with a RECORDING pin double and the REAL
     `verify_document` module (not `_FakeStage`), so the pin half's own
-    call count is the thing under test."""
+    call count is the thing under test.
+
+    F-9 (re-gate #2): chdir'd to `tmp_path` -- `resolve_classifier`
+    reads `.idp-regression-scorers/` relative to the process cwd, and
+    without this the repo's OWN (committed) directory would be read at
+    the test's real cwd instead."""
+    monkeypatch.chdir(tmp_path)
     archive = _zip(tmp_path, {f"inv-{i}.pdf": b"%PDF" for i in (1, 2)})
     pin = _FakeStage()
 

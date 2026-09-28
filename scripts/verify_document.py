@@ -88,12 +88,27 @@ def resolve_classifier(name: str | None) -> str:
     half was spending N extractions on a `--classifier` that would only
     fail to parse afterwards).
 
+    Reads specs with `load_specs()`, NOT `register_custom_classifiers()`
+    -- the latter WRITES into the global `CLASSIFIERS` registry, and
+    `compare_versions.py` loads `verify_document.py` as a module and
+    runs `verify.main()` (the actual registrar) in the SAME process,
+    later in the same call. A second `register_custom_classifiers()`
+    call would hit `parse_spec`'s shadow guard, which refuses a name
+    already in `CLASSIFIERS` -- including one THIS function registered
+    a moment ago -- so calling it here would make every VALID custom
+    name fail on the SECOND (verify) half, after the FIRST (pin) half
+    had already spent (re-gate #2, gate F-6, reproduced live).
+    `load_specs` only parses and returns specs; it never touches the
+    registry, so resolving a name here can never collide with
+    `main()`'s own, single, later registration.
+
     Raises `ValueError` (never `SystemExit`) naming the allowed choices.
     Returns the resolved classifier: `name`, or the shipped
     `pinned-file` default when `name` is falsy."""
-    from idp_regression.orchestration.scorer_store import register_custom_classifiers
+    from idp_regression.orchestration.scorer_store import load_specs
 
-    custom_specs, _ = register_custom_classifiers()
+    specs, _ = load_specs()
+    custom_specs = {spec.name: spec for spec in specs}
     allowed = {PINNED_FILE_CLASSIFIER, *_pinned_file_classifier_names(custom_specs)}
     if name and name not in allowed:
         raise ValueError(
