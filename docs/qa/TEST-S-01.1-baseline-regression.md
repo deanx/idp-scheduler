@@ -1,123 +1,138 @@
-# /test stamp — SPEC-01
+# /test stamp — SPEC-01 / S-01.1 (classifier & gate)
 
-**Status:** ✅ PASSED
-**Source:** /test gap-fill (Atchim TDD gate)
-**Date:** 2026-09-21 (re-stamp — FO-5)
-**Commit (reviewed code):** `1428520` — **re-gated 2026-09-22** by a fresh Atchim instance (DEBT-44) after S-01.4 added the additive alias `validate_golden_structure = _validate_golden` to `gate.py` (+11 lines), which had staled this stamp (DEBT-46). Falsifiable check, re-baselined: `git diff --stat 1428520 HEAD -- src/idp_regression/classifier/` must be empty. Re-gate evidence: classifier suite 104 passed standalone; N2 mean 1.38 ms vs the 100 ms budget; INV-02 purity intact (the dependency runs orchestration → classifier, never the reverse); the FO-5 fail-open stays closed — disarming both unknown-verdict guards in `overall_gate` kills two tests; alias-as-wrapper mutation killed; 3 further spot-mutants killed. Prior history: `6d525ef` (FO-5), stamp commit `ab0734d`; original `1d50e978`.
+**Status:** ❌ FAILED — re-stamp gate (Wave C, DEBT-46) found 1 Critical + 1 High on the verdict path. Not stampable until F-1 and F-2 are closed with RED-then-GREEN tests and a fresh instance re-gates.
+**Source:** /test re-stamp gate (Atchim, fresh instance — audit + mutation matrix; no production code edited, no tests added)
+**Files:** src/idp_regression/classifier/__init__.py, src/idp_regression/classifier/canonical.py, src/idp_regression/classifier/custom.py, src/idp_regression/classifier/gate.py, src/idp_regression/classifier/registry.py, src/idp_regression/classifier/scorers.py, src/idp_regression/classifier/scoring.py, src/idp_regression/classifier/types.py — tests: tests/classifier/test_classify.py, test_classify_contract.py, test_custom_scorers.py, test_date_format.py, test_edge_matrix.py, test_gate.py, test_performance.py, test_registry.py, test_tables.py, test_validation.py
+**Sequence:** git-verified (`git log --diff-filter=A`): `test_registry.py` + `test_custom_scorers.py` land in `87da307` with `registry.py`/`custom.py`/`scoring.py`/`scorers.py`; `test_date_format.py` lands in `8f4de93` with D2b; `new_table` tests in `3dd9879`; DEBT-103 tests in `f808bcf`. Co-committed per slice — consistent with the ADR-0003 co-commit waiver recorded in the previous stamp. Not a TDD violation; but see F-1/F-2: the tests that landed with the code pin what the code does, not the invariant the module docstring claims.
+**Date:** 2026-09-28
+**Commit (reviewed code):** `4cb7cc8` (HEAD at stamp time; moved from `0acc0c9` during the session by a docs-only commit — `git diff --stat 0acc0c9 4cb7cc8 -- src/idp_regression/classifier tests/classifier` is empty, and the working tree was `shasum`-verified identical to HEAD before and after mutation). Previous pin `1428520`; delta `1428520..4cb7cc8` on the classifier package = 8 files, +1336/−65 (`87da307` registry/scorers/custom · `5c6063a` fail-open #6 · `3dd9879` D1 `new_table` · `8f4de93` D2 per-column types + `date_format` · `f808bcf` DEBT-103 validator · `08ccd66` DEBT-09/11/63 · `9bf9062` tooling).
 **Author:** alex@divinocosta.com.br  <!-- solo mode — raw git config user.email -->
-**Atchim TDD gate:** PASSED (2026-09-21, Opus 5, fresh instance per DEBT-44 — it had seen none of these diffs). **0 findings against S-01.1.**
+**Atchim TDD gate:** ❌ REQUEST CHANGES (F-1 Critical, F-2 High; F-3..F-8 non-blocking, listed for the fix round and DEBT)
+**Independence:** ✅ structural (different models) — implementer Dengoso (Opus 5.5) reviewed by Atchim (Fable 5.1), a **fresh instance** that had issued no APPROVE on any diff in `1428520..4cb7cc8` (DEBT-44). SPEC-01 is `Risk level: high` → this stamp binds regardless of the `prototype` profile; the verdict path ran at `full` per `## Rigor` row 1.
+**Static:** ✅ `.venv/bin/python -m pytest -q` → **1845 passed, 15 skipped** (integration opt-in) · bare `.venv/bin/mypy` → 0 issues / 150 files (strict) · `.venv/bin/ruff check src tests scripts` → clean. Classifier suite standalone: **194 passed** in ~0.9 s. Secret scan: not re-run here (hook-gated; unchanged since `ee9770e`).
 
-**Scope of this re-stamp — FO-5, `6d525ef`.** `overall_gate` (`classifier/gate.py`) fell through to `return "PASS"` for any verdict outside the six `VerdictLiteral` values, at **both** the top-level and the per-row site inside a `detail` entry. Not reachable via `classify()` (pure, emits only the six) but `overall_gate` is **public API** taking a caller-supplied `VerdictMap`, and the realistic path is extension — add a seventh verdict, forget the two tuples, and the CI gate goes green on it. **Fail-open toward PASS on the one function whose entire job is to be trusted.**
+## Falsifiable freshness check (DEBT-77 — an explicit FILE LIST, never a directory)
 
-**RED reproduced independently, in the claimed shape.** The reviewer's first attempt via pytest was inconclusive (the module fails to *collect* pre-fix, which is red but says nothing about behaviour), so it drove the pre-fix function directly:
+This stamp is fresh iff the following prints nothing:
+
 ```
-top-level unknown verdict  -> RETURNED: 'PASS'   <-- NO RAISE
-unknown row verdict        -> RETURNED: 'PASS'   <-- NO RAISE
-control (wrong_value,crit) -> RETURNED: 'FAIL'
+git diff --stat 4cb7cc8 HEAD -- \
+  src/idp_regression/classifier/__init__.py \
+  src/idp_regression/classifier/canonical.py \
+  src/idp_regression/classifier/custom.py \
+  src/idp_regression/classifier/gate.py \
+  src/idp_regression/classifier/registry.py \
+  src/idp_regression/classifier/scorers.py \
+  src/idp_regression/classifier/scoring.py \
+  src/idp_regression/classifier/types.py
 ```
-**Silent `"PASS"` at both sites, with a control proving the function was otherwise working** — a true fail-open, not a broken fixture. Post-fix both raise `MalformedActualError`, and INV-02 holds: neither `match_key` nor the value appears in the message.
 
-**The drift pin survived adversarial falsification.** The reviewer built a four-scenario matrix specifically to break it:
+A **new** module under `src/idp_regression/classifier/` is *outside* this gate until a stamp names it — it must not turn this check red for a non-reason (DEBT-77's trap). Surface it separately, as a scope-grew signal, with:
+
 ```
-GREEN | A baseline
-GREEN | B production hand-written, Literal unchanged   [honest negative]
-GREEN | C Literal extended, production DERIVED
-RED   | D Literal extended + production hand-written   [pin fires]
+git diff --diff-filter=A --name-only 4cb7cc8 HEAD -- src/idp_regression/classifier/
 ```
-Its note: *"this is the first stamp cycle in this story where the headline mechanism claim survived my attempt to falsify it."* The valid set derives from `frozenset(get_args(VerdictLiteral))` — not a hand-written tuple (DEBT-40/43/47).
 
-**Accepted honest-negative, documented in the test's own words:** replacing the derived set with a today-equivalent literal survives, and `test_gate.py:211` says so explicitly. Do not let anyone claim it is covered.
-**Independence:** ✅ structural (different models) — implementer Dengoso (sonnet) reviewed by Atchim (opus). SPEC-01 risk level is **high** (driven by ADR-0001/0002/0004), so the high-risk Done gate requires structural reviewer independence; sonnet ≠ opus satisfies it. S-01.1 itself depends only on the Low-risk ADR-0003.
-**Static:** ✅ clean (2026-09-21 re-verification) — `uv run mypy src/idp_regression/classifier tests/classifier` → 0 issues / **11 files**; `ruff check .` → clean; `tests/classifier` → **103 passed**. ⚠️ **Rigor profile changed to `prototype` on 2026-09-21** (user decision, `ab0734d`) — **this stamp predates nothing and waives nothing**: `Risk level: high` still requires a `/test` stamp because `/qa` reads risk from the SPEC header, not the profile.
+(Because this stamp is ❌, freshness is moot for `/qa` until a ✅ re-stamp re-pins both commands.)
 
-**Superseded original static line:** `uv run mypy src/idp_regression/classifier tests/classifier` (strict) → 0 issues / 11 files; `uv run ruff check` → All checks passed. Pyright LSP `reportMissingImports` is a known src-path config gap (DEBT-06), not the gate of record — mypy is the configured static-analysis gate per CLAUDE.md `## Tooling`.
+## Findings
 
-## Files (Dengoso's record — repo-relative, git-independent)
-src/idp_regression/classifier/__init__.py, src/idp_regression/classifier/types.py, src/idp_regression/classifier/canonical.py, src/idp_regression/classifier/gate.py, tests/classifier/test_classify.py, tests/classifier/test_gate.py, tests/classifier/test_tables.py, tests/classifier/test_validation.py, tests/classifier/test_edge_matrix.py, tests/classifier/test_classify_contract.py, tests/classifier/test_performance.py, pyproject.toml (+pytest-benchmark dev dep, mypy/ruff/pytest config), uv.lock (pytest-benchmark pin)
+**F-1 — CRITICAL — `classifier/custom.py` `ACTIONABLE_VERDICTS` / `verify_monotone`: a browser-authored spec turns a critical regression into a GREEN build.** The module's contract is *"a spec can turn a match into a failure; it can never turn a failure into a match"* — but the gate does not fail on `match` alone; it fails on `critical ∧ (missing | wrong_value)` or `format_critical ∧ wrong_format`. `ACTIONABLE_VERDICTS` permits `new_field`, `new_line`, `new_table` and `wrong_format`, all of which `overall_gate` treats as informational. Reproduced at HEAD (no mutation):
+```
+golden total: critical, expected 100.00 · actual 999.00 → base regression gate: FAIL
+spec {when: {verdict_is: [wrong_value, missing]}, then: {verdict: new_field}}  → verify_monotone: 0 problems · gate: PASS
+      …then: {verdict: new_line}   → 0 problems · PASS
+      …then: {verdict: new_table}  → 0 problems · PASS
+      …then: {verdict: wrong_format} → 0 problems · PASS
+```
+`verify_monotone` checks only "relaxes to `match`" and "clears `critical`" — the latter leg is vacuous for both shipped bases (neither ever returns a `ScoreResult`), so it proves nothing. Reachable from `--classifier <name>` via `register_custom_classifiers()` and from the console's scorer form on the unauthenticated loopback port. This is the silently-wrong GREEN `## Rigor` names as this system's worst failure. **Fix:** restrict `then.verdict` to verdicts that are *at least as gate-severe* as any base verdict they can replace — in practice `{missing, wrong_value}` only (`wrong_format` allowed only together with `format_critical: true`); and make `verify_monotone` compare **gate outcomes** per enumerated context (`critical=True` contexts included): if the base would FAIL under `overall_gate`, the compiled scorer must too. Pin with the four probes above as RED tests in `test_custom_scorers.py::TestMonotonicity`. **Regression-worthiness: PIN** (defect class: escalation-only guarantee measured against the wrong predicate).
 
-## Sequence (TDD per slice — test file before/with impl, co-committed per slice)
-Branch `feat/S-01.1-baseline-regression`. ADR-0003 is risk:Low; the SPEC-01 DoD waives a stricter TDD ordering gate ("the unit suite IS the gate"), so co-committed test+impl per slice is accepted. Atchim git-verified the sequence (`git log --diff-filter=A`): each test file lands in the same commit as (or before) its implementation slice. The /test prompt-level N22 gap-fill tests + the /implement Scenario-B fix (the per-cell actual-prompt dict check) landed together in `1d50e978` — consistent with the co-commit waiver and the /test-Scenario-B-then-/implement pattern (RED observed by /test, GREEN by /implement).
+**F-2 — HIGH — `classifier/gate.py::overall_gate` row-level FO-5 check uses the 7-set, not the 6-set.** Line 721 tests `row["verdict"] not in _VALID_VERDICTS` (includes `new_table`) where `_VALID_ROW_VERDICTS` exists precisely to exclude it. A caller-supplied map with a `new_table` row inside a **critical** detail block returns `PASS` at HEAD:
+```
+{"items": {"verdict":"detail","critical":True,"rows":[{"column":"qty","verdict":"new_table",…}]}} → PASS
+```
+`_as_row_verdict` (the classify-time guard) is the only thing between a runtime scorer and this hole — and **mutants M05/M06 (disable that guard) SURVIVED**: nothing tests it. With M06 applied, a custom scorer returning `new_table` for a table cell writes a row the gate then accepts. **Fix:** `overall_gate` row site → `_VALID_ROW_VERDICTS`; add `test_gate.py` case "a `new_table` row inside a detail block raises" (mirror of `test_unknown_row_verdict_inside_detail_raises_instead_of_passing`); add a `test_registry.py`/`test_custom_scorers.py` case with a scorer returning `new_table` on `kind="table_column"` asserting `MalformedActualError`. **PIN.**
 
-1. `0a07f4f` — T-01.1.1: `test_classify.py` + `types.py`+`canonical.py`+`gate.py` (classify field-level six verdicts + four types)
-2. `5048496` — T-01.1.2: `test_gate.py` + `overall_gate()` BR2/BR3 + TypedDict NotRequired
-3. `9ea13f4` — T-01.1.3: `test_tables.py` + line-item `match_key` pairing + new_line/missing rows (BR8)
-4. `94f8846` — T-01.1.4: `test_validation.py` + typed `ClassifierError` family + input validation (N22 fields/prompts)
-5. `6077c58` — T-01.1.5: `test_edge_matrix.py` (11 spike tests ported + canonical-form/criticality edge matrix; EX-A1-1/EX-A1-5)
-6. `74e6d75` — T-01.1.6: `test_classify_contract.py` (CT-02: Verdict TypedDict + six literals + key union)
-7. `40dd3b9` — T-01.1.7: `test_performance.py` (N2 pytest-benchmark <100ms p95 over 50 fields / 500 rows)
-8. `e70c465` — lock pin (pytest-benchmark, NFR N17)
-9. `921e270` — fix: N22 table-shape validation (golden table rows must be dicts; actual table cells must be dict-with-`value`) + 2 regression tests (Atchim REQUEST CHANGES round 1)
-10. `9e5bacb` — refactor: canonicalizer class hierarchy → registry of callables (ADR-0003 §Design patterns conformance)
-11. `f90a091` — test: drop dead `r.get('field')` clause + pin `RowVerdict` contract keys
-12. `1d50e978` — fix: N22 validate actual prompt cells are dicts (Scenario B from /test) + 6 prompt-level malformation tests (the /test gap-fill)
+**F-3 — MEDIUM — `custom.py`: `new_table` is an actionable verdict and a `verdict_is` condition, but it is not a leaf verdict.** `then: {verdict: new_table}` on `kind: table_column` raises `MalformedActualError` **at classify time — after the extraction is paid for** — contradicting `SpecError`'s own promise ("never at classify time"). `verdict_is: [new_table]` never matches (no base scorer returns it): a dead condition the author believes configured. Docstrings still say "the six verdicts" while `VERDICTS` is seven. Fold into F-1's fix: `parse_spec` refuses `new_table` in both `then.verdict` and `when.verdict_is`.
 
-## /test gap-fill (this stamp)
+**F-4 — MEDIUM — `canonical.py::_format_date_with` fallback is untested (mutant M24 SURVIVED).** The scenario its docstring names — golden declares `%d/%m/%Y`, the new Action version emits ISO — has no test. At HEAD `compare_value("date","03/04/2024","2024-04-03",date_format="%d/%m/%Y") == "wrong_format"` and vs `2024-03-04` → `wrong_value` (correct); remove the fallback and the correct reading becomes `wrong_value`. Add both assertions to `test_date_format.py`.
 
-**Step 1 — independent coverage audit (fresh agent, no implementation context):** 13/14 S-01.1 items COVERED on the first pass; 1 PARTIAL gap — TP-21/NFR N22 had field-level and table-level malformation coverage but NO prompt-level coverage. After the gap-fill + fix, the re-audit found **ALL S-01.1 ACs/TPs COVERED** (AC2/AC3/AC4/AC6, BR2/BR3/BR8, TP-02/03/04/06/07/08/10/11/14/21, EX-A1-1/A1-2/A1-4/A1-5, CT-02, N2, N22, four field types, new_line/missing) with file:line evidence — no remaining gap.
+**F-5 — MEDIUM — `gate.py::_column_type` unknown-type degrade is untested (M11 SURVIVED).** `types: {qty: "integer"}` silently compares as text (documented fail-open, "schema constrains it"). Untested, and a golden reaching `classify` without provisioning is exactly the case `_validate_declared_date_format` (DEBT-103) was added for. Either validate `types` values in `_validate_golden` like `date_format` (consistent, recommended) or pin the degrade with a test. Surface as DEBT if the team keeps the degrade.
 
-**Step 2 — Dengoso wrote 6 prompt-level N22 tests** (5 PASS pinning existing `_validate_golden`/`_validate_actual` behavior; 1 RED). The RED test `test_actual_prompt_cell_non_mapping_raises_malformed_actual` revealed **Scenario B**: `_validate_actual` validated `fields` and `tables` per-cell but NOT `prompts` per-cell, so a non-dict actual prompt cell leaked a raw `AttributeError` (`acell.get("answer")` in `_classify_prompt`, gate.py:173) instead of typed `MalformedActualError` — same defect class Atchim caught for tables in /implement round-1 (commit 921e270). Per /test protocol, /test did NOT write implementation; it routed the Scenario B to /implement.
+**F-6 — LOW — `new_table` entry's `critical=False` unpinned (M08 SURVIVED).** `test_critical_is_echoed_from_golden_and_false_for_new` covers `new_field` only; extend to `new_table`.
 
-**/implement fix (commit 1d50e978):** Dengoso added a per-cell `isinstance(pcell, dict)` check to `_validate_actual`'s prompts loop (dict-check-only; an `answer`-presence check was deliberately NOT added — `_classify_prompt` tolerates a missing `answer` → `missing` verdict, so requiring it would tighten behavior beyond NFR N22 / ADR-0003 and break the "actuals may be incomplete → `missing`" contract; Atchim confirmed NOT an under-fix). The RED test turned GREEN. 82 passed, mypy strict + ruff clean. Atchim five-axis + TDD review: APPROVE (see Atchim review below).
+**F-7 — LOW — `custom.py::compile_spec` "OR-ed, never assigned" for `critical` is unpinned (M30 SURVIVED)** — unobservable while no base returns a `ScoreResult`; pin with a stub base or drop the claim from the comment.
 
-**Step 3 — Atchim TDD gate (opus):** PASS, overall and per test file. Mutation spot-checks: all four trivially-wrong mutants (always-match-on-critical, position-based row pairing, gate-FAILs-on-wrong_format, new_field-fails-gate) are caught by the suite. TP-21/N22 confirmed covered at field + table + prompt level. TDD sequence git-verified consistent with the ADR-0003 co-commit waiver. No REQUEST CHANGES.
+**F-8 — LOW — `gate.py::_row_affinity` ignores declared column types when tie-breaking duplicate `match_key` candidates (M12 SURVIVED)** — affects DEBT-09 pairing only; one test with `types` + duplicate keys closes it.
 
-## Atchim review
+## Mutation matrix (35 own mutants, each aimed at a named invariant; `tests/classifier` only, `-x`; every file restored byte-identically — `shasum -a 256 -c` OK; `PYTHONDONTWRITEBYTECODE=1`)
 
-**/implement round 1 (initial review of the original S-01.1):** REQUEST CHANGES — one Required finding (N22 table-shape validation gap: non-dict golden table row / actual table cell leaked a raw `AttributeError` instead of a typed `ClassifierError`) + 4 Suggestions. TDD gate, purity, correctness, performance all PASS.
+| # | Mutant (file · symbol · change) | Invariant | Result | Killed by |
+|---|---|---|---|---|
+| M01 | gate.py `overall_gate` drop top-level unknown-verdict raise | FO-5 | KILLED | test_gate::test_unknown_top_level_verdict_raises_instead_of_passing |
+| M02 | gate.py `overall_gate` drop row-level unknown-verdict raise | FO-5 rows | KILLED | test_gate::test_unknown_row_verdict_inside_detail_raises_instead_of_passing |
+| M03 | gate.py `overall_gate` gate FAILs on critical `new_table`/`new_field` | BR3 informational | KILLED | test_gate::test_all_legitimate_top_level_verdicts_still_gate_correctly[new_field] |
+| M04 | gate.py `_VALID_VERDICTS` hand-written 6 (7th forgotten) | 7-verdict gate | KILLED | …still_gate_correctly[new_table] |
+| M05 | gate.py `_VALID_ROW_VERDICTS` = all 7 | Row ≠ new_table | **SURVIVED** | — (F-2) |
+| M06 | gate.py `_as_row_verdict` guard removed | Row ≠ new_table | **SURVIVED** | — (F-2) |
+| M07 | gate.py new_table loop `not in gtables` guard removed | D1 overwrite | KILLED | test_classify_contract::test_every_leaf_verdict_is_one_of_the_six_literals |
+| M08 | gate.py new_table emitted `critical=True` | new_* critical False | **SURVIVED** | — (F-6) |
+| M09 | gate.py new_table loop deleted | D1 / DEBT-05 | KILLED | test_tables::test_a_table_the_golden_does_not_have_is_reported_as_new_table |
+| M10 | gate.py `_column_type` always text | D2a | KILLED | test_tables::test_a_numeric_column_compares_by_value_not_by_text |
+| M11 | gate.py `_column_type` no `FIELD_TYPES` check | D2a degrade | **SURVIVED** | — (F-5) |
+| M12 | gate.py `_row_affinity` ignores column types | D2a + DEBT-09 | **SURVIVED** | — (F-8) |
+| M13 | gate.py validator: non-date-type check removed | DEBT-103 | KILLED | test_date_format::…refuses_a_date_format_that_cannot_do_anything[spec0] |
+| M14 | gate.py validator: value-parses check removed | DEBT-103 | KILLED | …cannot_do_anything[spec1] |
+| M15 | gate.py validator: blank format accepted | DEBT-103 | KILLED | test_date_format::test_a_blank_date_format_is_refused_even_on_an_empty_value |
+| M16 | gate.py validator never called | DEBT-103 | KILLED | …cannot_do_anything[spec0] |
+| M17 | gate.py `_declared_date_format` always None | D2b | KILLED | test_date_format::test_a_declared_day_first_format_is_honoured |
+| M18 | gate.py `_classify_field` scorer critical REPLACES golden's | escalation-only | KILLED | test_classify::test_tp02_all_match_every_field_match |
+| M19 | gate.py cell escalation not propagated to block | escalation-only | KILLED | test_registry::test_a_scorer_escalating_a_line_item_escalates_its_block |
+| M20 | gate.py `format_critical` branch removed | DEBT-80 | KILLED | test_gate::test_wrong_format_fails_the_gate_when_the_field_is_format_critical |
+| M21 | gate.py name-collision check removed | fail-open #6 | KILLED | test_validation::test_golden_field_and_table_name_collision_raises_malformed_golden |
+| M22 | canonical.py `compare_value` ignores `date_format` | D2b | KILLED | test_date_format::test_a_declared_day_first_format_is_honoured |
+| M23 | canonical.py `date_format` applied to VALUE tier | D2b tiers | KILLED | same |
+| M24 | canonical.py `_format_date_with` no fallback | D2b vs ISO actual | **SURVIVED** | — (F-4) |
+| M25 | registry.py `resolve` unknown → default | registry contract | KILLED | test_registry::test_an_unknown_name_is_refused_and_names_the_alternatives |
+| M26 | registry.py pinned-file row wired to `classify` | registry contract | KILLED | test_registry::test_pinned_file_calls_empty_against_empty_an_agreement |
+| M27 | scorers.py pinned-file: empty actual always match | pinned-file rule | KILLED | test_registry::test_pinned_file_still_fails_a_genuinely_lost_value |
+| M28 | scorers.py regression: empty/empty match | regression byte-for-byte | KILLED | test_registry::test_regression_keeps_treating_an_empty_actual_as_missing |
+| M29 | custom.py `ACTIONABLE_VERDICTS` includes match | monotone | KILLED | test_custom_scorers::TestMonotonicity::test_a_spec_cannot_relax_a_verdict_to_match |
+| M30 | custom.py `compile_spec` critical assigned not OR-ed | monotone | **SURVIVED** | — (F-7) |
+| M31 | custom.py `verify_monotone` relax-to-match check removed | monotone | KILLED | …test_verify_monotone_catches_a_relaxation_the_key_check_would_miss |
+| M32 | custom.py base scorer not consulted | base runs first | KILLED | …test_the_goldens_critical_survives_a_rule_that_says_nothing_about_it |
+| M33 | types.py `RowVerdictLiteral` gains new_table | CT-02 / INV-03 | KILLED | test_classify_contract::test_a_row_sub_verdict_can_never_be_new_table |
+| M34 | gate.py `_validate_actual` prompt per-cell check removed | N22 | KILLED | test_validation::test_actual_prompt_cell_non_mapping_raises_malformed_actual |
+| M35 | custom.py `confidence_below` fires on missing confidence | spec semantics | KILLED | …TestCompilation::test_a_missing_confidence_is_not_below_the_floor |
 
-**/implement round 2 (re-review after table-shape fix):** APPROVE — Required finding CLOSED; both error types subclass `ClassifierError`. 76 tests pass, benchmark p95 ~1.37ms << 100ms N2.
+**28 / 35 killed.** All 7 survivors map to F-2, F-4, F-5, F-6, F-7, F-8 above. F-1 needed no mutant — it reproduces at HEAD.
 
-**/implement round 3 (re-review of the /test-Scenario-B fix, commit 1d50e978):** APPROVE — five-axis PASS, TDD gate PASS. Dict-check-only fix is the correct minimal closure of the N22 leak class (NOT an under-fix — an `answer`-presence check would tighten behavior beyond NFR N22 / ADR-0003). No Critical/Required findings. Suggestions: (a) prompts-vs-fields `answer`-presence asymmetry — a DEBT candidate for Dunga (behavior change, separate story if wanted), NOT a defect; (b) missing trailing newline in test_validation.py (cosmetic). Regression-worthiness ruling: PIN `test_actual_prompt_cell_non_mapping_raises_malformed_actual` (second occurrence of the non-dict-cell-leaks-`.get`-AttributeError defect class) and the 4 golden-side prompt tests (pin pre-existing validation that had no direct coverage).
+## AC coverage (S-01.1 items, unchanged from the previous stamp and re-verified by M01–M04, M18–M21, M34; new invariants added)
 
-**/test TDD gate (opus, this stamp):** PASS — per file and overall. Tests exercise AC behavior (not internals); assertions are discriminating (all four mutants red); names read as spec statements; every S-01.1 AC/Test-plan row has ≥1 meaningful test; TDD sequence git-verified.
-
-## Suite results
-
-| Scope | Passed | Failed |
+| AC / invariant | Tests | Status |
 |---|---|---|
-| Story tests | 104 | 0 |
-| Bug-repro (`@bug-repro`) | — | 0 (none) |
-
-`uv run pytest -q` → **82 passed** in ~0.32s. Per-file: test_classify 10, test_gate 8, test_tables 8, test_validation 21 (15 original + 6 prompt-level gap-fill), test_edge_matrix 22, test_classify_contract 12, test_performance 1. Benchmark p95 ~1.37ms (N2 budget 100ms).
-
-## AC coverage
-
-| AC / TP | Tests | Status |
-|---|---|---|
-| AC2 / TP-02 (all-match → gate PASS) | test_classify.py:27, test_gate.py:24 | ✅ COVERED |
-| AC3 / TP-03 (critical missing → `missing`/FAIL) | test_classify.py:45, test_classify.py:61 (TP-08/EX-A1-2), test_gate.py:35 | ✅ COVERED |
-| AC4 / TP-04 / TP-10 / EX-A1-4 (format-only date → `wrong_format`, gate PASS) | test_classify.py:74, test_edge_matrix.py:90, test_gate.py:59 | ✅ COVERED |
-| AC6 / TP-06 / TP-11 / TP-14 / EX-A1-5 (`new_field` informational, gate unaffected) | test_classify.py:88, test_edge_matrix.py:315, test_gate.py:71 | ✅ COVERED |
-| TP-07 / EX-A1-1 (5 invoices all match → 5 gates PASS) | test_edge_matrix.py:285 | ✅ COVERED |
-| TP-08 / EX-A1-2 (critical total empty → `missing`, gate FAIL) | test_classify.py:61, test_gate.py:35 | ✅ COVERED |
-| BR2 (criticality governs gate) | test_gate.py:35,47,86,98 | ✅ COVERED |
-| BR3 (`new_field`/`new_line` never fail gate) | test_gate.py:71, test_tables.py:94, test_edge_matrix.py:161,241 | ✅ COVERED |
-| BR8 (match_key not position) | test_tables.py:62 | ✅ COVERED |
-| TP-21 / NFR N22 (malformed → typed `ClassifierError`, no raw leak, no silent match) | test_validation.py:36-115 (field), :118 (golden table row), :140 (actual table cell), :195-224 (golden prompts: non-mapping/spec/missing-answer/non-bool-critical), :227-242 (actual prompts: non-mapping/non-mapping-cell), :160 (subclass `ClassifierError`), :166 (loud not silent match) | ✅ COVERED (field + table + **prompt-level gap-filled**) |
-| CT-02 (Verdict/RowVerdict/TableVerdict contract) | test_classify_contract.py:27,31,37,42,47,62,69,109,115,145 | ✅ COVERED |
-| NFR N2 (perf <100ms p95, ≤50 fields / ≤500 rows) | test_performance.py:67 | ✅ COVERED |
-| Four field types per-type canonical (number/date/id/text) | test_edge_matrix.py:191,197,203,209 | ✅ COVERED |
-| `new_line` on unmatched actual row | test_tables.py:94, test_edge_matrix.py:241 | ✅ COVERED |
-| `missing` on unmatched golden row | test_tables.py:112, test_edge_matrix.py:263 | ✅ COVERED |
-| Non-critical difference → PASS | test_gate.py:86,98, test_edge_matrix.py:222 | ✅ COVERED |
-| Purity (no IDP/platform/I/O imports) | test_classify_contract.py:145 + static grep | ✅ COVERED |
-| N28 / ADR-0005 #8 — orchestration reuses the N22 validator (same function object, no second dialect) | tests/classifier/test_validation.py:248 (identity pin; wrapper mutation killed) | ✅ COVERED |
+| AC2 / TP-02 · AC3 / TP-03 / TP-08 · AC4 / TP-04 / EX-A1-4 · AC6 / TP-06 / EX-A1-5 · TP-07 / EX-A1-1 · BR2 · BR3 · BR8 · TP-21 / N22 · CT-02 · N2 · four types · new_line / missing rows · purity · N28 alias | as listed in the 2026-09-21 stamp (test_classify, test_gate, test_tables, test_validation, test_edge_matrix, test_classify_contract, test_performance) | ✅ COVERED (mutants M01–M04, M18, M20, M21, M34 all killed) |
+| FO-5 both sites | test_gate.py:177, :184 | ✅ COVERED — but row site checks the wrong set (F-2) |
+| 7-verdict `overall_gate` incl. `new_table` informational | test_gate.py:200–229 (parametrized over `get_args(VerdictLiteral)`), test_tables.py:359, :395, :422 | ✅ COVERED |
+| `RowVerdictLiteral` never `new_table` — type level | test_classify_contract.py:44, :77 | ✅ COVERED |
+| `RowVerdictLiteral` never `new_table` — runtime guard `_as_row_verdict` | — | ❌ MISSING (M05/M06 survived; F-2) |
+| D2a per-column types | test_tables.py:497, :517, :526, :541 | ✅ COVERED (M10 killed) — degrade path untested (F-5) |
+| D2b `date_format` tiers | test_date_format.py:41, :57, :68, :97, :177 | ✅ COVERED (M17, M22, M23 killed) — fallback untested (F-4) |
+| DEBT-103 validator | test_date_format.py:151 (×2), :161, :167 | ✅ COVERED (M13–M16 killed) |
+| Registry contract | test_registry.py:53–188, :235 | ✅ COVERED (M25–M28 killed) |
+| Escalation-only (scorer → golden) | test_registry.py:267, :285, :301, :337 | ✅ COVERED (M18, M19 killed) |
+| Custom spec monotone w.r.t. **the gate** | — | ❌ MISSING — only "never `match`" is tested; gate-relaxing verdicts pass (F-1) |
 
 ## Scenario A bugs (quarantined repros)
-(none — no `@bug-repro` tests; the one Scenario B found during /test was this story's own AC gap, fixed via /implement commit 1d50e978, not a pre-existing unrelated bug.)
+(none — no `@bug-repro` tests; F-1 and F-2 are this delta's own defects, i.e. Scenario B: back to /implement.)
 
-## Non-blocking debt (recorded in docs/state/DEBT.md — for Soneca/Dunga/Mestre, NOT code defects)
-- **DEBT-04** — table columns default to `text` (no per-column `type`); Soneca to add an optional per-column `type` map.
-- **DEBT-05** — actual-only tables absent from the verdict map (no `new_table` verdict literal); needs a versioned ADR change if required.
-- **DEBT-06** — pyright LSP src-path config gap (false `reportMissingImports`); mypy is gate of record.
-- **DEBT-07** — ADR-0003 line 64 `date` bullet reads as `match` but AC4 requires `wrong_format`; code is correct (reviewer-confirmed), Soneca to reconcile the doc.
-- **DEBT-08** — DATA-MODEL-01 §3 example uses `"field"` where the implemented + contract-pinned `RowVerdict` key is `"column"`; Soneca one-line doc fix.
-- **DEBT-09** — duplicate `match_key` behavior unspecified & untested; Dunga/Soneca to decide.
-- **DEBT-10 (new, from /test Atchim)** — prompts-vs-fields `answer`-presence asymmetry: actual fields/table cells require `value` present, but actual prompts require only a dict (not `answer`). This is intentional (a missing `answer` → `missing` verdict is valid), but if the team wants strict golden/actual symmetry on prompts it's a separate behavior-change story. Dunga to track.
-- **DEBT-11 (new, from /test Atchim)** — `tests/classifier/test_performance.py:47` comment says "half the rows match, half are new (exercise match + new_line)" but `_build_actual` makes all 500 rows match (no new_line path under benchmark). Stale comment; the perf gate is still validly measured. Update the comment or split rows half-and-half.
-- **cosmetic** — test_validation.py missing trailing newline (Atchim suggestion, ruff doesn't enforce).
-- ~~**gitleaks** binary not installed locally — recorded as tool-absent~~ ⚠️ **STALE, corrected 2026-09-21.** `gitleaks 8.30.1` **is** installed (confirmed by the user's own `brew` output and by the independent gate, which flagged this note as out of date). Current state: `gitleaks git .` is **clean** as of `ee9770e`, which added a `.gitleaksignore` fingerprint baselining the one triaged historical test-fixture hit at `353549d` (**DEBT-45**, verified not a credential across four audits). The detector was proven **still armed** after that entry by planting a secret of the same shape and confirming it is caught. The remaining work is not the tool but the **gate definition** — T-01.4.10 leg 1 must move to merge-base scope with full history as a scheduled non-blocking audit, because merge-base scoping alone does **not** clear this branch.
+## Non-blocking debt surfaced for Dunga (`/debt add`)
+- F-5 `_column_type` unknown-type degrade: decide validate-vs-degrade; either way, pin it.
+- F-7 `verify_monotone`'s `base_critical` leg is vacuous for both shipped bases — either give it a stub base in tests or state that it guards future bases only.
+- Docstring drift in `custom.py` ("six verdicts") and `gate.py::classify_pinned_file` ("same six verdicts") since D1 made it seven.
+- `custom.py`'s `_enumerate_contexts` never varies `format_critical` or `match_key`; fine today, worth a comment.
 
 ## History
-- `/test gap-fill (Atchim TDD gate)` on 2026-09-21 at `ab0734d`: ✅ **PASSED** — re-stamp after **FO-5** (`6d525ef`) closed the `overall_gate` fail-open. Gated by a **fresh instance** (DEBT-44). Previous stamp was stale from 2026-09-18: `classifier/gate.py` changed and nothing re-stamped it, so S-01.1 sat marked Done with no backing stamp until this one.
-- `/implement (Atchim code review TDD gate)` on 2026-09-18 at `f90a0915a27495e10f946de5eceeb234678d2d3d`: ✅ PASSED — the original S-01.1 /implement stamp (Atchim 2-round review, 76 tests, structural sonnet≠opus, static clean). Superseded by this /test stamp after /test found the prompt-level N22 gap (Scenario B) and /implement fixed it (commit 1d50e978). The /qa rigor gate blocked on the /implement-sourced stamp (high-risk spec requires a /test-sourced stamp); this stamp resolves that.
+- `/test re-stamp gate (Atchim, fresh instance)` on 2026-09-28 at `4cb7cc8`: ❌ **FAILED** — F-1 Critical (custom spec relaxes a critical `wrong_value` to an informational verdict; gate PASS), F-2 High (`overall_gate` row site accepts `new_table`; classify-time guard untested). 28/35 mutants killed. Gates green.
+- `/test gap-fill (Atchim TDD gate)` on 2026-09-21 (re-gated 2026-09-22) at `1428520`: ✅ PASSED — FO-5 re-stamp; 104 classifier tests; drift-pin four-scenario matrix; alias-as-wrapper mutant killed. Staled by `87da307..f808bcf` (DEBT-46).
+- `/implement (Atchim code review TDD gate)` on 2026-09-18 at `f90a0915`: ✅ PASSED — original S-01.1 stamp (2-round review, 76 tests). Superseded by the 2026-09-21 /test stamp.
