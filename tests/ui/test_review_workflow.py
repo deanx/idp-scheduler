@@ -613,6 +613,57 @@ class TestVerifyCandidateINV09:
             f"got {response.status_code}: {response.json()}"
         )
 
+    def test_inv09e_refuses_when_both_hashes_are_none(
+        self, client: TestClient, ws: Path, docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """INV-09(e) — both-None safety: verify-candidate/start refuses when BOTH
+        approved_golden_hash (persisted) AND the live-fetched current_hash are None
+        simultaneously.
+
+        This directly tests the `None == None` comparison hazard Branca's harden probe
+        flagged (HARDEN-02).  A naive `current_hash == session.approved_golden_hash`
+        would PASS vacuously here (`None == None` is True in Python), producing a
+        silently-wrong GREEN — the worst failure mode this system can produce.
+
+        The implementation avoids this via `is not None` guards in `hash_match`, but the
+        combined case was not previously exercised by a test: the two existing tests each
+        set only ONE side to None.
+
+        This test constructs the dangerous state directly via monkeypatching, bypassing
+        the upstream guard at review-complete (which now refuses a None hash). That bypass
+        is intentional — the test proves defence-in-depth at the verify-start code path
+        itself, independent of whatever upstream guard may or may not reach this state in
+        normal flow.
+        """
+        # Force approved_golden_hash=None into a REVIEWED session
+        # (bypasses review-complete's own None-refusal — tests the verify-start layer directly)
+        session = _make_review_session(
+            ws,
+            state=ReviewSessionState.REVIEWED,
+            approved_golden_hash=None,
+            document_dir=str(docs_dir),
+        )
+        # Platform also unreachable at stage-2 time → current_hash is None too
+        monkeypatch.setattr(
+            "idp_regression.ui.api.fetch_golden_hash",
+            lambda dataset, workspace: None,
+        )
+        from idp_regression.ui import jobs, preflight
+        monkeypatch.setattr(jobs, "plan", lambda argv, **kw: (3, ["3 extractions"]))
+        monkeypatch.setattr(
+            preflight, "check", lambda: {"can_run_validation": True, "blockers": []}
+        )
+        response = client.post(
+            "/api/workflows/verify-candidate/start",
+            json={"session_id": session.session_id, "approved_extractions": 3},
+        )
+        assert response.status_code == 409, (
+            f"INV-09(e) fail-closed: verify-candidate/start must refuse (409) when BOTH "
+            f"approved_golden_hash AND current_hash are None simultaneously — "
+            f"None == None is True in Python, so a naive equality check would pass vacuously. "
+            f"Got {response.status_code}: {response.json()}"
+        )
+
     def test_inv09e_refuses_when_approved_golden_hash_is_none(
         self, client: TestClient, ws: Path, docs_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -767,6 +818,63 @@ class TestGetReviews:
             f"(must be < 2s per NFR-02 N1)"
         )
 
+    def test_n1_get_session_with_100_doc_edited_ids_returns_in_under_2s(
+        self, client: TestClient, ws: Path
+    ) -> None:
+        """N1 (realistic fixture): GET /api/reviews/{session_id} returns in < 2s for a
+        session that carries 100-document-sized provenance data.
+
+        GET /api/reviews/{session_id} returns session.to_dict(), which includes
+        `edited_document_ids` — a dict from document_id to list of edited field names.
+        For a 100-document session where the curator has edited items, this dict can
+        have up to 100 entries each with several field names.  The previous N1 test
+        used an empty `edited_document_ids={}`, which did not exercise the per-document
+        payload scale factor at all.
+
+        This test builds a realistic session with 100 entries in `edited_document_ids`
+        (each with 5 field names, matching a typical invoice extraction) and measures
+        the endpoint's response time against that payload.
+        """
+        # Build a realistic 100-document provenance payload
+        edited_ids = {
+            f"invoice-{i:04d}.pdf": [
+                "invoice_total", "invoice_date", "vendor_name", "bill_to", "currency"
+            ]
+            for i in range(100)
+        }
+        session = ReviewSession(
+            session_id="perf-test-100-doc-session",
+            dataset="perf-100-doc-dataset",
+            org_id="org-001",
+            action_id="act-001",
+            trusted_version="1.0.0",
+            candidate_version="2.0.0",
+            document_dir=str(ws / "documents"),
+            archive_sha256="aabbccdd" * 8,
+            approved_golden_hash="hash-at-review-time",
+            stage1_job_id="job-perf-100",
+            stage2_job_id=None,
+            state=ReviewSessionState.REVIEWED,
+            created_at="2026-09-28T00:00:00Z",
+            edited_document_ids=edited_ids,
+        )
+        save_session(session, ws)
+
+        start = time.monotonic()
+        response = client.get("/api/reviews/perf-test-100-doc-session")
+        elapsed = time.monotonic() - start
+
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["edited_document_ids"]) == 100, (
+            "response must include all 100 document entries in edited_document_ids"
+        )
+        assert elapsed < 2.0, (
+            f"GET /api/reviews/{{session_id}} took {elapsed:.3f}s for a 100-document session "
+            f"(must be < 2s per NFR-02 N1 — measured against a realistic 100-entry "
+            f"edited_document_ids payload, not an empty dict)"
+        )
+
 
 # ---------------------------------------------------------------------------
 # T-02.1.8 — /api/health three-route declaration
@@ -846,6 +954,59 @@ class TestN7NofLockConcurrency:
         assert not registry.is_busy(), (
             "is_busy() returned True while only a review session exists (no flock held); "
             "the review step must not hold the workspace lock"
+        )
+
+    def test_n7_unrelated_job_can_actually_start_while_review_session_is_pending(
+        self, client: TestClient, ws: Path, docs_dir: Path,
+        monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """N7 (stronger variant): an unrelated job actually starts via the real API endpoint.
+
+        The previous test only asserts `is_busy() is False` — necessary but not sufficient.
+        This test goes further: creates a pending review session, then POSTs a real
+        draft-golden/start call for a *different* dataset through the same TestClient, and
+        asserts the response is 200 rather than 409.
+
+        This directly proves that the review session holding no flock means a second,
+        unrelated job can actually be accepted and started — not just that the busy flag
+        reads as unset.
+        """
+        # A review session already exists (no lock held)
+        _make_review_session(ws, state=ReviewSessionState.REVIEWED)
+
+        from idp_regression.ui import jobs, preflight
+        from idp_regression.ui.jobs import JobRegistry
+
+        monkeypatch.setattr(
+            preflight, "check", lambda: {"can_run_validation": True, "blockers": []}
+        )
+        monkeypatch.setattr(jobs, "plan", lambda argv, **kw: (2, ["2 extractions"]))
+        # Avoid spawning a real subprocess — return a fake job instead
+        monkeypatch.setattr(
+            JobRegistry,
+            "start",
+            lambda self, kind, argv, planned_extractions, approved_extractions: _FakeJob(
+                kind=kind, id="unrelated-job-while-review-pending"
+            ),
+        )
+
+        # ACTUAL endpoint call — proves the workspace is not locked by the review session
+        response = client.post(
+            "/api/workflows/draft-golden/start",
+            json={
+                "document_dir": str(docs_dir),
+                "dataset": "other-dataset-no-conflict",
+                "org": "org-999",
+                "action": "act-999",
+                "trusted_version": "3.0.0",
+                "candidate_version": "4.0.0",
+                "approved_extractions": 2,  # matches plan — job is accepted
+            },
+        )
+        assert response.status_code == 200, (
+            f"N7: an unrelated job must actually be startable (200) while a review session "
+            f"is pending — the review pause must not hold the workspace flock. "
+            f"Got {response.status_code}: {response.json()}"
         )
 
 
@@ -966,4 +1127,148 @@ class TestObservability:
         assert len(refusal_lines) >= 1, (
             "no log line emitted for verify-candidate/start INV-09(e) refusal; "
             "the refusal must be observable"
+        )
+
+    def test_verify_candidate_started_log_emitted_on_success(
+        self, client: TestClient, ws: Path, docs_dir: Path, monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """N3 (observability): a SUCCESSFUL verify-candidate/start emits exactly one
+        'verify_candidate_started' log line.
+
+        The existing observability test only covers the refusal case
+        (verify_candidate_inv09e_check when the hash mismatches).  This test covers the
+        happy path: when INV-09(e) passes and the job actually starts, the
+        'verify_candidate_started' event must be observable — exactly one line, and it
+        must include the session_id but NOT any golden hash value (INV-02).
+
+        Note: there are NO distinct 'draft_completed' or 'review_pending' log events in
+        api.py — those state transitions are handled by the jobs subsystem (pin_document
+        job completion) and are NOT visible as named api.py log events.  If N3 intends
+        to cover those transitions, a separate log observation at the jobs layer would be
+        required.  This test pins the api.py-level events only.
+        """
+        session = _make_review_session(
+            ws,
+            state=ReviewSessionState.REVIEWED,
+            approved_golden_hash="matching-hash-for-success",
+            document_dir=str(docs_dir),
+        )
+        monkeypatch.setattr(
+            "idp_regression.ui.api.fetch_golden_hash",
+            lambda dataset, workspace: "matching-hash-for-success",  # matches — happy path
+        )
+        from idp_regression.ui import jobs, preflight
+        from idp_regression.ui.jobs import JobRegistry
+        monkeypatch.setattr(jobs, "plan", lambda argv, **kw: (4, ["4 extractions"]))
+        monkeypatch.setattr(
+            preflight, "check", lambda: {"can_run_validation": True, "blockers": []}
+        )
+        monkeypatch.setattr(
+            JobRegistry,
+            "start",
+            lambda self, kind, argv, planned_extractions, approved_extractions: _FakeJob(
+                kind=kind, id="fake-verify-job-success"
+            ),
+        )
+
+        with caplog.at_level(logging.INFO, logger="idp_regression.ui.api"):
+            response = client.post(
+                "/api/workflows/verify-candidate/start",
+                json={
+                    "session_id": session.session_id,
+                    "approved_extractions": 4,
+                },
+            )
+        assert response.status_code == 200, (
+            f"happy-path verify-candidate/start must return 200, got {response.status_code}: "
+            f"{response.json()}"
+        )
+        started_lines = [
+            line for line in caplog.messages
+            if "verify_candidate_started" in line
+        ]
+        assert len(started_lines) == 1, (
+            f"expected exactly 1 'verify_candidate_started' log line on success, "
+            f"got {len(started_lines)}: {started_lines}"
+        )
+        # session_id must appear in the log line
+        assert session.session_id in started_lines[0], (
+            "the verify_candidate_started log line must include the session_id"
+        )
+        # The golden hash must NOT appear in the log line (INV-02)
+        assert "matching-hash-for-success" not in started_lines[0], (
+            "INV-02 violation: the golden hash appeared in the verify_candidate_started log line"
+        )
+
+
+# ---------------------------------------------------------------------------
+# AC2 (S-02.1) — zero-quota assertions for /complete and GET /api/reviews
+# ---------------------------------------------------------------------------
+
+
+class TestZeroQuota:
+    """These endpoints must never spawn a subprocess (i.e. spend IDP quota).
+
+    The strong pattern from T-02.2.4 (patch/replace): monkeypatch subprocess.Popen
+    directly and assert it is never called.  Applies equally to review-read and
+    review-complete, which are metadata-only operations.
+    """
+
+    def test_complete_spends_zero_idp_quota(
+        self, client: TestClient, ws: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """POST /reviews/{session_id}/complete must never spawn a subprocess (AC2, S-02.1).
+
+        review-complete is a metadata step: it reads the platform dataset hash and
+        writes a session file.  No IDP extraction is performed, so subprocess.Popen
+        must never be called.
+        """
+        import subprocess as _subprocess
+
+        session = _make_review_session(ws)
+        monkeypatch.setattr(
+            "idp_regression.ui.api.fetch_golden_hash",
+            lambda dataset, workspace: "hash-for-zero-quota-test",
+        )
+        spawn_calls: list[Any] = []
+        original_popen = _subprocess.Popen
+
+        def fake_popen(*args: Any, **kwargs: Any) -> Any:
+            spawn_calls.append(args)
+            return original_popen(*args, **kwargs)
+
+        monkeypatch.setattr(_subprocess, "Popen", fake_popen)
+
+        client.post(f"/api/reviews/{session.session_id}/complete")
+        assert len(spawn_calls) == 0, (
+            "POST /reviews/{session_id}/complete must not spawn any subprocess — "
+            "zero IDP quota must be spent (AC2, S-02.1)"
+        )
+
+    def test_get_review_spends_zero_idp_quota(
+        self, client: TestClient, ws: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """GET /api/reviews/{session_id} must never spawn a subprocess.
+
+        Reading a session record is a local-disk-only operation (one JSON file read).
+        No IDP or platform HTTP call is made, so subprocess.Popen must never be called.
+        """
+        import subprocess as _subprocess
+
+        session = _make_review_session(ws)
+        spawn_calls: list[Any] = []
+        original_popen = _subprocess.Popen
+
+        def fake_popen(*args: Any, **kwargs: Any) -> Any:
+            spawn_calls.append(args)
+            return original_popen(*args, **kwargs)
+
+        monkeypatch.setattr(_subprocess, "Popen", fake_popen)
+
+        response = client.get(f"/api/reviews/{session.session_id}")
+        assert response.status_code == 200
+        assert len(spawn_calls) == 0, (
+            "GET /api/reviews/{session_id} must not spawn any subprocess — "
+            "it is a local read, zero IDP quota"
         )
