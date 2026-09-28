@@ -84,3 +84,24 @@ class TestRegistration:
         """A run that did not ask for custom scorers must behave exactly
         as it did before this module existed."""
         assert set(CLASSIFIERS) == {"regression", "pinned-file"}
+
+
+def test_a_relaxing_spec_file_is_reported_not_registered(tmp_path: Path) -> None:
+    """S-01.1 re-stamp #2 G-1(b): the console refused a relaxing spec on
+    save, but `.idp-regression-scorers/` is committed and hand-editable, and
+    `load_specs` never ran `verify_monotone` -- so `--classifier` loaded what
+    the console would refuse. A spec that fails the proof is a load error."""
+    relaxing = {"name": "format-is-value", "base": "regression",
+                "rules": [{"when": {"verdict_is": ["wrong_format"]},
+                           "then": {"verdict": "wrong_value"}}]}
+    (tmp_path / "format-is-value.json").write_text(json.dumps(relaxing), encoding="utf-8")
+    scorer_store.save_spec(cs.parse_spec(spec()), tmp_path)
+    registered, errors = scorer_store.register_custom_classifiers(tmp_path)
+    try:
+        assert sorted(registered) == ["confidence-floor"]
+        assert len(errors) == 1
+        assert "format-is-value.json" in errors[0]
+        assert "format-is-value" not in CLASSIFIERS
+    finally:
+        CLASSIFIERS.pop("confidence-floor", None)
+        CLASSIFIERS.pop("format-is-value", None)

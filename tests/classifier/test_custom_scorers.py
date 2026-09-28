@@ -19,6 +19,7 @@ from typing import cast
 import pytest
 
 from idp_regression.classifier import custom as cs
+from idp_regression.classifier.registry import CLASSIFIERS
 from idp_regression.classifier.scoring import ScoreContext, ScoreResult
 from idp_regression.classifier.types import Golden, NormalizedOutput, VerdictMap
 
@@ -317,3 +318,86 @@ def test_verify_monotone_catches_relaxing_a_format_critical_field() -> None:
         rules=(cs.Rule(when={"verdict_is": ["wrong_format"]}, then={"verdict": "new_field"}),),
     )
     assert any("turns a gate FAILURE ('wrong_format')" in p for p in cs.verify_monotone(spec))
+
+
+# --- Wave C S-01.1 re-stamp #2 G-1: escalation-only against the GATE's predicate ---
+#
+# `wrong_value` fails only when `critical`; `wrong_format` fails when
+# `format_critical`. On a legal golden with `critical: false,
+# format_critical: true`, "treat a format difference as a value difference"
+# rewrote a failing `wrong_format` into a passing `wrong_value` -- through
+# `parse_spec`, with `verify_monotone` silent, because the enumerator had no
+# date/text format pair and only ever used the name "total".
+
+_FORMAT_ONLY_CASES = [
+    ("invoice_date", "date", "2026-01-22", "22/01/2026", {"field_type": "date"}),
+    ("vendor", "text", "Acme Corp", "Acme  Corp", {"field_type": "text"}),
+    ("amount", "number", "1250.00", "1.250,00", {"name_in": ["amount"]}),
+    ("amount", "number", "1250.00", "1.250,00", {"name_matches": "^amo"}),
+]
+
+
+def _format_critical_case(
+    name: str, field_type: str, expected: str, actual: str
+) -> tuple[Golden, NormalizedOutput]:
+    golden = cast(Golden, {"fields": {name: {"value": expected, "type": field_type,
+                                             "critical": False, "format_critical": True}}})
+    output = cast(NormalizedOutput, {"status": "SUCCEEDED",
+                                     "fields": {name: {"value": actual, "confidence": 0.9}}})
+    return golden, output
+
+
+@pytest.mark.parametrize(("name", "field_type", "expected", "actual", "when"), _FORMAT_ONLY_CASES)
+def test_rewriting_a_format_critical_wrong_format_into_wrong_value_still_fails(
+    name: str, field_type: str, expected: str, actual: str, when: dict[str, object]
+) -> None:
+    golden, output = _format_critical_case(name, field_type, expected, actual)
+    base = CLASSIFIERS["regression"]
+    assert base.gate(base.classify(golden, output)) == "FAIL", "precondition: base gate fails"
+    parsed = cs.parse_spec({"name": "format-is-value", "base": "regression",
+                            "rules": [{"when": {**when, "verdict_is": ["wrong_format"]},
+                                       "then": {"verdict": "wrong_value"}}]})
+    custom = cs.build_classifier(parsed)
+    assert custom.gate(custom.classify(golden, output)) == "FAIL"
+    if "name_matches" not in when:  # a regex cannot be enumerated; enforcement covers it
+        assert cs.verify_monotone(parsed), "the spec as written relaxes the gate and must be named"
+
+
+@pytest.mark.parametrize("target", ["wrong_value", "missing"])
+def test_compile_spec_is_monotone_by_construction_on_every_enumerated_context(target: str) -> None:
+    """Built directly, bypassing `parse_spec`: whatever the rule rewrites a
+    failing verdict into, the compiled result still fails the gate."""
+    spec_ = cs.ScorerSpec(
+        name="rewrite", description="", base="regression",
+        rules=(cs.Rule(when={}, then={"verdict": target}),),
+    )
+    scorer = cs.compile_spec(spec_)
+    base = CLASSIFIERS["regression"].scorer
+    for context in cs._enumerate_contexts():
+        if cs._fails_the_gate(context, base(context)):
+            assert cs._fails_the_gate(context, scorer(context)), context
+
+
+def test_the_enumerator_holds_a_format_only_difference_for_every_field_type() -> None:
+    base = CLASSIFIERS["regression"].scorer
+    types_with_one = {c.field_type for c in cs._enumerate_contexts()
+                      if base(c) == "wrong_format"}
+    assert types_with_one == set(cs.FIELD_TYPES)
+
+
+def test_the_enumerator_reaches_names_a_spec_scopes_itself_to() -> None:
+    parsed = cs.parse_spec({"name": "scoped", "base": "regression",
+                            "rules": [{"when": {"name_in": ["amount"]},
+                                       "then": {"critical": True}}]})
+    assert "amount" in {c.name for c in cs._enumerate_contexts(parsed)}
+
+
+@pytest.mark.parametrize("target", ["new_field", "new_line", "wrong_format"])
+def test_a_directly_built_relaxing_spec_cannot_pass_a_failing_gate(target: str) -> None:
+    """`verify_monotone` names it; `compile_spec` neutralizes it anyway."""
+    spec_ = cs.ScorerSpec(
+        name="relax", description="", base="regression",
+        rules=(cs.Rule(when={"verdict_is": ["wrong_value"]}, then={"verdict": target}),),
+    )
+    custom = cs.build_classifier(spec_)
+    assert custom.gate(custom.classify(_GOLDEN, _WRONG)) == "FAIL"

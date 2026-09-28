@@ -22,6 +22,7 @@ from idp_regression.classifier.custom import (
     SpecError,
     build_classifier,
     parse_spec,
+    verify_monotone,
 )
 from idp_regression.classifier.registry import CLASSIFIERS
 
@@ -80,9 +81,18 @@ def load_specs(directory: Path | None = None) -> tuple[list[ScorerSpec], list[st
         return specs, errors
     for path in sorted(root.glob("*.json")):
         try:
-            specs.append(parse_spec(json.loads(path.read_text(encoding="utf-8"))))
+            parsed = parse_spec(json.loads(path.read_text(encoding="utf-8")))
         except (SpecError, json.JSONDecodeError, OSError) as exc:
             errors.append(f"{path.name}: {exc}")
+            continue
+        # The same proof the console runs on save: this directory is
+        # committed and hand-editable, so a spec the console would refuse
+        # must not load through `--classifier` either (S-01.1 re-stamp #2 G-1).
+        problems = verify_monotone(parsed)
+        if problems:
+            errors.append(f"{path.name}: relaxes its base classifier: {problems[0]}")
+            continue
+        specs.append(parsed)
     return specs, errors
 
 

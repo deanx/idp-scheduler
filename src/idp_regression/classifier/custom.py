@@ -341,8 +341,17 @@ def compile_spec(spec: ScorerSpec) -> Scorer:
 
     The base classifier's scorer runs first and always: a spec adds to a
     reviewed comparison, it never replaces one. The first matching rule
-    then applies, and its action can only tighten the result.
+    then applies, and its action can only tighten the result: a verdict
+    rewrite that would pass a field the base failed is not applied --
+    whatever the spec says, and whether or not it came through
+    `parse_spec`.
     """
+    return _compile(spec, enforce=True)
+
+
+def _compile(spec: ScorerSpec, *, enforce: bool) -> Scorer:
+    """`enforce=False` is the spec AS WRITTEN, for `verify_monotone` to
+    report on. Nothing registers or runs that form."""
     base_scorer = CLASSIFIERS[spec.base].scorer
     rules = spec.rules
 
@@ -363,6 +372,15 @@ def compile_spec(spec: ScorerSpec) -> Scorer:
             # spec that says nothing about it.
             critical = critical or bool(action.get("critical", False))
             format_critical = format_critical or bool(action.get("format_critical", False))
+            # Monotone by construction, measured against the GATE's own
+            # predicate (S-01.1 re-stamp #2 G-1): `wrong_value` fails only
+            # when critical, `wrong_format` when format_critical, so a
+            # rewrite between them could pass a field that was failing.
+            # When it would, the base verdict stands; the flags that made it
+            # fail are still set, since flags are only ever OR-ed on.
+            rewritten = ScoreResult(verdict, critical=critical, format_critical=format_critical)
+            if enforce and _fails_the_gate(ctx, outcome) and not _fails_the_gate(ctx, rewritten):
+                verdict = outcome.verdict if isinstance(outcome, ScoreResult) else outcome
             break
 
         if not critical and not format_critical:
@@ -388,28 +406,53 @@ def build_classifier(spec: ScorerSpec) -> Classifier:
     )
 
 
+#: A format-only difference per field type: the pair each type's
+#: comparison reads as `wrong_format`, so a rule on `wrong_format` is
+#: exercised for every `field_type` a spec can scope itself to.
+_FORMAT_ONLY_PAIRS: Final[dict[str, tuple[str, str]]] = {
+    "number": ("1250.00", "1.250,00"),
+    "id": ("1.00", "1,00"),
+    "date": ("2026-01-22", "22/01/2026"),
+    "text": ("Acme Corp", "Acme  Corp"),
+}
+
+
+def _scoped_names(spec: ScorerSpec | None) -> list[str]:
+    """"total" plus every name the spec's own `name_in` conditions list, so
+    a name-scoped rule is exercised on a name it actually matches. A
+    `name_matches` pattern cannot be inverted; `compile_spec`'s own
+    per-call check is what covers it."""
+    names = ["total"]
+    for rule in spec.rules if spec else ():
+        for name in rule.when.get("name_in", ()):
+            if name not in names:
+                names.append(name)
+    return names
+
+
 #: Every context shape a rule can distinguish, used by
 #: `verify_monotone`. Small by construction: the conditions are a closed
 #: set over four field types, three kinds, two confidence states and the
 #: emptiness of two values.
-def _enumerate_contexts() -> list[ScoreContext]:
+def _enumerate_contexts(spec: ScorerSpec | None = None) -> list[ScoreContext]:
     contexts: list[ScoreContext] = []
-    for kind in KINDS:
-        for field_type in FIELD_TYPES:
-            for expected in (None, "", "1.00"):
-                for actual in (
-                    None,
-                    "",
-                    "1.00",
-                    "2.00",
-                    "1,00",
-                ):  # "1,00": a format-only difference
+    for name in _scoped_names(spec):
+        for kind in KINDS:
+            for field_type in FIELD_TYPES:
+                fmt_expected, fmt_actual = _FORMAT_ONLY_PAIRS[field_type]
+                pairs = [
+                    (expected, actual)
+                    for expected in (None, "", "1.00")
+                    for actual in (None, "", "1.00", "2.00", "1,00")
+                ]
+                pairs.append((fmt_expected, fmt_actual))
+                for expected, actual in pairs:
                     for confidence in (None, 0.0, 0.5, 1.0):
                         for critical in (False, True):
                             for format_critical in (False, True):
                                 contexts.append(
                                     ScoreContext(
-                                        name="total",
+                                        name=name,
                                         kind=kind,  # type: ignore[arg-type]
                                         field_type=field_type,
                                         expected=expected,
@@ -443,13 +486,20 @@ def verify_monotone(spec: ScorerSpec) -> list[str]:
     braces over `_validate_action` -- that check is per-key and this one
     is per-outcome, so a future condition or action that accidentally
     opened a relaxing path fails here rather than in a green build. It is
-    cheap (a few hundred pure calls) and the API runs it on every save.
+    cheap (a few thousand pure calls). The API runs it on every save and
+    `scorer_store.load_specs` on every load, so a hand-edited spec file the
+    console would refuse cannot reach `--classifier` either. It checks the
+    spec AS WRITTEN; `compile_spec` enforces the same property per call, so
+    a `name_matches` scope this enumeration cannot reach is still covered.
     """
     base_scorer = CLASSIFIERS[spec.base].scorer
-    scorer = compile_spec(spec)
+    # The spec as written, without `compile_spec`'s enforcement: a spec
+    # whose rules WOULD relax the gate is refused (console) or not loaded
+    # (`scorer_store`), rather than saved and silently neutralized.
+    scorer = _compile(spec, enforce=False)
     problems: list[str] = []
 
-    for ctx in _enumerate_contexts():
+    for ctx in _enumerate_contexts(spec):
         before = base_scorer(ctx)
         base_verdict = before.verdict if isinstance(before, ScoreResult) else before
         base_critical = before.critical if isinstance(before, ScoreResult) else False
