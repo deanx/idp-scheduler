@@ -130,6 +130,7 @@ S-02.1 (Two-stage job orchestration + ReviewSession + INV-09) ──┐
   - T-02.3.4 — `SecondApprovalPanel` (reuses existing approved-extractions-echo confirm component)
   - T-02.3.5 — `#/reviews` pending-list page + `ReviewSessionRow`
   - T-02.3.6 — Manual E2E run-through (EX-1, EX-2) against dev server, recorded for the QA report
+  - **T-02.3.7 — (added 2026-09-28, Soneca amendment to ADR-0008; Atchim round-1 review finding C1/C2) `GET /api/reviews/{session_id}/values`** — a new, separate, read-only endpoint serving every drafted field value per document, sourced from the platform (the authoritative, post-edit-accurate source per CT-07 — NOT the local pin store, which goes stale after any edit) via a new `fetch_platform_items(dataset, workspace)` helper (one GET over the dataset's items, not an O(N²) per-document fan-out). 503 if the platform is unreachable/unconfigured. Wire `GoldenReviewTable` off its current identity-only placeholder to render `field name · drafted value · type` per document, and fix the `EditModal` to pre-populate with the complete current entry (closing Atchim's C2: a one-field edit must no longer silently drop every other field, since PATCH is whole-item-replace). Read-only, zero quota, touches neither `_require_runnable` nor INV-09/`TestQuotaBoundary` (not added to `/api/health`'s `quota_spending_routes`) — risk: low, no new `/harden` pass required. Also closes Atchim's R1 (missing tests for `GoldenReviewTable`/`EditModal`, `ReplaceGoldenFileUpload`, `ReviewsPage`, `ReviewDetailPage`'s state machine).
 
 ## Test plan
 

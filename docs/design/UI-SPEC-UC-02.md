@@ -18,7 +18,7 @@ No wireframes/mockups exist for this flow — derived from UC-02's text and the 
 - Existing upload/plan/approve controls for stage 1 (draft) reuse the existing `approved_extractions`-echo confirmation pattern already built for `compare/start` and `floor/start` — same component, pointed at the new `draft-golden/plan` endpoint.
 
 **Review screen**
-- `GoldenReviewTable`: one row per (document, field), columns = document id, field name, drafted value, type. Table-valued fields (line items) get a nested sub-table per document, matching the existing platform dataset item shape (`match_key`-paired rows).
+- `GoldenReviewTable`: one row per (document, field), columns = document id, field name, drafted value, type. Table-valued fields (line items) get a nested sub-table per document, matching the existing platform dataset item shape (`match_key`-paired rows). **Values source (ADR-0008 amendment, 2026-09-28):** the drafted values come from the new `GET /api/reviews/{session_id}/values` endpoint — a single raw `dataset-items` fetch that carries `expectedOutput`, provenance-tagged from `ReviewSession.edited_document_ids` (CT-07). They do **not** come from `GET /api/reviews/{session_id}` (session record only, no values) nor from `insights.dataset_items()` (identity-only, strips `expectedOutput` by design — must not change). The platform is the source, not the local pin store, because it is what stage-2 verification measures against and what an edit writes to — the pin store would show stale drafted values after any edit (AC3 divergence).
 - `EditableValueCell`: inline edit control per row, type-aware (number/date/id/text input, matching the golden schema's declared `type` — reuse whatever input-typing convention the custom-scorer-authoring UI already uses, since it already edits typed JSON under the same schema).
 - `ReplaceGoldenFileUpload`: a file picker for a customer-supplied `golden.json`, wired to the whole-set-replacement endpoint; shows the same schema-validation error surface `provision_golden_dataset.py`'s CLI already produces (named invalid entry), rendered as text, not swallowed.
 - `SecondApprovalPanel`: shows the freshly computed `--plan`-equivalent cost for stage 2 and requires the same explicit "type/click to confirm N extractions" interaction already used elsewhere in the console, never a bare "Continue" button.
@@ -28,7 +28,8 @@ No wireframes/mockups exist for this flow — derived from UC-02's text and the 
 
 ## States
 
-- **Loading** — review screen while fetching the drafted dataset items from the platform; skeleton rows, no interaction enabled.
+- **Loading** — review screen while fetching the drafted values from `GET /api/reviews/{session_id}/values` (a single raw `dataset-items` fetch, ADR-0008 amendment); skeleton rows, no interaction enabled. Distinct from the tiny, local, network-free `GET /api/reviews/{session_id}` session-record fetch that drives the header/state.
+- **Platform-unreachable** — `GET /api/reviews/{session_id}/values` returns 503 when the platform is unconfigured/unreachable; the review screen shows an explicit error, never an empty table that reads as "nothing to review".
 - **Empty** — a review session whose sample was 0 documents should not be reachable (stage 1 refuses an empty selection today) — if this state is ever hit, it is a bug, and the screen shows a explicit error, not a blank table.
 - **Error** — stage 1 failed before completing a draft: no review session exists, the wizard shows the failure and offers retry (existing job-failure UI pattern, unchanged).
 - **Edited-but-unsaved** — N/A by design (UC-02 BR3): every edit writes back immediately, so there is no local-only dirty state to lose. The UI should reflect "saved" per-cell (e.g. a brief inline confirmation), not a page-level "Save" button.
@@ -44,7 +45,7 @@ The console is an operator/curator tool used on a laptop, not a phone-optimized 
 | Control | Action | AC |
 |---|---|---|
 | Stage progress steps | Read-only status display | AC1 |
-| Review screen load | Fetch drafted dataset, render, zero quota spent | AC2 |
+| Review screen load | Fetch drafted values via `GET /api/reviews/{session_id}/values` (single platform `dataset-items` fetch, ADR-0008 amendment), render, zero quota spent | AC2 |
 | `EditableValueCell` commit | Validate + upsert one dataset item | AC3 |
 | `ReplaceGoldenFileUpload` submit | Validate whole file, replace drafted set on success, name the bad entry on failure | AC4 |
 | `SecondApprovalPanel` confirm | Compute fresh plan, require exact echo, start stage 2 | AC5 |

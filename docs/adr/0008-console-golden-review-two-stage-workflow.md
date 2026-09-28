@@ -77,3 +77,77 @@ Both paths spend **zero** IDP quota — they are platform writes only, never a r
 - **`/debt add`, owed to Dunga at `/plan`:** (1) `DEBT-116`'s review-pause vector — even after `approved_golden_hash`/INV-09(d) close it for this workflow, the platform item id's lack of version/corpus binding remains the open root cause and is now exposed over a longer, human-paced window than before this ADR; (2) review-session cleanup/TTL UX, so it lands as a tracked item rather than an implicit TODO (Branca, round 1).
 - **Reversibility, stated explicitly (Atchim S1):** this change is additive — the two new routes can be removed and `compare/start` (the pre-existing one-shot path) continues to work unmodified. Rolling back leaves durable `<workspace>/.idp-regression-jobs/review-sessions/*.json` files on disk (harmless — they reference a dataset/corpus, not credentials or extracted values) and requires reverting `/api/health`'s three-route declaration and `TestQuotaBoundary` back to one. No data migration is needed either direction.
 - **Operator-facing route counts belong in `/api/health`, never restated as a number in prose (Atchim S2):** PROGRESS.md already records a round where a third surface (`/openapi.json`'s FastAPI `description=`) drifted from the real quota-spending route count because nothing bound it there — fixed by removing the count and pointing at `/api/health` instead of updating it. `/implement` must apply that same pattern to any new UC-02 operator-facing text (docstrings, UI copy) rather than hard-coding "three routes" anywhere; `/qa` verifies no such count exists outside `/api/health`'s own declaration.
+
+---
+
+## Amendment — the review screen's values source (2026-09-28, gap-fill during S-02.3)
+
+**Status of this amendment:** Accepted. This is a scope-completion gap-fill on the already-accepted ADR-0008 design, **not** a new architectural direction. It does not touch the quota-approval boundary (INV-09, `TestQuotaBoundary`), spends no quota, and is read-only.
+
+### The gap
+
+UC-02's whole premise (AC2, BR3) is that the curator *sees the drafted expected value of every field of every document* before giving the second approval. But the design above never named **where the review screen reads those values from**, and the assumption baked into `docs/design/UI-SPEC-UC-02.md` (that the review table would be fed by "the platform dataset items" the way a dashboard is) was wrong in a way that only surfaced during S-02.3 implementation:
+
+- `GET /api/reviews/{session_id}` returns **only** the `ReviewSession` record (CT-06) — dataset, versions, hashes, state, provenance field *names* (`edited_document_ids`). It carries **no field values**, by design, and correctly so.
+- The console's platform-read seam `insights.dataset_items()` (`platform/insights.py`) **deliberately strips `expectedOutput`** — it is identity-only, the correct `## Domain`/INV-01-adjacent choice for a dashboard listing, and that choice must **not** change.
+- So S-02.3 shipped a `GoldenReviewTable` that could render only document ids + provenance flags — a review screen that cannot show what is being reviewed (PROGRESS.md 2026-09-28: "GoldenReviewTable shows identity-only … api.py frozen").
+
+The drafted values are **not** actually unreachable; there was simply no endpoint that exposed them:
+
+1. Stage-1 `pin_document.py` writes every drafted golden to the **local pin store** (`<store>/goldens/<action-id>/<action-version>/<doc>.json`, owner-only, already read by `ui/reader.py`), **and** upserts each as a platform dataset item.
+2. The **raw** `GET /api/public/dataset-items?datasetName=…` response carries `expectedOutput` per item — it is only `insights.dataset_items()` that strips it. The existing module-level helpers `fetch_golden_hash()` and `fetch_platform_item()` in `api.py` already read `expectedOutput` off that raw response, bypassing the identity-only listing.
+
+### Decision
+
+**Add one new read endpoint, `GET /api/reviews/{session_id}/values`, sourced from the platform via a single raw `dataset-items` fetch.** Do **not** fold values into `GET /api/reviews/{session_id}`, and do **not** source them from the local pin store.
+
+**Why the platform, not the pin store.** The pin store holds what stage 1 *drafted*; it is **not** updated by the golden-edit surface — a single-field PATCH and a whole-file `/replace` write only to the platform (`upsert_platform_item`), never back to the pin store. Reading the review table from the pin store would therefore show **stale drafted values after any edit**, directly violating AC3 ("no divergence between what the console shows and what verification later reads"). Stage-2 `verify_document.py` measures against the **platform** dataset items, and INV-09(e) hashes those same items — so the review table must read from exactly that source to show the curator the bytes the gate will actually use. The platform is the single authoritative golden; the pin store is a stage-1 artifact only.
+
+**Why one fetch, not a per-document fan-out.** `fetch_platform_item()` fetches the *whole* `?limit=1000` list and returns one item — calling it per document would be O(N²) network at 100 documents. The raw list already contains every item's `expectedOutput` in one round-trip (the same call `fetch_golden_hash` makes), so the new endpoint does **one** GET and maps every item to `{document_id, expectedOutput}`. A new module-level, injectable helper (`fetch_platform_items(dataset, workspace)`, same pattern as `fetch_golden_hash`/`fetch_platform_item`) makes the CI-runnable unit test possible against a faked adapter with no live platform.
+
+**Why a separate endpoint, not an extension of `GET /api/reviews/{session_id}`.** Three reasons, all consistency with existing patterns:
+1. **Fail-mode separation.** `GET /api/reviews/{session_id}` is a *local, fail-closed* read (404/422, never a network dependency); the console consistently separates that class from *platform* reads (`GET /api/platform/datasets/{name}` 503s when unconfigured). Folding a platform fan-out into the session read would make a local metadata read 503 because the platform is down — and would drag N1's `< 2s`/100-document target (a network-free fixture assertion today) behind a live round-trip.
+2. **Payload size & lifecycle.** The session record is tiny and read by the pending-list navigation and stage-2 pricing; the values payload for 100 documents is large (full `expectedOutput` × 100). They have different sizes, different cache lifetimes, and — per UI-SPEC's *Loading* state ("skeleton rows while fetching the drafted dataset items") — different loading states. A separate fetch is exactly the shape the frontend already assumes.
+3. **The frontend already splits them.** `GoldenReviewTable` consumes per-(document, field) rows; the session read feeds the header/state machine. Two endpoints map cleanly onto the two components with no reshaping.
+
+### Response shape (the contract `GoldenReviewTable` consumes — CT-07)
+
+One object per document, values-carrying, provenance-tagged from `ReviewSession.edited_document_ids` (reusing T-02.2.3's existing provenance — no new mechanism):
+
+```jsonc
+{
+  "session_id": "…",
+  "dataset": "…",
+  "platform_configured": true,
+  "documents": [
+    {
+      "document_id": "inv-001",
+      "fields": [
+        {"name": "invoice_date", "value": "2024-06-28", "type": "date",
+         "confidence": 0.98, "critical": true, "provenance": "drafted"},
+        {"name": "invoice_total", "value": "1250.00", "type": "number",
+         "confidence": 0.90, "critical": true, "provenance": "edited"}
+      ],
+      "tables": [
+        {"name": "line_items", "match_key": "sku",
+         "rows": [ {"sku": {"value": "…"}, "qty": {"value": "…"}} ]}
+      ],
+      "prompts": [ {"key": "…", "answer": "…", "source": "…"} ]
+    }
+  ],
+  "missing_from_platform": ["doc-x"]   // pinned but not yet on the platform — a bug signal, shown, never hidden
+}
+```
+
+- `provenance` is `"edited"` iff the field name is in `session.edited_document_ids[document_id]`, else `"drafted"` (Branca containment note: edited fields must render distinctly, never blended into "drafted").
+- Platform unconfigured/unreachable → **503** (same as `/api/platform/*`), so the review screen shows a clear error rather than an empty table read as "nothing to review".
+- **INV-02:** the endpoint *returns* values to the loopback client — that is its whole purpose and the same disclosure posture as run artifacts and the existing `fetch_platform_item` — but it **never logs** a field name or value (log `session_id` + document count only).
+
+### Consequences
+
+- **Positive:** the review gate becomes actually exercisable; the values shown are provably the bytes stage 2 measures against and INV-09(e) hashes (no draft-vs-edit divergence); the local session read stays fail-closed and network-free; no change to the identity-only `insights.dataset_items()` dashboard seam.
+- **Negative / follow-up:** one more platform-dependent route (read-only, no quota — **not** added to `/api/health`'s `quota_spending_routes`, which stays four). At >1000 dataset items the single `?limit=1000` fetch would need pagination; today the N5 ceiling caps a run at `DEFAULT_MAX_DOCUMENTS_PER_RUN` = 1000, so one page suffices — noted so a future ceiling-raise revisits it.
+
+### Task placement
+
+This lands as **new task T-02.3.7 on S-02.3** (the console-UI story, in flight), **not** as a retroactive edit to S-02.1/S-02.2 (both DONE, QA-02). The project's rule holds: a Done story's DoD is not reopened; a capability surfaced by a later consumer is carded on that consumer. Although the endpoint physically lives in `api.py` (S-02.1 territory), its entire reason to exist is S-02.3's `GoldenReviewTable`, and S-02.3 is where the work is live — so it is scoped there as a small backend-plus-frontend addendum (new `fetch_platform_items` helper + the `GET /api/reviews/{session_id}/values` route + wiring `GoldenReviewTable` to it and replacing its identity-only placeholder). Its DoD inherits S-02.1's mechanical floor (mypy/ruff clean, a CI-runnable unit test against a faked platform adapter) and the INV-02 no-values-in-logs assertion.

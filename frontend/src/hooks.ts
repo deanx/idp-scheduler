@@ -30,6 +30,7 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[]): Async<T> {
 
   useEffect(() => {
     let live = true;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
     setError(null);
     fn()

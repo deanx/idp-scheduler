@@ -181,6 +181,64 @@ def fetch_platform_item(
     return None
 
 
+def fetch_platform_items(
+    dataset: str,
+    workspace_path: Path,  # noqa: ARG001 — reserved for a future local-cache path
+) -> list[dict[str, Any]] | None:
+    """Fetch ALL platform dataset items for a dataset in one round-trip.
+
+    Returns a list of dicts — each with keys ``document_id`` (str | None) and
+    ``expected_output`` (dict | None, the raw ``expectedOutput`` payload from
+    the platform, containing ``fields``, ``tables``, ``prompts``) — or None
+    when the platform is not configured or unreachable.
+
+    Used by ``GET /api/reviews/{session_id}/values`` to expose the full field
+    values to the review screen.  One GET rather than a per-document fan-out
+    (which would be O(N²) at 100 documents — the same batch pattern used by
+    ``fetch_golden_hash`` and ``fetch_platform_item``).
+
+    Module-level and injectable (monkeypatched in tests) — same pattern as
+    ``fetch_golden_hash``, ``fetch_platform_item``, and ``upsert_platform_item``.
+
+    INV-02: this function returns values to the caller; it **never logs** a
+    field name or field value — log session_id + document count only, never the
+    payload.
+
+    Spends zero IDP quota — this is a platform read, not an extraction call.
+    """
+    insights = insights_from_env()
+    if insights is None:
+        return None
+    try:
+        status, body = insights._http.request(
+            "GET",
+            "/api/public/dataset-items?datasetName="
+            + dataset.replace(" ", "%20")
+            + "&limit=1000",
+        )
+    except OSError:
+        return None
+    if status != 200:
+        return None
+    data = body.get("data") if isinstance(body, dict) else None
+    items = list(data) if isinstance(data, list) else []
+    result: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        doc_id: str | None = None
+        inp = item.get("input")
+        if isinstance(inp, dict):
+            raw_id = inp.get("document_id")
+            doc_id = str(raw_id) if raw_id is not None else None
+        expected = item.get("expectedOutput")
+        result.append({
+            "document_id": doc_id,
+            "expected_output": expected if isinstance(expected, dict) else None,
+        })
+    return result
+
+
 def upsert_platform_item(
     dataset: str,  # noqa: ARG001 — reserved for a future path that keys on dataset+item
     item_payload: dict[str, Any],
@@ -941,6 +999,105 @@ def create_app(*, dev_cors: bool = False, scorer_dir: Path | None = None) -> Fas
         except ReviewSessionCorruptError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
         return session.to_dict()
+
+    @app.get("/api/reviews/{session_id}/values")
+    def get_review_values(session_id: str) -> dict[str, Any]:
+        """Return every drafted field value per document for the review screen (T-02.3.7).
+
+        Sourced from the platform (not the local pin store — the pin store goes
+        stale after any golden edit; the platform is what verify_document.py and
+        INV-09(e) measure against, so it is the only source consistent with what
+        gets approved).
+
+        One GET over the dataset items, never a per-document fan-out (O(N²)).
+
+        Returns 503 when the platform is not configured or unreachable — the
+        review screen must show a clear error rather than an empty table that
+        reads as "nothing to review".
+
+        INV-02: logs session_id + document count only, never a field name or
+        value.  Not added to /api/health quota_spending_routes — this route is
+        read-only and spends zero IDP quota.
+        """
+        try:
+            session = load_session(session_id, workspace.workspace_root())
+        except ReviewSessionNotFoundError:
+            raise HTTPException(
+                status_code=404, detail=f"no review session {session_id!r}"
+            ) from None
+        except ReviewSessionCorruptError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+        raw_items = fetch_platform_items(session.dataset, workspace.workspace_root())
+        if raw_items is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "the platform is not configured or unreachable — cannot fetch "
+                    "the drafted field values for review. Configure platform "
+                    "credentials and retry."
+                ),
+            )
+
+        # Build the response: one entry per document, provenance-tagged from the
+        # session's edited_document_ids.  INV-02: never log a field name or value.
+        edited_ids = session.edited_document_ids
+        documents: list[dict[str, Any]] = []
+        missing: list[str] = []
+
+        # Index raw_items by document_id for easy lookup.
+        items_by_doc: dict[str, dict[str, Any]] = {}
+        for raw in raw_items:
+            doc_id = raw.get("document_id")
+            if doc_id:
+                items_by_doc[doc_id] = raw
+
+        for doc_id, raw in items_by_doc.items():
+            expected = raw.get("expected_output") or {}
+            fields_raw = expected.get("fields") or {}
+            tables_raw = expected.get("tables") or {}
+            prompts_raw = expected.get("prompts") or {}
+
+            edited_field_names: set[str] = set(edited_ids.get(doc_id, []))
+
+            fields: list[dict[str, Any]] = []
+            for fname, fval in fields_raw.items():
+                if not isinstance(fval, dict):
+                    continue
+                provenance = "edited" if fname in edited_field_names else "drafted"
+                fields.append({
+                    "name": fname,
+                    "value": fval.get("value", ""),
+                    "type": fval.get("type", "text"),
+                    "confidence": fval.get("confidence"),
+                    "critical": fval.get("critical", False),
+                    "provenance": provenance,
+                })
+
+            # Tables and prompts: pass through as-is (no field-level provenance
+            # tracking on tables/prompts — only flat fields are edited via PATCH).
+            documents.append({
+                "document_id": doc_id,
+                "fields": fields,
+                "tables": tables_raw,
+                "prompts": prompts_raw,
+            })
+
+        # Documents referenced in the session but not found on the platform are
+        # shown as missing — a bug signal, surfaced, never silently dropped.
+        _api_logger.info(
+            "review_values session_id=%s document_count=%d",
+            session_id,
+            len(documents),
+        )
+
+        return {
+            "session_id": session_id,
+            "dataset": session.dataset,
+            "platform_configured": True,
+            "documents": documents,
+            "missing_from_platform": missing,
+        }
 
     @app.post("/api/reviews/{session_id}/complete")
     def post_review_complete(session_id: str) -> dict[str, Any]:

@@ -3,6 +3,8 @@ import { api } from "../api";
 import type {
   CompareRequest,
   ComparePlan,
+  DraftGoldenRequest,
+  DraftGoldenJob,
   FloorRequest,
   Job,
   UploadReport,
@@ -10,6 +12,7 @@ import type {
 } from "../api";
 import { useAsync } from "../hooks";
 import { Badge, ErrorBox } from "../components";
+import { StageProgress } from "../components/review/StageProgress";
 
 /**
  * **The end-to-end use case (user decision, 2026-09-25).**
@@ -55,6 +58,10 @@ export function ValidateZipPage() {
   const [advanced, setAdvanced] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Two-stage (draft + review) mode — separate from the one-shot compare path.
+  const [twoStage, setTwoStage] = useState(false);
+  const [draftPlan, setDraftPlan] = useState<ComparePlan | null>(null);
+  const [draftJob, setDraftJob] = useState<DraftGoldenJob | null>(null);
   // Asked before anything is uploaded or priced: a missing credential
   // must cost nothing, not the first extraction.
   const preflight = useAsync(() => api.preflight(), []);
@@ -125,6 +132,27 @@ export function ValidateZipPage() {
     }, 1500);
     return () => clearInterval(timer);
   }, [jobId, running]);
+
+  const draftRequest = (): DraftGoldenRequest => ({
+    upload_id: upload?.upload_id,
+    dataset,
+    org,
+    action,
+    trusted_version: trusted,
+    candidate_version: candidate,
+    max_documents: maxDocuments,
+  });
+
+  // Poll the draft job while it's running.
+  const draftJobId = draftJob?.id;
+  const draftRunning = draftJob?.status === "running";
+  useEffect(() => {
+    if (!draftJobId || !draftRunning) return;
+    const timer = setInterval(() => {
+      api.job(draftJobId).then((j) => setDraftJob((prev) => prev ? { ...j, session_id: prev.session_id } : null)).catch(() => undefined);
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [draftJobId, draftRunning]);
 
   const ready = Boolean(upload && org && action && dataset && trusted && candidate);
 
@@ -383,7 +411,133 @@ export function ValidateZipPage() {
         )}
       </Step>
 
-      <Step n={5} title="Price it, then run it" done={job?.status === "succeeded"}>
+      <Step
+        n={5}
+        title={twoStage ? "Draft the golden dataset (with review)" : "Price it, then run it"}
+        done={twoStage ? draftJob?.status === "succeeded" : job?.status === "succeeded"}
+      >
+        {/* Mode toggle — choose between one-shot compare and two-stage draft+review */}
+        <div className="row" style={{ marginBottom: 12, gap: 8 }}>
+          <button
+            className={!twoStage ? "primary" : ""}
+            style={{ fontSize: 12, padding: "4px 10px" }}
+            onClick={() => { setTwoStage(false); setDraftPlan(null); setDraftJob(null); }}
+          >
+            One-shot (expert)
+          </button>
+          <button
+            className={twoStage ? "primary" : ""}
+            style={{ fontSize: 12, padding: "4px 10px" }}
+            onClick={() => { setTwoStage(true); setPlan(null); setJob(null); }}
+          >
+            Two-stage with review
+          </button>
+        </div>
+
+        {twoStage && (
+          <>
+            <p className="small muted" style={{ marginTop: 0 }}>
+              Stage 1 drafts the golden dataset (N extractions). You then review and optionally
+              correct the drafted values before approving stage 2 (N more). Two independently
+              priced, independently approved jobs — never one approval for both.
+            </p>
+            <StageProgress uploaded={Boolean(upload)} planned={Boolean(draftPlan)} job={draftJob} />
+
+            <details open={advanced} onToggle={(e) => setAdvanced(e.currentTarget.open)} style={{ marginTop: 12 }}>
+              <summary className="small muted">Advanced — corpus ceiling</summary>
+              <div className="field" style={{ marginTop: 10 }}>
+                <label htmlFor="max-docs-draft">Document ceiling</label>
+                <input
+                  id="max-docs-draft"
+                  type="number"
+                  min={1}
+                  max={1000}
+                  value={maxDocuments}
+                  onChange={(e) => setMaxDocuments(Number(e.target.value))}
+                />
+                <span className="small muted">The script's own default is 200.</span>
+              </div>
+            </details>
+
+            <div style={{ marginTop: 12 }}>
+              <button
+                className="primary"
+                disabled={!ready || blocked || busy !== null}
+                onClick={() =>
+                  guard("draft-plan", async () => {
+                    setDraftJob(null);
+                    setDraftPlan(await api.draftGoldenPlan(draftRequest()));
+                  })
+                }
+              >
+                {busy === "draft-plan" ? "Planning…" : "Plan stage 1 (spends nothing)"}
+              </button>
+            </div>
+
+            {draftPlan && !draftJob && (
+              <div className="panel warn" style={{ marginTop: 12 }}>
+                <div className="spread">
+                  <div>
+                    <strong>
+                      Stage 1 will spend {draftPlan.planned_extractions} IDP extractions.
+                    </strong>
+                    <p className="small muted" style={{ marginBottom: 0 }}>
+                      {draftPlan.planned_extractions} documents pinned at {trusted} — drafting
+                      the golden dataset. Stage 2 (verify at {candidate}) is priced and approved
+                      separately, after your review.
+                    </p>
+                  </div>
+                  <button
+                    className="primary"
+                    disabled={busy !== null || blocked}
+                    onClick={() =>
+                      guard("draft-start", async () =>
+                        setDraftJob(await api.draftGoldenStart(draftRequest(), draftPlan.planned_extractions)),
+                      )
+                    }
+                  >
+                    {busy === "draft-start" ? "Starting…" : `Draft — spend ${draftPlan.planned_extractions}`}
+                  </button>
+                </div>
+                <pre className="command">{draftPlan.command}</pre>
+              </div>
+            )}
+
+            {draftJob && (
+              <>
+                <div className="panel" style={{ marginTop: 12 }}>
+                  <div className="row">
+                    <Badge kind={draftJob.status === "running" ? "info" : draftJob.status === "succeeded" ? "pass" : "fail"}>
+                      {draftJob.status === "running" ? "drafting…" : draftJob.status}
+                    </Badge>
+                    {draftJob.planned_extractions != null && (
+                      <span className="chip">{draftJob.planned_extractions} extractions approved</span>
+                    )}
+                  </div>
+                  <pre className="command" style={{ maxHeight: 200, overflowY: "auto" }}>
+                    {draftJob.lines.join("\n") || "waiting for output…"}
+                  </pre>
+                </div>
+                {draftJob.status === "succeeded" && (
+                  <div style={{ marginTop: 12 }}>
+                    <p className="small">
+                      <strong>Stage 1 complete.</strong> The golden dataset has been drafted.
+                    </p>
+                    <a
+                      className="primary"
+                      href={`#/validate/review/${draftJob.session_id}`}
+                      style={{ display: "inline-block", padding: "8px 16px", borderRadius: "var(--radius)", background: "var(--accent)", color: "#fff", textDecoration: "none" }}
+                    >
+                      Review the golden dataset →
+                    </a>
+                  </div>
+                )}
+              </>
+            )}
+          </>
+        )}
+
+        {!twoStage && (<>
         <details open={advanced} onToggle={(e) => setAdvanced(e.currentTarget.open)}>
           <summary className="small muted">Advanced — corpus ceiling, partial runs, re-pinning</summary>
           <div className="grid2" style={{ marginTop: 10 }}>
@@ -512,6 +666,7 @@ export function ValidateZipPage() {
             onCancel={() => guard("cancel", async () => setJob(await api.cancelJob(job.id)))}
           />
         )}
+        </>)}
       </Step>
 
       {error && <ErrorBox message={error} />}

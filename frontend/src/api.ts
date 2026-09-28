@@ -1,11 +1,12 @@
 // The whole HTTP surface, in one file, typed.
 //
 // Almost every call here is a READ of something on local disk, or the
-// authoring of a scorer spec, and spends nothing. **Two do spend real
-// IDP quota** — `compareStart` and `floorStart` — and both require an
-// `approved_extractions` count echoed back from a real `--plan`, which
-// the server re-computes and re-checks. Everything else prints the
-// command for an operator to run at a terminal instead.
+// authoring of a scorer spec, and spends nothing. **Four routes spend
+// real IDP quota** — `compareStart`, `floorStart`, `draftGoldenStart`,
+// and `verifyCandidateStart` — all require an `approved_extractions`
+// count echoed back from a real `--plan` which the server re-computes
+// and re-checks. Everything else prints the command for an operator to
+// run at a terminal instead.
 
 export type Verdict =
   | "match"
@@ -215,6 +216,113 @@ export interface Job {
   };
 }
 
+// ------------------------------------------------ Review / UC-02 types
+
+export type ReviewSessionState =
+  | "drafted"
+  | "reviewed"
+  | "verifying"
+  | "verified"
+  | "stale"
+  | "replace_failed";
+
+export interface ReviewSession {
+  session_id: string;
+  dataset: string;
+  org_id: string;
+  action_id: string;
+  trusted_version: string;
+  candidate_version: string;
+  document_dir: string;
+  archive_sha256: string;
+  approved_golden_hash: string | null;
+  stage1_job_id: string;
+  stage2_job_id: string | null;
+  state: ReviewSessionState;
+  created_at: string;
+  /** Provenance: document_id → list of field names that were edited. */
+  edited_document_ids: Record<string, string[]>;
+}
+
+export type FieldType = "number" | "date" | "id" | "text";
+
+export interface GoldenField {
+  value: string;
+  type: FieldType;
+  critical?: boolean;
+  format_critical?: boolean;
+  date_format?: string;
+}
+
+export interface GoldenEntry {
+  document_id: string;
+  fields: Record<string, GoldenField>;
+  tables?: Record<string, unknown>;
+  prompts?: Record<string, unknown>;
+}
+
+export interface DraftGoldenRequest {
+  upload_id?: string;
+  document_dir?: string;
+  dataset: string;
+  org: string;
+  action: string;
+  trusted_version: string;
+  candidate_version: string;
+  max_documents?: number;
+}
+
+/**
+ * Response from draft-golden/start: same as Job, plus the created session_id.
+ * The server returns the job dict with `session_id` merged in.
+ */
+export type DraftGoldenJob = Job & { session_id: string };
+
+/** Response from verify-candidate/plan — same shape as ComparePlan but
+ *  `confirm_with` carries session_id so the start call can bind to it. */
+export interface VerifyPlan {
+  planned_extractions: number;
+  command: string;
+  output: string[];
+  confirm_with: { approved_extractions: number; session_id: string };
+  session: ReviewSession;
+}
+
+export interface PlatformDatasetItem {
+  id: string | null;
+  document_id: string | null;
+  /** Metadata from the platform — exact shape varies; use runtime guards. */
+  metadata: unknown;
+}
+
+/** One field row returned by GET /api/reviews/{session_id}/values (CT-07). */
+export interface ReviewFieldValue {
+  name: string;
+  value: string;
+  type: FieldType;
+  confidence: number | null;
+  critical: boolean;
+  /** "drafted" = stage-1 value; "edited" = curator corrected this field. */
+  provenance: "drafted" | "edited";
+}
+
+/** One document's full golden content from GET /api/reviews/{session_id}/values. */
+export interface ReviewDocumentValues {
+  document_id: string;
+  fields: ReviewFieldValue[];
+  tables: Record<string, unknown>;
+  prompts: Record<string, unknown>;
+}
+
+/** Full response from GET /api/reviews/{session_id}/values (CT-07). */
+export interface ReviewValues {
+  session_id: string;
+  dataset: string;
+  platform_configured: boolean;
+  documents: ReviewDocumentValues[];
+  missing_from_platform: string[];
+}
+
 export interface Preflight {
   can_run_validation: boolean;
   blockers: string[];
@@ -352,6 +460,46 @@ export const api = {
   jobsBusy: () => call<{ busy: boolean }>("/api/jobs-busy"),
   job: (id: string) => call<Job>(`/api/jobs/${encodeURIComponent(id)}`),
   cancelJob: (id: string) => call<Job>(`/api/jobs/${encodeURIComponent(id)}/cancel`, json({})),
+
+  // ---- Draft-golden + Review (UC-02) ------------------------------------
+  draftGoldenPlan: (request: DraftGoldenRequest) =>
+    call<ComparePlan>("/api/workflows/draft-golden/plan", json(request)),
+  draftGoldenStart: (request: DraftGoldenRequest, approved_extractions: number) =>
+    call<DraftGoldenJob>(
+      "/api/workflows/draft-golden/start",
+      json({ ...request, approved_extractions }),
+    ),
+
+  reviews: () => call<{ sessions: ReviewSession[] }>("/api/reviews"),
+  reviewSession: (session_id: string) =>
+    call<ReviewSession>(`/api/reviews/${encodeURIComponent(session_id)}`),
+  reviewComplete: (session_id: string) =>
+    call<ReviewSession>(
+      `/api/reviews/${encodeURIComponent(session_id)}/complete`,
+      json({}),
+    ),
+  reviewPatchItem: (session_id: string, document_id: string, entry: GoldenEntry) =>
+    call<ReviewSession>(
+      `/api/reviews/${encodeURIComponent(session_id)}/items/${encodeURIComponent(document_id)}`,
+      { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(entry) },
+    ),
+  reviewReplace: (session_id: string, entries: Record<string, GoldenEntry>) =>
+    call<ReviewSession>(
+      `/api/reviews/${encodeURIComponent(session_id)}/replace`,
+      json({ entries }),
+    ),
+
+  reviewValues: (session_id: string) =>
+    call<ReviewValues>(`/api/reviews/${encodeURIComponent(session_id)}/values`),
+
+  verifyCandidatePlan: (session_id: string) =>
+    call<VerifyPlan>("/api/workflows/verify-candidate/plan", json({ session_id })),
+  verifyCandidateStart: (session_id: string, approved_extractions: number) =>
+    call<Job>(
+      "/api/workflows/verify-candidate/start",
+      json({ session_id, approved_extractions }),
+    ),
+  // -----------------------------------------------------------------------
 
   preflight: () => call<Preflight>("/api/preflight"),
   platformCapabilities: () => call<PlatformCapabilities>("/api/platform/capabilities"),

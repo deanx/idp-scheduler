@@ -137,6 +137,9 @@ class TestQuotaBoundary:
             # S-02.2 (2026-09-28) — golden edit and whole-file replace
             ("/api/reviews/{session_id}/items/{document_id}", ("PATCH",)),
             ("/api/reviews/{session_id}/replace", ("POST",)),
+            # T-02.3.7 (2026-09-28) — read-only values fetch for the review screen
+            # Spends zero IDP quota — reads from the platform, NOT added to SPENDS_QUOTA.
+            ("/api/reviews/{session_id}/values", ("GET",)),
         }
         assert paths == allowed, (
             "a new route appeared. Confirm whether it spends IDP quota or writes to the "

@@ -146,6 +146,7 @@ function ScorerEditor({
 
   useEffect(() => {
     if (!spec.name || !spec.rules.length) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setValidation(null);
       return;
     }

@@ -1050,3 +1050,17 @@ Found during `/harden`'s re-probe of the DEBT-142 fix (`docs/qa/HARDEN-02.md`). 
 **Fix:** either document explicitly that only a full `/replace` repairs a `REPLACE_FAILED` session (PATCH is for `DRAFTED`/`REVIEWED` only), or — if per-field repair is meant to work — add `REPLACE_FAILED` to PATCH's allowed transition-to-`DRAFTED` set once the curator has touched every field the failure could have left stale.
 
 **Interest:** flat — a curator who tries to repair via PATCH alone gets an unexplained persistent 409 until they discover a full `/replace` is required.
+
+---
+
+## DEBT-148 — `missing_from_platform` in `GET /api/reviews/{id}/values` is dead contract
+
+**Filed:** 2026-09-28  **Severity:** Low (fails safe, not a correctness/security defect)  **Status:** Open
+
+Found during Atchim's S-02.3/T-02.3.7 review. CT-07 (`docs/design/CONTRACTS.md`) and the endpoint's own docstring advertise `missing_from_platform` as a safety signal — "pinned-but-not-on-platform documents, surfaced never hidden" — but the field is initialized `[]` and never populated: `ReviewSession` carries no full document-id list to diff the platform response against, only `edited_document_ids` (a map of already-edited docs). The contract promises a guarantee the current implementation cannot keep.
+
+**Why not blocking:** it fails safe — the review table simply shows whatever the platform actually returned, so no wrong/missing data is hidden; the field is just always empty rather than actively wrong.
+
+**Fix:** either give `ReviewSession` a full document-id list (captured at draft time) to diff against and populate the field for real, or remove `missing_from_platform` from CT-07 and the endpoint docstring so the contract doesn't imply an unfulfilled guarantee.
+
+**Interest:** flat — a real "some pinned document silently never made it to the platform" scenario would currently go unsignaled by this field (though other checks, e.g. INV-09, may still catch it downstream).
