@@ -129,6 +129,50 @@ def fetch_golden_hash(dataset: str, workspace_path: Path) -> str | None:  # noqa
     canonical = json.dumps(items_sorted, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()
 
+def fetch_platform_item(
+    dataset: str,
+    document_id: str,
+    workspace_path: Path,  # noqa: ARG001 — reserved for a future local-cache path
+) -> dict[str, Any] | None:
+    """Fetch the current platform dataset item for one document.
+
+    Returns the item's `expectedOutput` dict (with `fields`, `tables`, `prompts`)
+    or None when the platform is not configured, is unreachable, or the item
+    does not exist yet.
+
+    Used by PATCH/replace to determine which fields actually changed so that
+    provenance marks only the changed ones (R2 — an unchanged field re-sent in a
+    full-item PATCH must not appear in `edited_document_ids`).
+
+    Module-level and injectable (monkeypatched in tests) — same pattern as
+    `fetch_golden_hash` and `upsert_platform_item`.
+
+    INV-02: values from the returned dict are never logged; they are compared
+    in-memory and discarded.
+    """
+    insights = insights_from_env()
+    if insights is None:
+        return None
+    try:
+        status, body = insights._http.request(
+            "GET",
+            "/api/public/dataset-items?datasetName="
+            + dataset.replace(" ", "%20")
+            + "&limit=1000",
+        )
+    except OSError:
+        return None
+    if status != 200:
+        return None
+    data = body.get("data") if isinstance(body, dict) else None
+    items = list(data) if isinstance(data, list) else []
+    for item in items:
+        if isinstance(item, dict) and item.get("input", {}).get("document_id") == document_id:
+            result = item.get("expectedOutput")
+            return result if isinstance(result, dict) else None
+    return None
+
+
 def upsert_platform_item(
     dataset: str,  # noqa: ARG001 — reserved for a future path that keys on dataset+item
     item_payload: dict[str, Any],
@@ -966,11 +1010,26 @@ def create_app(*, dev_cors: bool = False, scorer_dir: Path | None = None) -> Fas
                 ),
             )
 
-        # Normalise: if the body omits document_id, inject the URL parameter.
+        # S2: reject a body-supplied document_id that disagrees with the URL parameter.
+        # Silently defaulting would let a mis-typed id overwrite the wrong item.
+        body_doc_id = body.get("document_id")
+        if body_doc_id is not None and body_doc_id != document_id:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"body document_id {body_doc_id!r} does not match URL parameter "
+                    f"{document_id!r} — use the URL parameter as the authoritative id"
+                ),
+            )
         entry = dict(body)
-        entry.setdefault("document_id", document_id)
+        entry["document_id"] = document_id  # always use the URL parameter
 
-        # Validate against the committed schema BEFORE any write.
+        # Validate against the committed golden schema BEFORE any write.
+        # NOTE — PATCH semantics (R1): this is a WHOLE-ITEM REPLACE, not a field-merge.
+        # `build_item_payload` writes exactly `entry["fields"]` to the platform; it does
+        # NOT merge with the previously-stored item.  S-02.3 must send the COMPLETE
+        # corrected item (all fields, not just the changed ones), otherwise fields absent
+        # from the body will be dropped from the platform item.
         error = validate_entry(entry)
         if error:
             raise HTTPException(
@@ -978,7 +1037,28 @@ def create_app(*, dev_cors: bool = False, scorer_dir: Path | None = None) -> Fas
                 detail=f"edit rejected for document {document_id!r}: {error}",
             )
 
-        # Upsert to the platform via the deterministic-id path.
+        # R2: fetch the current platform item to determine which fields actually changed.
+        # Only fields whose value differs from the current item are recorded as "edited"
+        # in provenance.  Re-sending an unchanged field (required by PATCH's replace
+        # semantics, R1) must not bloat the provenance.
+        # Falls back to marking all incoming fields as edited when the platform is
+        # unavailable (conservative — never misses a real edit).
+        current_item = fetch_platform_item(
+            session.dataset, document_id, workspace.workspace_root()
+        )
+        incoming_fields = entry.get("fields", {})
+        if current_item is not None:
+            current_fields = current_item.get("fields", {})
+            # Compare values only — INV-02: these comparisons are in-memory, never logged.
+            changed_fields = [
+                name for name, fld in incoming_fields.items()
+                if fld.get("value") != current_fields.get(name, {}).get("value")
+            ]
+        else:
+            # Platform unavailable or no prior item — conservative: mark all as edited.
+            changed_fields = list(incoming_fields.keys())
+
+        # Upsert to the platform via the deterministic-id path (whole-item replace, R1).
         item_payload = build_item_payload(session.dataset, document_id, entry)
         upsert_err = upsert_platform_item(
             session.dataset, item_payload, workspace.workspace_root()
@@ -989,11 +1069,10 @@ def create_app(*, dev_cors: bool = False, scorer_dir: Path | None = None) -> Fas
                 detail=f"platform write failed: {upsert_err}",
             )
 
-        # Update provenance: track which fields were edited in this document.
-        edited_fields = list(entry.get("fields", {}).keys())
-        existing = list(session.edited_document_ids.get(document_id, []))
-        merged = sorted(set(existing) | set(edited_fields))
-        session.edited_document_ids[document_id] = merged
+        # Update provenance: only changed fields are recorded (R2).
+        if changed_fields:
+            existing = list(session.edited_document_ids.get(document_id, []))
+            session.edited_document_ids[document_id] = sorted(set(existing) | set(changed_fields))
 
         # If the session was REVIEWED, revert to DRAFTED: the platform items have
         # changed, so approved_golden_hash is stale.  The curator must re-call
@@ -1086,13 +1165,26 @@ def create_app(*, dev_cors: bool = False, scorer_dir: Path | None = None) -> Fas
                     detail=f"platform write failed for {key!r}: {upsert_err}",
                 )
 
-        # Update provenance: mark ALL document_ids in the replacement as edited.
+        # R2: Update provenance — only fields whose value actually changed vs the current
+        # platform item are recorded.  Re-sending an unchanged field (required by PATCH's
+        # replace semantics) must not bloat the provenance.
         for entry in entries.values():
             doc_id = str(entry.get("document_id", ""))
-            if doc_id:
-                edited_fields = list(entry.get("fields", {}).keys())
+            if not doc_id:
+                continue
+            incoming_fields = entry.get("fields", {})
+            current_item = fetch_platform_item(session.dataset, doc_id, workspace.workspace_root())
+            if current_item is not None:
+                current_fields = current_item.get("fields", {})
+                changed = [
+                    name for name, fld in incoming_fields.items()
+                    if fld.get("value") != current_fields.get(name, {}).get("value")
+                ]
+            else:
+                changed = list(incoming_fields.keys())
+            if changed:
                 existing = list(session.edited_document_ids.get(doc_id, []))
-                session.edited_document_ids[doc_id] = sorted(set(existing) | set(edited_fields))
+                session.edited_document_ids[doc_id] = sorted(set(existing) | set(changed))
 
         # If the session was REVIEWED, revert to DRAFTED (platform items have changed).
         if session.state == ReviewSessionState.REVIEWED:

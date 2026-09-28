@@ -677,3 +677,416 @@ class TestRouteTableUpdated:
             json={"entries": {}},
         )
         assert response.status_code != 405, "POST /replace route must be registered in the app"
+
+
+# ---------------------------------------------------------------------------
+# C1 — Atchim round 2: upsert payload inspected + golden_edits unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestGoldenEditsModule:
+    """Direct unit tests for item_id() and build_item_payload() (C1)."""
+
+    def test_item_id_is_deterministic(self) -> None:
+        """Same inputs always produce the same id."""
+        from idp_regression.ui.golden_edits import item_id
+        assert item_id("ds", "doc.pdf") == item_id("ds", "doc.pdf")
+
+    def test_item_id_differs_by_dataset(self) -> None:
+        from idp_regression.ui.golden_edits import item_id
+        assert item_id("ds1", "doc.pdf") != item_id("ds2", "doc.pdf")
+
+    def test_item_id_differs_by_document(self) -> None:
+        from idp_regression.ui.golden_edits import item_id
+        assert item_id("ds", "doc1.pdf") != item_id("ds", "doc2.pdf")
+
+    def test_item_id_matches_uuid5_formula(self) -> None:
+        """item_id is uuid5(ITEM_NAMESPACE, '{dataset}|{document_id}') as a string."""
+        import uuid
+
+        from idp_regression.ui.golden_edits import ITEM_NAMESPACE, item_id
+        expected = str(uuid.uuid5(ITEM_NAMESPACE, "my-dataset|invoice.pdf"))
+        assert item_id("my-dataset", "invoice.pdf") == expected
+
+    def test_build_item_payload_correct_shape(self) -> None:
+        """Payload has id, datasetName, input.document_id, expectedOutput.fields."""
+        import uuid
+
+        from idp_regression.ui.golden_edits import ITEM_NAMESPACE, build_item_payload
+        entry = {
+            "document_id": "inv.pdf",
+            "fields": {"total": {"value": "100.00", "type": "number"}},
+        }
+        payload = build_item_payload("my-ds", "inv.pdf", entry)
+        assert payload["id"] == str(uuid.uuid5(ITEM_NAMESPACE, "my-ds|inv.pdf"))
+        assert payload["datasetName"] == "my-ds"
+        assert payload["input"]["document_id"] == "inv.pdf"
+        assert payload["expectedOutput"]["fields"]["total"]["value"] == "100.00"
+        assert "tables" not in payload["expectedOutput"]
+        assert "prompts" not in payload["expectedOutput"]
+
+    def test_build_item_payload_includes_tables_when_present(self) -> None:
+        from idp_regression.ui.golden_edits import build_item_payload
+        entry = {
+            "document_id": "inv.pdf",
+            "fields": {"total": {"value": "100.00", "type": "number"}},
+            "tables": {"line_items": {"match_key": "desc", "rows": []}},
+        }
+        payload = build_item_payload("ds", "inv.pdf", entry)
+        assert "tables" in payload["expectedOutput"]
+        assert "line_items" in payload["expectedOutput"]["tables"]
+
+    def test_build_item_payload_includes_prompts_when_present(self) -> None:
+        from idp_regression.ui.golden_edits import build_item_payload
+        entry = {
+            "document_id": "inv.pdf",
+            "fields": {"total": {"value": "100.00", "type": "number"}},
+            "prompts": {"Is this a valid invoice?": {"answer": "yes"}},
+        }
+        payload = build_item_payload("ds", "inv.pdf", entry)
+        assert "prompts" in payload["expectedOutput"]
+
+    def test_build_item_payload_omits_tables_when_absent(self) -> None:
+        from idp_regression.ui.golden_edits import build_item_payload
+        entry = {
+            "document_id": "inv.pdf",
+            "fields": {"total": {"value": "100.00", "type": "number"}},
+        }
+        payload = build_item_payload("ds", "inv.pdf", entry)
+        assert "tables" not in payload["expectedOutput"]
+        assert "prompts" not in payload["expectedOutput"]
+
+
+# ---------------------------------------------------------------------------
+# C1 — payload inspection on PATCH
+# ---------------------------------------------------------------------------
+
+
+class TestPatchPayloadInspection:
+    """PATCH must call upsert exactly once with the correct deterministic-id payload (C1)."""
+
+    def test_patch_calls_upsert_exactly_once_with_correct_payload(
+        self, client: TestClient, ws: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(a) exactly one call, (b) correct deterministic id, (c) correct field value."""
+        import uuid
+
+        from idp_regression.ui.golden_edits import ITEM_NAMESPACE
+        session = _make_session(ws, state=ReviewSessionState.DRAFTED)
+        captured: list[dict[str, Any]] = []
+
+        def _capture_upsert(
+            dataset: str, payload: dict[str, Any], workspace_path: Path
+        ) -> str | None:
+            captured.append(payload)
+            return None
+
+        monkeypatch.setattr("idp_regression.ui.api.upsert_platform_item", _capture_upsert)
+        monkeypatch.setattr(
+            "idp_regression.ui.api.fetch_platform_item",
+            lambda dataset, doc_id, workspace_path: None,
+        )
+        client.patch(
+            f"/api/reviews/{session.session_id}/items/inv-001.pdf",
+            json=_VALID_ENTRY,
+        )
+        # (a) exactly one upsert call
+        assert len(captured) == 1, (
+            f"expected exactly 1 upsert call, got {len(captured)}"
+        )
+        payload = captured[0]
+        # (b) deterministic item id
+        expected_id = str(uuid.uuid5(ITEM_NAMESPACE, "test-dataset|inv-001.pdf"))
+        assert payload["id"] == expected_id, (
+            f"wrong item id: {payload['id']!r}, expected {expected_id!r}"
+        )
+        # (c) field value reaches the platform
+        assert payload["expectedOutput"]["fields"]["invoice_total"]["value"] == "1250.00", (
+            "the edited field value must be present in the upserted payload"
+        )
+
+    def test_replace_calls_upsert_once_per_entry_with_correct_payload(
+        self, client: TestClient, ws: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """POST /replace: one upsert call per valid entry, each with the correct id."""
+        import uuid
+
+        from idp_regression.ui.golden_edits import ITEM_NAMESPACE
+        session = _make_session(ws, state=ReviewSessionState.DRAFTED)
+        captured: list[dict[str, Any]] = []
+
+        def _capture_upsert2(
+            dataset: str, payload: dict[str, Any], workspace_path: Path
+        ) -> str | None:
+            captured.append(payload)
+            return None
+
+        monkeypatch.setattr("idp_regression.ui.api.upsert_platform_item", _capture_upsert2)
+        monkeypatch.setattr(
+            "idp_regression.ui.api.fetch_platform_item",
+            lambda dataset, doc_id, workspace_path: None,
+        )
+        client.post(
+            f"/api/reviews/{session.session_id}/replace",
+            json={"entries": _VALID_GOLDEN_FILE},
+        )
+        assert len(captured) == 2, f"expected 2 upsert calls (one per entry), got {len(captured)}"
+        ids = {p["id"] for p in captured}
+        assert str(uuid.uuid5(ITEM_NAMESPACE, "test-dataset|inv-001.pdf")) in ids
+        assert str(uuid.uuid5(ITEM_NAMESPACE, "test-dataset|inv-002.pdf")) in ids
+        # Each payload must carry the correct field value
+        by_doc = {p["input"]["document_id"]: p for p in captured}
+        assert by_doc["inv-001.pdf"]["expectedOutput"]["fields"]["invoice_total"]["value"] == "1250.00"  # noqa: E501
+        assert by_doc["inv-002.pdf"]["expectedOutput"]["fields"]["invoice_total"]["value"] == "999.00"  # noqa: E501
+
+
+# ---------------------------------------------------------------------------
+# C2 — ITEM_NAMESPACE must match provision_golden_dataset._ITEM_NAMESPACE
+# ---------------------------------------------------------------------------
+
+
+class TestItemNamespaceNotDrifted:
+    """Guard: golden_edits.ITEM_NAMESPACE must equal provision_golden_dataset._ITEM_NAMESPACE.
+
+    A divergence would silently create duplicate platform items instead of upserts —
+    double IDP quota + a stale golden shadowing the fresh one (incident documented at
+    provision_golden_dataset.py:210-220).  This test is the binding contract so that
+    any change to either side immediately fails here.
+
+    Importing via sys.path (in the test only) is the approach used to access the
+    script constant.  The production module does not import from scripts/ to avoid
+    making sys.path mutation a runtime side effect of importing the production code.
+    """
+
+    def test_item_namespace_matches_provision_golden_dataset(self) -> None:
+        import sys
+        from pathlib import Path as _Path
+        scripts_dir = str(_Path(__file__).resolve().parents[3] / "scripts")
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import provision_golden_dataset as _pgd
+
+        from idp_regression.ui.golden_edits import ITEM_NAMESPACE
+        assert ITEM_NAMESPACE == _pgd._ITEM_NAMESPACE, (
+            "golden_edits.ITEM_NAMESPACE has drifted from "
+            "provision_golden_dataset._ITEM_NAMESPACE — "
+            "this would create duplicate platform items instead of upserts"
+        )
+
+
+# ---------------------------------------------------------------------------
+# R1 — PATCH is whole-item replace, not field-merge (pinned behavior)
+# ---------------------------------------------------------------------------
+
+
+class TestPatchIsWholeItemReplace:
+    """PATCH replaces the full item on the platform; it does not merge fields (R1).
+
+    S-02.3 must always send the COMPLETE corrected item, not just the changed fields.
+    This test pins that semantics explicitly so the behavior is a known contract, not
+    an accident of implementation.
+    """
+
+    def test_patch_with_subset_of_fields_replaces_not_merges(
+        self, client: TestClient, ws: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sending only one field in the PATCH body writes ONLY that field to the platform.
+
+        The platform item is NOT merged with any previously-stored fields.
+        """
+        session = _make_session(ws, state=ReviewSessionState.DRAFTED)
+        captured: list[dict[str, Any]] = []
+
+        def _capture_upsert3(
+            dataset: str, payload: dict[str, Any], workspace_path: Path
+        ) -> str | None:
+            captured.append(payload)
+            return None
+
+        monkeypatch.setattr("idp_regression.ui.api.upsert_platform_item", _capture_upsert3)
+        monkeypatch.setattr(
+            "idp_regression.ui.api.fetch_platform_item",
+            lambda dataset, doc_id, workspace_path: None,
+        )
+        # Send only ONE field; the platform previously had two (see _VALID_ENTRY).
+        single_field_body = {
+            "document_id": "inv-001.pdf",
+            "fields": {
+                "invoice_total": {"value": "9999.00", "type": "number"},
+            },
+        }
+        response = client.patch(
+            f"/api/reviews/{session.session_id}/items/inv-001.pdf",
+            json=single_field_body,
+        )
+        assert response.status_code == 200
+        assert len(captured) == 1
+        fields_written = captured[0]["expectedOutput"]["fields"]
+        # Only the one field we sent must be in the payload.
+        assert "invoice_total" in fields_written
+        assert "invoice_date" not in fields_written, (
+            "PATCH sent only invoice_total; invoice_date must NOT appear in the "
+            "upserted payload — PATCH is replace, not merge (R1)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# R2 — Provenance: only mark fields whose VALUE actually changed as edited
+# ---------------------------------------------------------------------------
+
+
+class TestProvenanceAccuracy:
+    """Provenance marks only fields whose value actually changed (R2).
+
+    Re-sending an unchanged field must NOT mark it as edited.
+    A genuinely changed field MUST be marked as edited.
+    """
+
+    def test_unchanged_field_not_marked_edited(
+        self, client: TestClient, ws: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-sending a field with the same value does not mark it as edited."""
+        session = _make_session(ws, state=ReviewSessionState.DRAFTED)
+        # Platform currently has these values (what pin_document.py wrote)
+        current_platform_item = {
+            "fields": {
+                "invoice_total": {"value": "1250.00", "type": "number"},
+                "invoice_date": {"value": "2024-06-28", "type": "date"},
+            }
+        }
+        monkeypatch.setattr(
+            "idp_regression.ui.api.fetch_platform_item",
+            lambda dataset, doc_id, workspace_path: current_platform_item,
+        )
+        monkeypatch.setattr(
+            "idp_regression.ui.api.upsert_platform_item",
+            lambda dataset, payload, workspace_path: None,
+        )
+        # PATCH: change invoice_total; resend invoice_date unchanged
+        patch_body = {
+            "document_id": "inv-001.pdf",
+            "fields": {
+                "invoice_total": {"value": "1300.00", "type": "number"},  # changed
+                "invoice_date": {"value": "2024-06-28", "type": "date"},  # unchanged
+            },
+        }
+        client.patch(
+            f"/api/reviews/{session.session_id}/items/inv-001.pdf",
+            json=patch_body,
+        )
+        reloaded = load_session(session.session_id, ws)
+        edited = reloaded.edited_document_ids.get("inv-001.pdf", [])
+        assert "invoice_total" in edited, (
+            "invoice_total was changed — it must be marked as edited"
+        )
+        assert "invoice_date" not in edited, (
+            "invoice_date was re-sent unchanged — it must NOT be marked as edited (R2)"
+        )
+
+    def test_all_changed_fields_are_marked_edited(
+        self, client: TestClient, ws: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When all fields are new (platform had none), all are marked edited."""
+        session = _make_session(ws, state=ReviewSessionState.DRAFTED)
+        # Platform has no current item (first edit — e.g. document wasn't in the draft)
+        monkeypatch.setattr(
+            "idp_regression.ui.api.fetch_platform_item",
+            lambda dataset, doc_id, workspace_path: None,
+        )
+        monkeypatch.setattr(
+            "idp_regression.ui.api.upsert_platform_item",
+            lambda dataset, payload, workspace_path: None,
+        )
+        client.patch(
+            f"/api/reviews/{session.session_id}/items/inv-001.pdf",
+            json=_VALID_ENTRY,
+        )
+        reloaded = load_session(session.session_id, ws)
+        edited = reloaded.edited_document_ids.get("inv-001.pdf", [])
+        assert "invoice_total" in edited
+        assert "invoice_date" in edited
+
+    def test_replace_marks_only_changed_fields_per_entry(
+        self, client: TestClient, ws: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """POST /replace: only fields whose value changed are marked edited."""
+        session = _make_session(ws, state=ReviewSessionState.DRAFTED)
+
+        def fake_fetch(dataset: str, doc_id: str, workspace_path: Any) -> dict[str, Any] | None:
+            if doc_id == "inv-001.pdf":
+                return {
+                    "fields": {
+                        "invoice_total": {"value": "1250.00", "type": "number"},
+                    }
+                }
+            return None
+
+        monkeypatch.setattr("idp_regression.ui.api.fetch_platform_item", fake_fetch)
+        monkeypatch.setattr(
+            "idp_regression.ui.api.upsert_platform_item",
+            lambda dataset, payload, workspace_path: None,
+        )
+        replace_file = {
+            "ENTRY-001": {
+                "document_id": "inv-001.pdf",
+                "fields": {
+                    # unchanged from platform current state
+                    "invoice_total": {"value": "1250.00", "type": "number"},
+                },
+            },
+            "ENTRY-002": {
+                "document_id": "inv-002.pdf",
+                "fields": {
+                    # no current state → all fields marked edited
+                    "invoice_total": {"value": "999.00", "type": "number"},
+                },
+            },
+        }
+        client.post(
+            f"/api/reviews/{session.session_id}/replace",
+            json={"entries": replace_file},
+        )
+        reloaded = load_session(session.session_id, ws)
+        # inv-001.pdf: invoice_total unchanged — should NOT be marked edited
+        edited_001 = reloaded.edited_document_ids.get("inv-001.pdf", [])
+        assert "invoice_total" not in edited_001, (
+            "inv-001.pdf's invoice_total was unchanged — must not be marked edited"
+        )
+        # inv-002.pdf: no prior state — all fields should be marked edited
+        edited_002 = reloaded.edited_document_ids.get("inv-002.pdf", [])
+        assert "invoice_total" in edited_002
+
+
+# ---------------------------------------------------------------------------
+# S2 (optional, Atchim flagged) — body document_id mismatch rejected
+# ---------------------------------------------------------------------------
+
+
+class TestDocumentIdMismatch:
+    """Body-supplied document_id that disagrees with the URL parameter is rejected (S2)."""
+
+    def test_patch_rejects_mismatched_document_id_in_body(
+        self, client: TestClient, ws: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = _make_session(ws, state=ReviewSessionState.DRAFTED)
+        monkeypatch.setattr(
+            "idp_regression.ui.api.upsert_platform_item",
+            lambda dataset, payload, workspace_path: None,
+        )
+        monkeypatch.setattr(
+            "idp_regression.ui.api.fetch_platform_item",
+            lambda dataset, doc_id, workspace_path: None,
+        )
+        mismatch_body = {
+            "document_id": "WRONG-DOC.pdf",  # differs from URL parameter "inv-001.pdf"
+            "fields": {
+                "invoice_total": {"value": "1250.00", "type": "text"},
+            },
+        }
+        response = client.patch(
+            f"/api/reviews/{session.session_id}/items/inv-001.pdf",
+            json=mismatch_body,
+        )
+        assert response.status_code == 422, (
+            "a body document_id that disagrees with the URL parameter must be rejected"
+        )
