@@ -107,6 +107,33 @@ def _optional_str_annotated_field_names(td: type) -> list[str]:
     return sorted(result)
 
 
+def _optional_str_or_none_annotated_field_names(td: type) -> list[str]:
+    """S-01.3 re-stamp #6 F-1: the ``NotRequired[str | None]`` fields of
+    ``td`` -- ``ScoreInput.comment`` is the one that exists today.
+    Neither ``_str_annotated_field_names`` (inner type must be exactly
+    ``str``) nor ``_optional_str_annotated_field_names`` (same) covers
+    it, so it was "never type-checked by either derivation" by design --
+    but a caller-supplied non-str, non-None value for it (e.g. an
+    accidental ``object()`` or ``bytes``) reached ``json.dumps`` inside
+    ``_write_score_with_retry`` RAW: with the real ``UrllibHttpClient``
+    this is a ``TypeError`` escaping ``record_run`` untyped, and only
+    AFTER ``run_experiment`` had already ingested the spans -- the same
+    GAP-1 shape ``_require_verdicts_shape`` was just fixed for, on the
+    field type-derivation this module's own docstrings identify as the
+    remaining gap. Invisible to ``tests/platform``'s fakes because none
+    of them serialise the body (P3) -- this derivation exists so the
+    value is checked before it ever reaches a transport."""
+    hints = get_type_hints(td, include_extras=True)
+    result = []
+    for name, hint in hints.items():
+        if get_origin(hint) is not NotRequired:
+            continue
+        (inner,) = get_args(hint)
+        if inner == (str | None):
+            result.append(name)
+    return sorted(result)
+
+
 def _required_field_names(td: type) -> list[str]:
     """DEBT-49 — sound PRESENCE derivation for a TypedDict, robust to
     ``NotRequired`` under postponed annotations. Production-side
@@ -197,6 +224,11 @@ _SCORE_REQUIRED_FIELDS = _required_field_names(ScoreInput)
 #: is added it is type-checked ONLY when supplied, not rejected for being
 #: absent.
 _SCORE_OPTIONAL_STR_FIELDS = _optional_str_annotated_field_names(ScoreInput)
+
+#: S-01.3 re-stamp #6 F-1: the ``NotRequired[str | None]`` fields of
+#: ``ScoreInput`` -- ``comment`` today. Type-checked ONLY when present
+#: AND not None (the legitimate absent-or-null shapes), never required.
+_SCORE_OPTIONAL_STR_OR_NONE_FIELDS = _optional_str_or_none_annotated_field_names(ScoreInput)
 
 #: DEBT-49: the SOUND presence derivation for ``DocumentRecord`` — computed
 #: ONCE, from the declared type (see ``_required_field_names``), and reused
@@ -354,6 +386,17 @@ def _require_record_shape(record: DocumentRecord) -> None:
                 raise ExperimentRecordFailedError(
                     f"record_run: a score for document_id={document_id!r} has a "
                     f"non-string {key!r}"
+                )
+        for key in _SCORE_OPTIONAL_STR_OR_NONE_FIELDS:
+            # S-01.3 re-stamp #6 F-1: VALUE TYPE only, and only if
+            # supplied and not None -- `NotRequired[str | None]`'s
+            # legitimate shapes are "absent" and "None", neither of
+            # which reaches this check.
+            value = score_as_dict.get(key)
+            if value is not None and not isinstance(value, str):
+                raise ExperimentRecordFailedError(
+                    f"record_run: a score for document_id={document_id!r} has a "
+                    f"non-string, non-null {key!r}"
                 )
 
 

@@ -1628,3 +1628,91 @@ def test_the_per_document_score_payload_has_exactly_one_target_and_a_data_type()
         targets = {"traceId", "sessionId", "datasetRunId"} & set(payload)
         assert targets == {"traceId"}, payload
         assert payload.get("dataType") == "CATEGORICAL", payload
+
+
+# --- S-01.3 re-stamp #6 F-1: ScoreInput.comment's value type is unpinned --
+#
+# comment is NotRequired[str | None], the exact shape "never type-checked
+# by either derivation" (docstring). With the REAL UrllibHttpClient, a
+# non-str/non-None comment reaches json.dumps raw: a TypeError escaping
+# record_run AFTER run_experiment already ingested the spans.
+
+@pytest.mark.parametrize("bad_comment", [object(), b"bytes", 42, {"k": "v"}])
+def test_a_non_string_non_null_comment_raises_typed_error_before_any_sdk_call(
+    bad_comment: object,
+) -> None:
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    bad_score: Any = {
+        **_score(run_id="run-1", document_id="doc-0", name="gate", value="FAIL"),
+        "comment": bad_comment,
+    }
+    records: list[DocumentRecord] = [
+        {"item_id": "item-1", "document_id": "doc-0", "scores": [bad_score]}
+    ]
+
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        adapter.record_run(
+            dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+        )
+
+    assert "doc-0" in str(excinfo.value)
+    _assert_zero_platform_writes(http_client, tracing_client)
+
+
+@pytest.mark.parametrize("ok_comment", [None, "a comment", "expected 'x' · actual 'y'"])
+def test_a_string_or_null_comment_is_accepted(ok_comment: str | None) -> None:
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    score: Any = {
+        **_score(run_id="run-1", document_id="doc-0", name="gate", value="FAIL"),
+        "comment": ok_comment,
+    }
+    records: list[DocumentRecord] = [
+        {"item_id": "item-1", "document_id": "doc-0", "scores": [score]}
+    ]
+    adapter.record_run(
+        dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+    )
+    assert tracing_client.run_experiment_calls == 1
+
+
+# --- S-01.3 re-stamp #6 F-2: a non-dict row in `verdicts`' detail rows ----
+
+def test_a_non_dict_row_in_a_detail_entry_raises_typed_error() -> None:
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    records: list[DocumentRecord] = [
+        {
+            "item_id": "item-1",
+            "document_id": "doc-0",
+            "scores": [_SCORE_FIXTURE],
+            "verdicts": {"t": {"verdict": "detail", "rows": ["has verdict inside"]}},  # type: ignore[dict-item]
+        }
+    ]
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        adapter.record_run(
+            dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+        )
+    assert "doc-0" in str(excinfo.value)
+    _assert_zero_platform_writes(http_client, tracing_client)
+
+
+# --- S-01.3 re-stamp #6 F-4: the built comment must be the one WIRED ------
+
+def test_the_built_comment_is_the_one_sent_in_the_score_payload() -> None:
+    adapter, http_client = _adapter_with_cache("item-1")
+    records: list[DocumentRecord] = [
+        {
+            "item_id": "item-1",
+            "document_id": "doc-0",
+            "scores": [
+                {
+                    **_score(run_id="run-1", document_id="doc-0", name="gate", value="FAIL"),
+                    "comment": "FAIL on: total",
+                }
+            ],
+        }
+    ]
+    adapter.record_run(
+        dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+    )
+    score_calls = [c for c in http_client.calls if c[1] == "/api/public/scores"]
+    assert score_calls and score_calls[0][2]["comment"] == "FAIL on: total"

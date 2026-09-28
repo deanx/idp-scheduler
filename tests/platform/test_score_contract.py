@@ -277,3 +277,24 @@ def test_the_gate_comment_never_names_a_failing_prompt_by_its_raw_key() -> None:
     comment = gate_score.get("comment") or ""
     assert sentinel_prompt_key not in comment
     assert prompt_score_name(sentinel_prompt_key) in comment
+
+
+# --- S-01.3 re-stamp #6 F-5: the FIELD branch of _gate_comment ------------
+
+def test_the_gate_comment_names_a_failing_critical_field() -> None:
+    golden: Golden = {
+        "document_id": "invoice-007.pdf",
+        "fields": {"total": {"value": "1250.00", "type": "number", "critical": True}},
+    }
+    verdicts: VerdictMap = {
+        "total": {
+            "verdict": "wrong_value", "expected": "1250.00", "actual": "999.00",
+            "confidence": 0.9, "critical": True, "format_critical": False, "type": "number",
+        }
+    }
+    scores = build_score_inputs(
+        golden=golden, verdicts=verdicts, gate="FAIL", run_id="run-1",
+        document_id="invoice-007.pdf",
+    )
+    gate_score = next(s for s in scores if s["name"] == "gate")
+    assert gate_score.get("comment") == "FAIL on: total"
