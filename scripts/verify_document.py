@@ -67,6 +67,43 @@ DEFAULT_STORE = Path(".idp-regression-pins")
 PINNED_FILE_CLASSIFIER = "pinned-file"
 
 
+def _pinned_file_classifier_names(custom_specs: dict[str, Any] | None) -> list[str]:
+    """The custom scorer names a per-file pin may be verified with:
+    `base == "pinned-file"` only. ONE function, so `_parse_args`'s
+    `choices` and `resolve_classifier`'s pre-spend check (below) can
+    never drift apart on which names are actually offered."""
+    return sorted(
+        name for name, spec in (custom_specs or {}).items() if spec.base == PINNED_FILE_CLASSIFIER
+    )
+
+
+def resolve_classifier(name: str | None) -> str:
+    """Validate a `--classifier` name against the SAME pinned-file-base
+    restriction `_parse_args`'s `choices` enforces, WITHOUT building an
+    argparse parser or spending anything -- so a caller that reaches
+    this file only through `compare_versions.py` (which spends the pin
+    half's quota BEFORE `verify_document.py`'s own argparse stage ever
+    runs) can refuse a bad name before ANY extraction, not just before
+    its own verify half (Epic E custom-scorer wiring, gate F-1: the pin
+    half was spending N extractions on a `--classifier` that would only
+    fail to parse afterwards).
+
+    Raises `ValueError` (never `SystemExit`) naming the allowed choices.
+    Returns the resolved classifier: `name`, or the shipped
+    `pinned-file` default when `name` is falsy."""
+    from idp_regression.orchestration.scorer_store import register_custom_classifiers
+
+    custom_specs, _ = register_custom_classifiers()
+    allowed = {PINNED_FILE_CLASSIFIER, *_pinned_file_classifier_names(custom_specs)}
+    if name and name not in allowed:
+        raise ValueError(
+            f"--classifier {name!r} is not valid here (expected one of "
+            f"{', '.join(sorted(allowed))}) -- a regression-based custom scorer reads "
+            "empty-vs-empty as missing, wrong for a per-file pin"
+        )
+    return name or PINNED_FILE_CLASSIFIER
+
+
 def _parse_args(
     argv: list[str] | None, *, custom_specs: dict[str, Any] | None = None
 ) -> argparse.Namespace:
@@ -80,9 +117,7 @@ def _parse_args(
     empty). Restricting the CHOICES, not just documenting the rule,
     means a typo or a wrong-base name is refused before any extraction,
     the same posture every other guard in this script takes."""
-    pinned_file_custom_names = sorted(
-        name for name, spec in (custom_specs or {}).items() if spec.base == PINNED_FILE_CLASSIFIER
-    )
+    pinned_file_custom_names = _pinned_file_classifier_names(custom_specs)
     ap = argparse.ArgumentParser(
         prog="verify_document",
         description="Re-check a pinned file against a new Action version.",

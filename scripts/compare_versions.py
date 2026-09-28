@@ -255,6 +255,19 @@ def run(args: argparse.Namespace, pin: Any, verify: Any) -> tuple[int, dict[str,
             file=sys.stderr,
         )
 
+    # A bad --classifier used to be refused only once verify.main()'s OWN
+    # argparse stage ran -- AFTER the pin half had already spent its N
+    # extractions (Epic E custom-scorer wiring, gate F-1). `verify`'s
+    # `resolve_classifier` runs the SAME pinned-file-base check with no
+    # parser and no spend, so a wrong name is refused before the plan is
+    # even printed.
+    if args.classifier:
+        try:
+            verify.resolve_classifier(args.classifier)
+        except ValueError as exc:
+            print(f"compare_versions: {exc}", file=sys.stderr)
+            return 2, {}
+
     print(f"compare_versions: PLAN for dataset {args.dataset!r}", file=sys.stderr)
     print(f"  documents            {count}", file=sys.stderr)
     print(

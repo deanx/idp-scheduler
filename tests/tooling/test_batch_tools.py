@@ -23,6 +23,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import logging
 import os
 import stat
 import sys
@@ -1651,6 +1652,14 @@ class _FakeStage:
             path.write_text(json.dumps(payload))
         return self.exit_code
 
+    def resolve_classifier(self, name: str | None) -> str:
+        """A fake `verify_document` used as the VERIFY half never
+        exercises the real pinned-file-base restriction -- tests that
+        care about that use the real module instead (see
+        `test_compare_refuses_a_bad_classifier_before_the_pin_half_
+        spends_anything`)."""
+        return name or "pinned-file"
+
 
 def _pipeline_stages(tmp_path: Path, **overrides: Any) -> Any:
     work = tmp_path / "work"
@@ -2565,6 +2574,32 @@ def test_compare_forwards_classifier_to_the_verify_half_only(tmp_path: Path) -> 
     assert verify_argv[verify_argv.index("--classifier") + 1] == "my-pinned-rule"
 
 
+def test_compare_refuses_a_bad_classifier_before_the_pin_half_spends_anything(
+    tmp_path: Path,
+) -> None:
+    """Epic E custom-scorer wiring gate F-1: `verify_document.py`'s own
+    argparse `choices` refuse a wrong-base/unregistered `--classifier`,
+    but ONLY once verify's parser actually runs -- and `compare_versions
+    .run` calls `pin.main()` (spending N real extractions) BEFORE
+    `verify.main()` is ever invoked. A bad name used to be refused only
+    AFTER the pin half had already spent, which is the exact "reach IDP,
+    spend, then fail" shape the preflight check exists to prevent
+    elsewhere. Reproduced with a RECORDING pin double and the REAL
+    `verify_document` module (not `_FakeStage`), so the pin half's own
+    call count is the thing under test."""
+    archive = _zip(tmp_path, {f"inv-{i}.pdf": b"%PDF" for i in (1, 2)})
+    pin = _FakeStage()
+
+    exit_code, _ = compare_versions.run(
+        _compare_args(tmp_path, zip_path=archive, classifier="not-a-real-classifier"),
+        pin,
+        verify_document,
+    )
+
+    assert exit_code != 0
+    assert pin.calls == [], "the pin half must not spend before --classifier is validated"
+
+
 def test_compare_pins_at_the_trusted_version_then_verifies_the_candidate(
     tmp_path: Path,
 ) -> None:
@@ -3465,6 +3500,58 @@ def _write_failing_artifact(directory: Path) -> None:
             artifact_envelope("run", {"a.pdf": {"total": _cell("wrong_value")}}, status="complete")
         )
     )
+
+
+def test_verify_main_offers_a_registered_pinned_file_custom_scorer_and_logs_its_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Epic E custom-scorer wiring gate F-5 (M4/M5): `main()`'s own
+    wiring -- registering specs BEFORE the parser is built, and logging
+    `custom_scorer_selected` when one is named -- had no test exercising
+    it end to end; only `_parse_args`/`run` in isolation were pinned.
+    M4 (parser built without registered specs) would turn a real custom
+    name into an argparse SystemExit here; M5 (the digest log deleted)
+    would leave the assertion below with nothing to find."""
+    from idp_regression.orchestration import cli, dotenv_support, facade
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(dotenv_support, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "configure_logging", lambda: None)
+    _pinned(tmp_path, "a.pdf")
+
+    scorer_dir = tmp_path / ".idp-regression-scorers"
+    scorer_dir.mkdir()
+    (scorer_dir / "pin-rule.json").write_text(
+        json.dumps({
+            "name": "pin-rule", "base": "pinned-file",
+            "rules": [{"when": {"confidence_below": 0.5, "verdict_is": ["match"]},
+                      "then": {"verdict": "wrong_value", "critical": True}}],
+        })
+    )
+
+    monkeypatch.setattr(facade, "run_eval", lambda *a, **k: 0)
+    argv = [
+        "--all", "--dataset", "ds", "--version", "2.0.0", "--store", str(tmp_path / "pins"),
+        "--classifier", "pin-rule", "--yes",
+    ]
+
+    from idp_regression.classifier.registry import CLASSIFIERS
+
+    try:
+        with caplog.at_level(logging.INFO):
+            exit_code = verify_document.main(argv)
+
+        assert exit_code == 0
+        assert "custom_scorer_selected name=pin-rule base=pinned-file" in caplog.text
+    finally:
+        # register_custom_classifiers() writes into the SAME global
+        # CLASSIFIERS dict every other test's registry assertions read --
+        # left unpopped, "pin-rule" leaks into every test that runs
+        # afterwards in this process (confirmed: it broke
+        # tests/ui/test_api.py::TestScorers when run in the same session).
+        CLASSIFIERS.pop("pin-rule", None)
 
 
 def test_verify_main_banner_follows_the_artifact_not_the_exit_code(
