@@ -298,6 +298,7 @@ def _require_record_shape(record: DocumentRecord) -> None:
             f"record_run: record for document_id={document_id!r} has a non-list "
             "'scores' value (expected a list of score dicts)"
         )
+    _require_verdicts_shape(record.get("verdicts"), document_id=document_id)
     for score in scores:
         # FO-2 (DEBT-48/40/43/47), split per DEBT-53 (prose): this used to
         # hand-enumerate "id" and "name" only, omitting "value" (declared
@@ -422,6 +423,46 @@ def _body_snippet_for_error(body: Any) -> str:
     if body is None:
         return "<empty body>"
     return f"<{type(body).__name__} body, {len(str(body))} chars, redacted>"
+
+
+def _require_verdicts_shape(verdicts: object, *, document_id: str) -> None:
+    """`DocumentRecord.verdicts` (`NotRequired[VerdictMap | None]`) has no
+    presence/type derivation to ride: it is neither `str` nor
+    `NotRequired[str]`, so `_DOCUMENT_RECORD_REQUIRED_FIELDS` /
+    `_str_annotated_field_names` skip it entirely -- "hand-written with
+    one automated column" (R2). `_expected_output` subscripts it building
+    each `ExperimentItem`, OUTSIDE the total `task` closure's try/except,
+    so a malformed map used to escape `record_run` as a raw
+    TypeError/KeyError/AttributeError instead of this typed error
+    (S-01.3 re-stamp #5 F-2, HARDEN-01 GAP-1 class).
+
+    `None` (or the key absent) is the `--platform-values verdicts-only`
+    shape and is always accepted. Otherwise: a dict, every entry a dict
+    with a `"verdict"` key, and a `"detail"` entry's `"rows"` a list of
+    dicts. INV-02: the message names `document_id` only.
+    """
+    if verdicts is None:
+        return
+    if not isinstance(verdicts, dict):
+        raise ExperimentRecordFailedError(
+            f"record_run: record for document_id={document_id!r} has a non-dict "
+            "'verdicts' value (expected a mapping or null)"
+        )
+    for entry in verdicts.values():
+        if not isinstance(entry, dict) or "verdict" not in entry:
+            raise ExperimentRecordFailedError(
+                f"record_run: record for document_id={document_id!r} has a malformed "
+                "'verdicts' entry (expected a mapping with a 'verdict' key)"
+            )
+        if entry["verdict"] == "detail":
+            rows = entry.get("rows")
+            if not isinstance(rows, list) or any(
+                not isinstance(row, dict) or "verdict" not in row for row in rows
+            ):
+                raise ExperimentRecordFailedError(
+                    f"record_run: record for document_id={document_id!r} has a 'verdicts' "
+                    "table entry whose 'rows' is not a list of row mappings"
+                )
 
 
 def _leaf_values(verdicts: VerdictMap) -> dict[str, Any]:

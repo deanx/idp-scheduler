@@ -237,3 +237,43 @@ def test_no_sentinel_expected_or_actual_value_appears_in_any_score_input() -> No
             assert _EXPECTED_SENTINEL not in text
             assert _ACTUAL_SENTINEL not in text
             assert "0.42" not in text
+
+
+# --- S-01.3 re-stamp #5 F-1: the gate comment must never name a prompt by
+# its raw question text, in ANY --platform-values mode -------------------
+
+
+def test_the_gate_comment_never_names_a_failing_prompt_by_its_raw_key() -> None:
+    """`_gate_comment` names failing FIELDS by their golden key, which is
+    already the score name -- but a golden prompt is keyed by the raw
+    Curator-authored question text (`gate.py`), and that key reached the
+    `gate` score's comment unchanged, in every --platform-values mode.
+    That undoes DEBT-13/REG-05, which exist to keep the raw prompt out of
+    everything the platform stores."""
+    sentinel_prompt_key = "What is the supplier's bank IBAN on this invoice?"
+    golden: Golden = {
+        "document_id": "invoice-007.pdf",
+        "fields": {},
+        "prompts": {sentinel_prompt_key: {"answer": "", "critical": True}},
+    }
+    verdicts: VerdictMap = {
+        sentinel_prompt_key: {
+            "verdict": "missing",
+            "expected": "",
+            "actual": None,
+            "confidence": None,
+            "critical": True,
+            "format_critical": False,
+            "type": "text",
+        }
+    }
+
+    scores = build_score_inputs(
+        golden=golden, verdicts=verdicts, gate="FAIL",
+        run_id="run-1", document_id="invoice-007.pdf",
+    )
+
+    gate_score = next(s for s in scores if s["name"] == "gate")
+    comment = gate_score.get("comment") or ""
+    assert sentinel_prompt_key not in comment
+    assert prompt_score_name(sentinel_prompt_key) in comment

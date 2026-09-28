@@ -129,9 +129,16 @@ def _comment(verdict: Verdict | TableVerdict, include_values: bool) -> str | Non
     return f"expected {expected!r} · actual {actual!r}"
 
 
-def _gate_comment(verdicts: VerdictMap, gate: GateLiteral) -> str | None:
-    """Which fields failed the gate. Field NAMES only -- never values --
-    so this is safe to emit whatever `--platform-values` says."""
+def _gate_comment(
+    verdicts: VerdictMap, gate: GateLiteral, *, prompt_keys: frozenset[str]
+) -> str | None:
+    """Which fields failed the gate. NAMES only -- never values -- so this
+    is safe to emit whatever `--platform-values` says. A PROMPT's key in
+    `verdicts` is the raw Curator-authored question text (`gate.py` keys
+    prompts by question, not by name), so it is reported as
+    `prompt_score_name(key)` -- the same hash the prompt's own score uses
+    -- never verbatim (S-01.3 re-stamp #5 F-1; same rule as REG-05's
+    `_require_verdict`)."""
     if gate == "PASS":
         return None
     failing: list[str] = []
@@ -148,7 +155,7 @@ def _gate_comment(verdicts: VerdictMap, gate: GateLiteral) -> str | None:
         else:
             fails = critical and verdict in ("missing", "wrong_value")
         if fails:
-            failing.append(name)
+            failing.append(prompt_score_name(name) if name in prompt_keys else name)
     return f"FAIL on: {', '.join(sorted(failing))}" if failing else None
 
 
@@ -250,7 +257,9 @@ def build_score_inputs(
             # Names the fields that caused a FAIL -- names only, so this
             # line stays useful even under `verdicts-only`, where it is
             # the one thing that keeps a red gate self-explanatory.
-            "comment": _gate_comment(verdicts, gate),
+            "comment": _gate_comment(
+                verdicts, gate, prompt_keys=frozenset(golden.get("prompts", {}))
+            ),
         }
     )
     return scores

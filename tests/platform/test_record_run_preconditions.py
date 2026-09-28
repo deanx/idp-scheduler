@@ -1513,3 +1513,118 @@ def test_metadata_not_a_dict_raises_typed_error_before_any_sdk_call() -> None:
 
     assert "not a dict" in str(excinfo.value)
     _assert_zero_platform_writes(http_client, tracing_client)
+
+
+# --- S-01.3 re-stamp #5 F-2: DocumentRecord.verdicts has no shape guard --
+#
+# `verdicts` is a declared, optional field with no presence/type check --
+# neither derivation covers it, since it is `NotRequired[VerdictMap | None]`,
+# not `str`. `_expected_output` (called building each `ExperimentItem`,
+# OUTSIDE the total `task` closure) subscripts it raw, so a malformed
+# `verdicts` map escapes `record_run` as an untyped TypeError/KeyError/
+# AttributeError instead of the typed `ExperimentRecordFailedError` every
+# other malformed shape here produces (HARDEN-01 GAP-1 class).
+
+_SCORE_FIXTURE: ScoreInput = _score(
+    run_id="run-1", document_id="doc-0", name="field:total", value="match"
+)
+
+
+@pytest.mark.parametrize(
+    "bad_verdicts",
+    [
+        "not-a-dict",
+        ["a", "list"],
+        {"total": "not-a-dict"},
+        {"total": {"no_verdict_key": True}},
+        {"t": {"verdict": "detail", "rows": [{}]}},
+        {"t": {"verdict": "detail", "rows": "not-a-list"}},
+        {"t": {"verdict": "detail"}},
+    ],
+)
+def test_a_malformed_verdicts_map_raises_typed_error_before_any_sdk_call(
+    bad_verdicts: object,
+) -> None:
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    records: list[DocumentRecord] = [
+        {
+            "item_id": "item-1",
+            "document_id": "doc-0",
+            "scores": [_SCORE_FIXTURE],
+            "verdicts": bad_verdicts,  # type: ignore[typeddict-item]
+        }
+    ]
+
+    with pytest.raises(ExperimentRecordFailedError) as excinfo:
+        adapter.record_run(
+            dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+        )
+
+    assert "doc-0" in str(excinfo.value)
+    _assert_zero_platform_writes(http_client, tracing_client)
+
+
+def test_verdicts_none_is_accepted_verdicts_only_mode() -> None:
+    """`--platform-values verdicts-only`'s shape: `verdicts` absent or
+    None must NOT be refused by the new guard."""
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    records: list[DocumentRecord] = [
+        {"item_id": "item-1", "document_id": "doc-0", "scores": [_SCORE_FIXTURE],
+         "verdicts": None}
+    ]
+    adapter.record_run(
+        dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+    )
+    assert tracing_client.run_experiment_calls == 1
+
+
+def test_a_wellformed_verdicts_map_is_accepted() -> None:
+    adapter, http_client, tracing_client = _adapter_with_tracing("item-1")
+    records: list[DocumentRecord] = [
+        {
+            "item_id": "item-1",
+            "document_id": "doc-0",
+            "scores": [_SCORE_FIXTURE],
+            "verdicts": {
+                "total": {"verdict": "match", "expected": "1", "actual": "1",
+                         "confidence": 0.9, "critical": True, "format_critical": False,
+                         "type": "number"},
+                "items": {"verdict": "detail", "critical": True, "type": None,
+                         "rows": [{"match_key": "A", "column": "sku", "verdict": "match",
+                                   "expected": "A", "actual": "A", "confidence": None}]},
+            },
+        }
+    ]
+    adapter.record_run(
+        dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+    )
+    assert tracing_client.run_experiment_calls == 1
+
+
+# --- S-01.3 re-stamp #5 F-3: the per-document score-write payload's own
+# contract -- exactly one target plus dataType -- was never pinned outside
+# the live suite. mark_run_status's run-level write IS pinned; this is the
+# per-document sibling that carries every document's verdicts.
+
+def test_the_per_document_score_payload_has_exactly_one_target_and_a_data_type() -> None:
+    adapter, http_client = _adapter_with_cache("item-1")
+    records: list[DocumentRecord] = [
+        {
+            "item_id": "item-1",
+            "document_id": "doc-0",
+            "scores": [
+                _score(run_id="run-1", document_id="doc-0", name="gate", value="FAIL"),
+            ],
+        }
+    ]
+
+    adapter.record_run(
+        dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+    )
+
+    score_calls = [c for c in http_client.calls if c[1] == "/api/public/scores"]
+    assert score_calls, "no score write happened"
+    for _method, _path, payload in score_calls:
+        targets = {"traceId", "sessionId", "datasetRunId"} & set(payload)
+        assert targets == {"traceId"}, payload
+        assert payload.get("dataType") == "CATEGORICAL", payload
