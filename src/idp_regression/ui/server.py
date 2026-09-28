@@ -86,7 +86,17 @@ def main(argv: list[str] | None = None) -> int:
     # root -- see `workspace.py`.
     workspace.load_environment()
 
-    app = create_app(dev_cors=args.dev_cors, scorer_dir=args.scorer_dir)
+    # Default follows the WORKSPACE, never the server process's own cwd
+    # -- a job runs with `cwd=workspace.workspace_root()` (`jobs.py`), so
+    # its own bare-relative `scorer_store.SCORER_DIR` default resolves
+    # there. `create_app`'s default used to be that same bare-relative
+    # constant resolved against wherever THIS process happened to start,
+    # which only coincided with the job's answer when `--workspace` was
+    # never passed -- the exact class of bug this module's own
+    # docstring names for every other directory the console owns.
+    app = create_app(
+        dev_cors=args.dev_cors, scorer_dir=args.scorer_dir or workspace.scorer_dir()
+    )
 
     status = preflight.check()
     print(f"idp-regression-ui: workspace {status['workspace']}")

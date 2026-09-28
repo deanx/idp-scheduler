@@ -11,6 +11,8 @@ is refused, loudly, rather than accepted with a warning nobody reads.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from idp_regression.ui.server import main
@@ -44,3 +46,46 @@ def test_loopback_is_accepted(host: str, monkeypatch: pytest.MonkeyPatch) -> Non
     assert main(["--host", host, "--port", "9999"]) == 0
     assert started["host"] == host
     assert started["port"] == 9999
+
+
+def test_the_default_scorer_dir_follows_the_workspace_not_the_servers_own_cwd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The console's own scorer routes (list/save/delete) and a
+    validation job's `register_custom_classifiers()` must agree on
+    WHERE scorers live. A job runs with `cwd=workspace.workspace_root()`
+    (`jobs.py`), so its own bare-relative default (`scorer_store.
+    SCORER_DIR`) resolves against the workspace. `create_app`'s own
+    default used to be that SAME bare-relative constant resolved
+    against the SERVER PROCESS's cwd instead -- correct only when
+    `--workspace` is never passed, i.e. only by coincidence -- exactly
+    the class of bug `ui/workspace.py`'s own docstring describes for
+    every other directory this console owns."""
+    from idp_regression.ui import workspace as workspace_module
+
+    started: dict[str, object] = {}
+    captured_scorer_dir: dict[str, object] = {}
+
+    class FakeUvicorn:
+        @staticmethod
+        def run(_app: object, **kwargs: object) -> None:
+            started.update(kwargs)
+
+    def _fake_create_app(*, dev_cors: bool, scorer_dir: object) -> object:
+        captured_scorer_dir["value"] = scorer_dir
+        return object()
+
+    monkeypatch.setitem(__import__("sys").modules, "uvicorn", FakeUvicorn)
+    monkeypatch.setattr("idp_regression.ui.api.create_app", _fake_create_app)
+    monkeypatch.setattr(workspace_module, "load_environment", lambda: None)
+    monkeypatch.setattr(
+        "idp_regression.ui.preflight.check",
+        lambda: {
+            "workspace": str(tmp_path), "env_file": None,
+            "writes": {"run_artifacts": "ok"}, "blockers": [],
+        },
+    )
+
+    main(["--workspace", str(tmp_path), "--port", "9999"])
+
+    assert captured_scorer_dir["value"] == tmp_path / workspace_module.SCORER_DIR_NAME
