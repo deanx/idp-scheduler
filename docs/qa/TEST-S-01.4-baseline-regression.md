@@ -1,100 +1,100 @@
 # /test stamp — SPEC-01 (S-01.4 run orchestration + CLI)
 
-**Status:** ❌ **FAILED at `8a01c62`** — re-stamp #4, fresh gate (DEBT-44/46/72/77, Wave C).
+**Status:** ❌ **FAILED at `1e931fe`** — re-stamp #5, fresh gate (DEBT-44/46/72/77, Wave C).
 **Source:** /test re-stamp (Atchim TDD gate, fresh instance)
-**Date:** 2026-09-28 · **Commit:** `8a01c625172bf8946f3cf28b2afa20d53981ed93` · **Author:** alex@divinocosta.com.br (solo)
-**Rigor:** SPEC-01 header is `Risk: high` ⇒ this stamp binds regardless of the `prototype` profile. **Profile ≠ risk level.**
-**Independence (R3/DEBT-44):** run by a **new Atchim instance on Claude Fable 5.1**. This instance issued **no APPROVE and no prior verdict** on any commit in this story's history. The fixes since `f3b0b65` carry `Co-Authored-By: Claude Opus 5 (1M context)` / `Claude Opus 5.5 (1M context)` trailers — a different model from the gate. ✅ structural (different models, fresh instance).
-**Static:** `pytest -q` **1931 passed / 15 skipped** · `mypy src tests scripts` (strict) **0 errors / 151 files** · `ruff check src tests scripts` **clean**, `S` family selected (`pyproject.toml` `select` includes `"S"`; `S101` fires — demonstrated below). No live IDP/platform call; `.env` never sourced.
+**Date:** 2026-09-28 · **Commit:** `1e931fed7c46cfc548a842e683ca8965a91b5c92` · **Author:** alex@divinocosta.com.br (solo)
+**Rigor:** SPEC-01 header is `Risk: high` ⇒ this stamp binds regardless of the `prototype` profile. A `src/` fix never qualifies for `re-gate skipped`. **Profile ≠ risk level.**
+**Independence (R3/DEBT-44):** run by a **new Atchim instance on Claude Fable 5.1**. This instance issued **no APPROVE and no prior verdict** on any commit in this story's history; re-stamp #4 (`79315d5`) was a different instance. The delta `1e931fe` carries `Co-Authored-By: Claude Sonnet 5` — a different model from the gate. ✅ structural (different models, fresh instance).
+**Static:** `pytest -q` **1933 passed / 15 skipped** · `mypy src tests scripts` (strict) **0 errors / 151 files** · `ruff check src tests scripts` **clean**; reintroducing `assert` at `facade.py:846` makes ruff report **`S101 Use of assert detected`** (demonstrated, restored, `shasum` OK) · `python -O -m pytest tests/orchestration` **423 passed** (the assert-vs-raise axis holds under `-O`). No live IDP/platform call; `.env` never sourced. `PYTHONDONTWRITEBYTECODE=1` throughout; no stray `__pycache__`.
 
 ## Verdict — FAILED. Why, in one paragraph
 
-The four coordinator-verified fixes (F-2, F-5, F-6, F-7) **are** closed and each has a mutant that goes RED (M3–M8 below). But the re-stamp checklist's own item 1 landed: a **sixth fail-open, reproduced through the real probe path** — the F-5 fix keyed the summary qualifier on `failed_ticks` (ticks that *raised*), and a tick that returns `indeterminate` (every candidate `UNKNOWN`: a 429/5xx-ing API) is counted as **healthy**, so a watcher whose API was ambiguous on **30 of 40 ticks** closes with `no new versions found.` unqualified, exit 0. Same violated invariant as F-1/F-5, one outcome to the left. And item 2 landed harder than expected: the eighth vacuous test is a **class** — five tests in this tree pass because their `AssertionError` sentinel is swallowed by the very catch-all the code under test is required to have, and the mutant set shows three A8/A10 CLI guards plus the watcher's `if auto_run:` quota guard are pinned by **nothing** in 626 tests.
+Everything the delta *names* is closed and mutant-verified: the cumulative `indeterminate_ticks` tally is genuinely cumulative (re-adding a reset is killed, MA3), the F-2 spy distinguishes `auto_run`'s guard from the `max_runs_per_tick` default-0 gate (MC1/MC2/MC5 all killed independently), the three F-3 survivors and F-5 die on their own log lines (MB1–MB3, MB7), and the F-4 boundary is pinned (MA6). But re-stamp #4's checklist item 1 landed **again**, through the real `check_once`: **`ceiling_reached` is the seventh fail-open.** It is a no-verdict outcome by the design's own test (`test_budget_exhausted_with_no_hits_at_all_is_ceiling_reached`, "unknown beyond here"), it *outranks* `indeterminate` in `check_once`'s priority order, it *resets* `consecutive_indeterminate_ticks`, and the loop does not count it. With the watcher CLI's **default** probe budget and a legal lookahead, an endpoint answering UNKNOWN on every candidate closes with `no new versions found (1 of 40 tick(s) got no answer)`, exit 0 — 39 truncated, ambiguous ticks unaccounted for and the degraded-detector halt never fires. The fix closed the reported outcome (`indeterminate`) rather than the invariant (*every outcome is classified verdict / no-verdict / halt*), which is exactly what stamp #4's carry-forward item 1 asked for and R1 forbids. And the vacuous-sentinel class has **two** more members than F-3 named: a `{1,64}`→`{1,65}` cap mutant and a `--version required=False` mutant both survive all 423 orchestration tests.
 
 ## Findings
 
 | # | Sev | File · symbol | Scenario | Suggested fix |
 |---|---|---|---|---|
-| **F-1** | **High** — fail-open #6 | `src/idp_regression/orchestration/watch.py` · `run_watch_loop`, the `end_reason == "interrupted"` summary arm; `healthy_ticks += 1` after `check_once` | Real probe (scratchpad repro, not committed): controls clean, every candidate `UNKNOWN` on ticks where `n % 4 != 0`, `ABSENT` on the 4th; 40 ticks, Ctrl-C. `check_once` returns `indeterminate` 30 times — never >3 in a row, so `max_indeterminate_ticks` (consecutive-only, `check_versions.py`) never escalates to `detector_degraded`. Output: **`Stopped after 40 tick(s) (0m00s). no new versions found.`**, `EXIT 0`. The per-tick line says `ambiguous result (retrying)` 30 times and the closing line contradicts it. Invariant violated: *every tick that produced no verdict is accounted for in the summary.* F-5 closed the exception case; `indeterminate` (and arguably `ceiling_reached`) are the same class on the outcome axis, unchanged line (R1). | Count no-verdict outcomes (`OUTCOME_INDETERMINATE`, decide on `OUTCOME_CEILING_REACHED`) into an `unanswered_ticks` counter beside `failed_ticks`; qualify the summary on their sum; add a **cumulative** ceiling (F-5's own docstring already notes a consecutive-only ceiling is unreachable at 3-of-4). Pin with a real-probe test, not a `check_once` monkeypatch. Consider the same cumulative blind spot in `check_once`'s `consecutive_indeterminate_ticks` (unchanged code). |
-| **F-2** | **High** — vacuous test + unpinned quota guard | `tests/orchestration/test_watch.py` · `test_auto_run_off_by_default_never_calls_run_eval`; `watch.py` · `run_watch_loop` `if auto_run:` | The sentinel raises `AssertionError`; `_run_auto_run` catches `Exception`, logs `FAILED TO RUN`, and the loop continues. The test has no other assertion. **M9/M19** (`if auto_run:` → `if True:`) survive that test, the whole of `test_watch.py`, and **626 tests across `tests/orchestration` + `tests/ui`** — the one line keeping a `--auto-run`-less watcher from spending IDP quota is pinned by nothing. (The CLI's argparse default is pinned only incidentally: M20 is killed by the `--max-runs-per-tick has no effect` test, not by a spend test.) | Sentinel records calls and the test asserts `calls == []` (or raise a `BaseException` subclass the catch-all cannot swallow), and assert `"spends real IDP quota" not in out`. |
-| **F-3** | **High** — vacuous-test **class** (F-4 of `a5805ec` recurring) | `tests/orchestration/test_cli.py` · `_fail_if_called` (20 uses) and every test whose only assertion is `exit_code == 1` | `_fail_if_called` raises `AssertionError`; `cli.main()`'s catch-all (`except (Exception, asyncio.CancelledError)`) converts it to `return 1` — the exact value the tests assert. Survivors over all of `tests/orchestration`: **M22** `_is_valid_version` guard deleted (`test_malformed_version_exits_nonzero_without_calling_run_eval` green), **M23** blank `--dataset` guard deleted (`test_blank_dataset_flag_value_is_rejected_including_whitespace_only` green), **M13** `<= 0` → `< 0` on `--max-documents-per-run` (`"0"` leg of `test_max_documents_per_run_zero_or_negative_is_a_usage_error` green; `facade.py` has no independent `<= 0` guard). M21/M24 (`--action`, `--org`) are killed only because a sibling test asserts the log message. These are ADR-0004 A8/A10 fail-closed guards. | Same as F-2: a recording double + `assert calls == []`, and assert the specific `logger.error` line for every guard, so a guard's deletion is caught on its own message, not on a coincidental `1`. |
-| **F-4** | Medium — test gap | `watch.py` · summary arm `if healthy_ticks > 0:` | **M15** (`healthy_ticks > 0` → `True`) survives `test_watch.py`: no test covers Ctrl-C after only failed ticks below the ceiling (would print `no new versions found (2 of 2 tick(s) got no answer)` instead of `no answer -- …`). The F-1 family's exact boundary is unpinned. | One test: `RaisesForeverProbe`, `max_consecutive_tick_failures=5`, `_stop_after(2)`; assert `"no answer --"` and `"no new versions found" not in out`. |
-| **F-5** | Low — vacuous test | `tests/orchestration/test_watch.py` · `test_watch_main_a_load_dotenv_failure_is_a_controlled_exit_not_a_traceback` | **M18** (`load_dotenv()` call deleted) survives: `main()` returns 1 anyway on the missing `IDP_CLIENT_ID`. Under the mutant with credentials in the shell env this test would construct a real `MuleSoftVersionProbe` and tick against the network. | Assert the specific line `watch: unexpected error loading .env` in `caplog`. |
-| **F-6** | Low — process (P7) | `148c6dd` (test) landed two minutes **after** `f4eb64b` (fix) | Test-after-fix; the commit message reports a post-hoc mutant, which this gate re-ran (M1/M2 below), so the pin is real — the ordering rule was still broken. | Record; no code change. |
+| **F-1** | **High** — fail-open #7 | `src/idp_regression/orchestration/watch.py` · `run_watch_loop` (`if result.outcome == OUTCOME_INDETERMINATE:` and the `interrupted` summary arm); `check_versions.py` · `check_once` outcome priority (`elif walk.ceiling_reached or sweep_truncated` before `elif all_unknowns`) and the `else: consecutive_indeterminate_ticks = 0` reset | Real Protocol probe, real `check_once` (scratchpad `repro7.py`, not committed): controls clean, every other candidate `UNKNOWN`. **Repro D — CLI defaults** (`--max-probes-per-tick 20`) with `--patch-lookahead 5 --minor-lookahead 5 --major-lookahead 2`: tick 1 is `indeterminate`; from tick 2 the pending-unknown re-probe plus the grid exceed the budget, so every tick is `ceiling_reached` — the per-tick line reads `probe budget reached (continuing next tick) ok`, `consecutive_indeterminate_ticks` is reset to 0 each tick so `detector_degraded` never fires, and `indeterminate_ticks` never increments. 40 ticks, Ctrl-C: **`Stopped after 40 tick(s). no new versions found (1 of 40 tick(s) got no answer).` EXIT 0.** Repro A (`--max-probes-per-tick 3`, default lookahead) is worse: **`no new versions found.` unqualified**, EXIT 0. Even without unknowns, 40 `ceiling_reached` ticks (the walk truncated every time — "unknown beyond here") read as an unqualified "no new versions found". **MA12** (count `ceiling_reached` as unanswered) **survives 423 tests** — the bucket is pinned in neither direction. | Do what stamp #4 item 1 said: enumerate `_OUTCOME_PHRASES`' keys into three sets — verdict (`no_new_versions`, `new_version_detected`), no-verdict (`indeterminate`, `ceiling_reached`), halt (`_HALT_OUTCOMES`) — assert at import (or in a test) that the union equals the vocabulary, and derive the summary's `unanswered_ticks` from the no-verdict set. In `check_once`, a `ceiling_reached` tick with `all_unknowns` must not reset `consecutive_indeterminate_ticks` (count it, or escalate on a cumulative ceiling). Pin with a real-probe test like Repro D, not a `check_once` monkeypatch. |
+| **F-2** | **Medium** — same invariant, the boundary | `watch.py` · `run_watch_loop`, `if healthy_ticks > 0:` in the `interrupted` arm | **Repro C**: `--max-indeterminate-ticks 1000` (a legal flag), every tick `indeterminate`, Ctrl-C after 40: **`no new versions found (40 of 40 tick(s) got no answer).` EXIT 0** — the headline claims a verdict that zero ticks produced and its own parenthesis says so. `healthy_ticks` counts *completed* ticks; the branch should be on *answered* ticks. This is the exception-axis twin of what F-4 (#4) pinned (`RaisesForeverProbe` below the ceiling → `no answer --`). | `answered_ticks = healthy_ticks - <no-verdict count>`; branch on `answered_ticks > 0`, else the `no answer -- …` phrase, and state the no-verdict count there too. One test with `max_indeterminate_ticks` high and a real UNKNOWN-everywhere probe. |
+| **F-3** | **High** — vacuous-sentinel class, two more members | `tests/orchestration/test_cli.py` · `test_version_one_char_past_the_64_char_cap_is_rejected` (bare `assert exit_code != 0`) · `test_missing_version_exits_nonzero_without_calling_run_eval` (bare `!= 0`) | **MB4** `_VERSION_PATTERN` `{1,64}`→`{1,65}` **survives**: `"a"*65` passes the guard, `run_eval` (the `_fail_if_called` sentinel) raises `AssertionError`, `main()`'s catch-all logs `run_eval: unexpected error: AssertionError` and returns 1 — confirmed by running the mutant directly. The C2 cap boundary is pinned on the accept side (`test_version_at_the_64_char_cap_is_accepted`) and not on the reject side. **MB5** `--version` `required=True`→`required=False` **survives**: the test's argv also omits `--dataset`, so argparse still exits 2 on *that* flag. The `--action` sibling's docstring explains precisely why exact-code-2 with a complete argv is the mutation-sensitive form; `--version` never got the same treatment. (Both mutants sit on lines the delta did not touch — R1.) | MB4: assert `"run_eval: --version has an invalid format" in caplog.text`. MB5: supply every other required flag and assert `exit_code == 2`. Then sweep: every `_fail_if_called` use whose only assertion is a bare exit code is suspect until a deleted-guard mutant is run against it (stamp #4 carry-forward item 2 — this is the sweep it asked for, still not done). |
+| F-4 | Low — cosmetic undercount | `watch.py` · `tick_failures_exceeded` arm: `f"no answer -- {failed_ticks} tick(s) never got an answer …"`; the `detected_versions` arm | Neither arm reports indeterminate/ceiling ticks: a run that was ambiguous on 30 ticks, then hit the failure ceiling, says `no answer -- 4 tick(s) never got an answer` (exit 1 — not fail-open, the verdict is right); a run that detected one version and was blind on 30 of 40 ticks says `detected 1 new version(s)` with no qualifier. | Emit the no-verdict count on every arm from the same tally. |
 
-**Not findings, checked:** `_run_auto_run`'s `if not match: continue` (a command without `--version` is silently uncounted — `check_once` always emits one; equivalent today). `Stopped after N tick(s)` overcounts by one if Ctrl-C lands inside `check_once` (cosmetic). `_human_tick_line` prints `controls ok` on `detector_degraded` (cosmetic). `save_state_atomic` raising inside the loop escapes `run_watch_loop` to `_run`'s catch-all → exit 1, no summary line — loud, not silent.
+**Answered, per the brief:**
+- **Seventh fail-open? YES** — F-1 (`ceiling_reached`), reproduced with CLI defaults through the real `check_once`.
+- **Is `indeterminate_ticks` cumulative? Yes, genuinely** — MA3 (re-adding a reset on a resolved tick) is killed; it is a loop-local counter, never persisted, never reset. The consecutive-only mistake now lives one layer down instead: `check_once` resets `consecutive_indeterminate_ticks` on a `ceiling_reached` tick that still carries unknowns (F-1).
+- **Do the `refused` / `tick_failures_exceeded` / `halted` arms account for indeterminate ticks?** They never claim "no new versions found" (MA10/MA11 killed, MA7 killed) and all exit 1, so none is fail-open; their counts omit no-verdict ticks (F-4, Low).
+- **Fourth vacuous survivor? YES — two** (MB4, MB5; F-3). `test_malformed_action_id_exits_nonzero_without_calling_run_eval` is also bare, but MB6 (UUID guard deleted) is killed by a sibling's message assertion, so it is redundant rather than vacuous.
+- **Does the F-2 spy fix mask a `max_runs_per_tick` bug?** No. MC1 (`if auto_run:`→`if True:`) is killed by the named test alone; MC5 (the `>=` cap deleted) and MC4 (`>=`→`>`) are killed by the bounded test; MC2 (`auto_run or max_runs_per_tick`) is killed. Each gate is pinned independently.
 
-## Mutation matrix (R1: source named per mutant; restore by `cp` from scratchpad, `shasum -c` OK after every run; `PYTHONDONTWRITEBYTECODE=1`; no stray `__pycache__`)
+## Mutation matrix (R1: origin named per mutant; apply by exact-string replace, restore by `cp` from scratchpad, `shasum -c` OK after every run; `PYTHONDONTWRITEBYTECODE=1`; `-x`)
 
-| # | File · mutant | Invariant / origin | Target | Result |
-|---|---|---|---|---|
-| M1 | `facade.py` quota guard `if submits_made > max …` → `if False` | A10 "ceiling check always fires" (diff line) | test_facade | KILLED |
-| M2a | guard → `assert submits_made <= …` (normal interpreter) | assert-vs-raise class | test_facade | KILLED — on the **exception-type** axis (`"RuntimeError" in caplog`), not the `-O` axis |
-| M2b | same, under `python -O` | assert-vs-raise class | test_facade | KILLED |
-| **M2c** | guard → `if __debug__ and …` (what `assert` compiles to, RuntimeError kept), normal interpreter | isolates the `-O` axis | pin test | **SURVIVED — equivalent by construction** |
-| **M2c-O** | same under `python -O` | isolates the `-O` axis | pin test | **KILLED** (exit 0 instead of 1) — the `-O` class is pinned |
-| M3 | `watch.py` delete `consecutive_tick_failures = 0` | F-6 "consecutive" | test_watch | KILLED |
-| M4 | `failed_ticks += 1` → `pass` | "a failing tick is never dropped" | test_watch | KILLED |
-| M5 | ceiling `>` → `>=` | ceiling semantics | test_watch | KILLED |
-| M6 | `end_reason = "halted"` → `"interrupted"` | "a halt never reads as no-new-versions" | test_watch | KILLED |
-| M7 | summary qualifier `if failed_ticks > 0` → `if False` | F-5 | test_watch | KILLED |
-| M8 | `main()` outer `except Exception` → `except KeyboardInterrupt` | F-2 "no raw exception escapes main()" | test_watch | KILLED |
-| **M9 / M19 / M9all** | `if auto_run:` → `if True:` | "no quota spend without --auto-run" (unchanged line) | test_watch / named test / **626 tests** | **SURVIVED ×3** → F-2 |
-| M10 | `healthy_ticks += 1` deleted | "every tick accounted for" (unchanged line) | test_watch | KILLED |
-| M11 | `_run_auto_run` `>=` → `>` | A′.5 per-tick cap (unchanged line) | test_watch | KILLED |
-| M12 | `save_state_atomic(...)` → `pass` | "a detection is never re-run" (unchanged line) | test_watch | KILLED |
-| **M13 / M13all** | `cli.py` `<= 0` → `< 0` | A10 usage error | test_cli / tests/orchestration | **SURVIVED ×2** → F-3 |
-| M14 | argparse error path drops `sanitize_for_log` | INV-02 / N5 | test_cli | KILLED |
-| **M15** | summary `if healthy_ticks > 0` → `if True` | F-1 boundary (unchanged line) | test_watch | **SURVIVED** → F-4 |
-| M16 | `_run_auto_run` `except Exception` → `except KeyboardInterrupt` | "a failed run never kills the watcher" | test_watch | KILLED |
-| M17 | `check_versions.py` `if consecutive_indeterminate_ticks > max` → `if False` | detector_degraded escalation (unchanged file) | test_check_versions | KILLED |
-| **M18** | `_run` `load_dotenv()` → `pass` | INV-05 | named test | **SURVIVED** → F-5 |
-| M20 | argparse `--auto-run` `default=False` → `True` | CLI default (unchanged line) | tests/orchestration | KILLED (incidentally, via the `--max-runs-per-tick` consistency test) |
-| M21 | `cli.py` `--action` UUID guard → `if False` | A8 | tests/orchestration | KILLED (by the log-message test only) |
-| **M22** | `--version` format guard → `if False` | A8 | tests/orchestration | **SURVIVED** → F-3 |
-| **M23** | blank `--dataset` guard → `if False` | A8 | tests/orchestration | **SURVIVED** → F-3 |
-| M24 | blank `--org` guard → `if False` | A9 | tests/orchestration | KILLED (by the log-message test only) |
+| # | File · mutant | Invariant / origin | Diff line? | Target | Result |
+|---|---|---|---|---|---|
+| MA1 | `watch.py` `indeterminate_ticks += 1` → `pass` | A: every no-verdict tick is accounted for | yes | test_watch | KILLED |
+| MA2 | `unanswered_ticks = failed_ticks + indeterminate_ticks` → `failed_ticks` | A | yes | test_watch | KILLED |
+| MA3 | add `else: indeterminate_ticks = 0` (the consecutive-only mistake, re-made at the loop layer) | A — "genuinely cumulative?" | yes | test_watch | KILLED |
+| MA4 | count `OUTCOME_CEILING_REACHED` *instead of* `OUTCOME_INDETERMINATE` | A | yes | test_watch | KILLED |
+| MA5 | `if unanswered_ticks > 0` → `> 1000` | A | yes | test_watch | KILLED |
+| MA6 | `if healthy_ticks > 0` → `if True` | A — F-4 (#4) boundary | no | test_watch | KILLED |
+| MA7 | `halted` arm `exit_code = 1` → `0` | "a halt never exits 0" | no | test_watch | KILLED |
+| MA8 | `if detected_versions:` → `if False:` | "a detection always leads" | no | test_watch | KILLED |
+| MA9 | `check_versions.py` delete `consecutive_indeterminate_ticks = 0` reset | consecutive semantics of the escalation | no (other file) | test_check_versions | KILLED |
+| MA10 | `tick_failures_exceeded` arm phrase → "no new versions found (…)" | "that phrase lives in one arm" | no | test_watch | KILLED |
+| MA11 | `refused` arm phrase → "no new versions found (…)" | same | no | test_watch | KILLED |
+| **MA12** | count `OUTCOME_CEILING_REACHED` *as well as* `OUTCOME_INDETERMINATE` | A — the outcome vocabulary, D7 | no | tests/orchestration (423) | **SURVIVED → F-1** |
+| MB1 | `cli.py` `--version` format guard → `if False` | B: a guard is pinned by its own log line (A8) | no | tests/orchestration | KILLED (M22 of #4 closed) |
+| MB2 | blank `--dataset` guard body → `pass` | B (A8) | no | tests/orchestration | KILLED (M23 closed) |
+| MB3 | `<= 0` → `< 0` on `--max-documents-per-run` | B (A10) | no | tests/orchestration | KILLED (M13 closed) |
+| **MB4** | `_VERSION_PATTERN` `{1,64}` → `{1,65}` | B (C2 cap) | no | tests/orchestration | **SURVIVED → F-3** |
+| **MB5** | `--version` `required=True` → `required=False` | B (A8, argparse) | no | tests/orchestration | **SURVIVED → F-3** |
+| MB6 | `--action` UUID guard → `if False` | B (A8) | no | tests/orchestration | KILLED |
+| MB7 | `watch.py` `_run` `load_dotenv()` → `pass` | B (INV-05) | no | test_watch | KILLED (M18 closed) |
+| MC1 | `if auto_run:` → `if True:` | C: the off switch gates the call | no | test_watch | KILLED (M9/M19 of #4 closed) |
+| MC2 | `if auto_run:` → `if auto_run or max_runs_per_tick:` | C | no | test_watch | KILLED |
+| MC3 | argparse `--auto-run` `default=False` → `True` | C (CLI default) | no | tests/orchestration | KILLED |
+| MC4 | `_run_auto_run` `>=` → `>` | A′.5 per-tick cap | no | test_watch | KILLED |
+| MC5 | `_run_auto_run` cap check → `if False` | A′.5 — "does the spy mask the default-0 gate?" | no | test_watch | KILLED |
+| S101 | `facade.py:846` guard → `assert` | assert-vs-raise class | no | ruff | **S101 reported** (gate holds) |
 
-**Equivalent mutants:** M2c only (deliberately). 27 runs, 18 killed, 8 surviving non-equivalent, 1 equivalent. Ten mutants sit on lines the `f3b0b65..HEAD` diff did not change (R1).
+**Equivalent mutants: none.** 24 mutants + the S101 probe; 21 killed, 3 surviving non-equivalent. 20 of 24 sit on lines `1e931fe` did not change (R1). Reproductions A/C/D are not mutants: they run HEAD unmodified through a real Protocol probe.
 
-## The four standing gaps and the assert-vs-raise check — re-checked at `8a01c62`
+## Standing gaps — re-checked at `1e931fe`
 
-1. **`--auto-run` POC override of four unmet ADR-0006 §A′.5 preconditions** — **still true** (`watch.py` module docstring and `--auto-run` help text say so; no ledger, no claim/resolve, no alerting sink in the tree). Now compounded by F-2: the off-switch is unpinned.
-2. **No backoff** — **still true**: 0 occurrences of `backoff` in `watch.py`; sleep is a flat `interval_seconds` on every path including the failing one.
-3. **No heartbeat** — **still true**: 0 occurrences; a quiet tick and a dead process print nothing distinguishable after the last line.
-4. **Nothing run under a loaded `launchd` schedule** — **still true**: no `com.idp-regression.*` plist in `~/Library/LaunchAgents`; `logs/scheduled-runs/` holds two 2026-09-23 wrapper logs and one `FAILED` marker, which do not establish a loaded schedule, and the wrapper is the `run_eval` path, not the watcher.
-5. **`test_watch.py::_base_kwargs` hard-codes `sweep_every_n_ticks=0`** — **still true** (line 103, the only occurrence in the file): the sweep never runs through `run_watch_loop` in any watcher test.
-6. **assert-vs-raise (A10 quota bug detector)** — **closed and pinned**: `facade.py:846` is `if submits_made > max_documents_per_run: raise RuntimeError(...)`; no `assert` statement remains under `src/idp_regression/orchestration/`; ruff `select` includes `"S"` with `S101` ignored only under `tests/**`; reintroducing the `assert` at that line makes `ruff check` report **`S101 … facade.py:846:13`** (demonstrated, then restored); M2c/M2c-O show the pin test fails under `python -O` and only there.
+1–5 from stamp #4 (`--auto-run` POC override of §A′.5 preconditions; no backoff; no heartbeat; nothing under a loaded `launchd` schedule; `_base_kwargs` hard-codes `sweep_every_n_ticks=0`) — **all still true**, unchanged by this delta. The sweep gap now matters more: `sweep_truncated` is the second producer of `ceiling_reached` (F-1) and no watcher-loop test ever runs a sweep.
+6. assert-vs-raise — **closed and pinned** (S101 row above; `-O` run green).
+7. Scope note from #4 (`scorer_store.py`, `version_discovery.py`, `run_artifact.py`, the `facade.py` `--document`/`--classifier` additions **not mutated** by that gate) — **still not mutated by this gate**, which concentrated on the fail-open family per the brief. A PASS must cover them or say so.
 
-## Freshness (P5, DEBT-72/77) — explicit file list pinned to `8a01c62`
+## Freshness (P5, DEBT-72/77) — explicit file list pinned to `1e931fe`
 
-`git ls-files src/idp_regression/orchestration` equals the on-disk `*.py` listing (no untracked, no missing); no renames `cfd2bd7..HEAD` under `src/` or `tests/` (`git diff -M --diff-filter=R` empty). Added since the last PASSED pin `cfd2bd7`: `check_versions.py`, `run_artifact.py`, `scorer_store.py`, `version_discovery.py`, `watch.py` (+ tests `test_check_versions.py`, `test_cli_custom_scorers.py`, `test_document_filter.py`, `test_logging_config.py`, `test_run_artifact.py`, `test_scorer_store.py`, `test_version_discovery.py`, `test_watch.py`).
+`git ls-files src/idp_regression/orchestration` (14 files) equals the on-disk `*.py` listing (14); `git status --short src tests` empty (no untracked, no missing); `git diff --diff-filter=A 8a01c62..HEAD -- src tests` empty (no files added since the last stamp). Blob ids are HEAD's.
 
-| File (HEAD blob) | `f3b0b65..HEAD` |
+| File (HEAD blob) | `8a01c62..HEAD` |
 |---|---|
 | `__init__.py` (e69de29b) | unchanged |
 | `bootstrap.py` (1e13515d) | unchanged |
-| `check_versions.py` (cbb27bcc) | +80 −20 |
-| `cli.py` (163e2416) | +116 −5 |
-| `dotenv_support.py` (902d1144) | +16 −2 |
-| `errors.py` (c9bcbfc6) | +5 −5 |
-| `facade.py` (c4cab023) | +290 −47 |
-| `log_sanitize.py` (50b57623) | +56 −2 |
-| `prerun.py` (b741fba0) | +14 −6 |
-| `run_artifact.py` (418e3d42) | +106 −7 |
+| `check_versions.py` (cbb27bcc) | unchanged |
+| `cli.py` (163e2416) | unchanged |
+| `dotenv_support.py` (902d1144) | unchanged |
+| `errors.py` (c9bcbfc6) | unchanged |
+| `facade.py` (c4cab023) | unchanged |
+| `log_sanitize.py` (50b57623) | unchanged |
+| `prerun.py` (b741fba0) | unchanged |
+| `run_artifact.py` (418e3d42) | unchanged |
 | `run_naming.py` (dc2be96b) | unchanged |
-| `scorer_store.py` (38d15122) | new, +117 |
-| `version_discovery.py` (de048193) | new, +148 |
-| `watch.py` (55c63fe3) | +165 −25 |
+| `scorer_store.py` (38d15122) | unchanged |
+| `version_discovery.py` (de048193) | unchanged |
+| `watch.py` (470ea421) | +20 −2 |
 
-Scope note: the mutation matrix concentrates on `watch.py`, `cli.py`, `facade.py` (quota guard) and `check_versions.py` — the fail-open family and the `-O` class the brief names. `scorer_store.py`, `version_discovery.py`, `run_artifact.py` and the `facade.py` `--document`/`--classifier` additions were type-checked and suite-covered but **not mutated by this gate**; a PASS at the next re-stamp must say so or cover them.
+Tests changed in the delta: `tests/orchestration/test_cli.py` (+116 −5), `tests/orchestration/test_watch.py` (+137 −25). Also `docs/state/DEBT.md` (+1, DEBT-128).
 
-## What a re-stamp must still check (carried forward, amended)
+## What re-stamp #6 must check
 
-1. **A seventh fail-open.** F-1 here is the third time the summary invariant was closed by case rather than by invariant. The fix should enumerate the outcome vocabulary (`_OUTCOME_PHRASES` keys) and state for each whether it is a verdict, a no-verdict, or a halt — then the summary derives from that table, and a new outcome cannot land in the wrong bucket silently.
-2. **The sentinel class (F-2/F-3).** Every `*_never_calls_run_eval`-shaped test in this tree must be re-run against a deleted guard before it counts.
-3. Gaps 1–5 above, unchanged.
-4. The unmutated modules named under Scope note.
+1. **The outcome table, not the next outcome.** The fix for F-1 must be a classification of the whole vocabulary (`_OUTCOME_PHRASES` keys ∪ `_HALT_OUTCOMES`) with a test that a new outcome cannot be added without landing in a bucket — otherwise the eighth is `skipped_locked` or whatever comes next. MA12 must be killed *and* a `ceiling_reached`-only run must be pinned on the summary's headline.
+2. **F-2's boundary** with a real probe and a raised `--max-indeterminate-ticks`.
+3. **The sentinel sweep**: run a deleted-guard mutant against every `_fail_if_called` test in `test_cli.py` whose only assertion is an exit code, and record the result per test. MB4 and MB5 must be killed.
+4. A watcher-loop test that actually runs a sweep (gap 5) — the `sweep_truncated` producer of F-1 is otherwise untestable at the loop level.
+5. Gaps 1–4, and the unmutated modules under 7.
 
 ## History
 
@@ -103,10 +103,11 @@ Scope note: the mutation matrix concentrates on `watch.py`, `cli.py`, `facade.py
 | `cfd2bd7` (2026-09-22) | ✅ PASSED | superseded; stale within a day (DEBT-72: `orchestration/` moved ~7 files, +1626/−78, two new modules) |
 | `a5805ec` | ❌ FAILED | **F-1** fail-open #4 (a watcher whose every tick failed reported "no new versions found", exit 0, unbounded) · **F-2** INV-02 raw traceback carrying filesystem paths · **F-4** a vacuous test (mutating its double `return 1`→`return 0` left the file 23/23 green) · F-3 recorded |
 | `f3b0b65` | ❌ FAILED | F-3, F-4 **closed and verified**. **F-2 NOT closed** — a third state-file I/O site the fix never enumerated, reproduced live. **F-1 partially closed** — its own fix introduced **F-5** (fail-open #5: mixed failing/healthy ticks defeat both the ceiling and the honest summary), **F-6** (a surviving mutant: deleting the consecutive-failure reset left the whole orchestration suite green — "consecutive" was pinned by nothing), **F-7** (a tick-1 halt also printed "no new versions found") |
-| `8a01c62` (2026-09-28, this stamp) | ❌ **FAILED** | F-2/F-5/F-6/F-7 of `f3b0b65` **closed and mutant-verified** (M3–M8). **F-1** fail-open #6 (interleaved `indeterminate` ticks read as healthy; 30-of-40 ambiguous → "no new versions found.", exit 0) · **F-2** `if auto_run:` quota guard unpinned by 626 tests; the test named for it is vacuous · **F-3** the `AssertionError`-sentinel class in `test_cli.py` — three A8/A10 guards deletable green · F-4 summary boundary unpinned · F-5 vacuous dotenv test · F-6 P7 ordering |
+| `8a01c62` (2026-09-28, re-stamp #4, stamp committed as `79315d5`) | ❌ FAILED | F-2/F-5/F-6/F-7 of `f3b0b65` **closed and mutant-verified** (M3–M8). **F-1** fail-open #6 (interleaved `indeterminate` ticks read as healthy; 30-of-40 ambiguous → "no new versions found.", exit 0) · **F-2** `if auto_run:` quota guard unpinned by 626 tests; the test named for it is vacuous · **F-3** the `AssertionError`-sentinel class in `test_cli.py` — three A8/A10 guards deletable green · F-4 summary boundary unpinned · F-5 vacuous dotenv test · F-6 P7 ordering |
+| `1e931fe` (2026-09-28, this stamp, re-stamp #5) | ❌ **FAILED** | F-1..F-5 of `8a01c62` **closed and mutant-verified** (MA1–MA6, MB1–MB3, MB7, MC1–MC5); F-6 filed as DEBT-128. **F-1** fail-open #7 (`ceiling_reached` is a no-verdict outcome that outranks and resets `indeterminate`; CLI defaults + legal lookahead → "no new versions found (1 of 40 …)", exit 0; MA12 survives) · **F-2** `healthy_ticks > 0` branches on completed, not answered, ticks (40/40 indeterminate → headline "no new versions found", exit 0) · **F-3** two more vacuous-sentinel tests (MB4 64-cap, MB5 `--version required`) · F-4 counts omitted on the non-fail-open arms |
 
 > ⚠️ Record correction (2026-09-24), preserved: this file read `✅ PASSED` (from `cfd2bd7`, 2026-09-22) while the gate had failed twice — at `a5805ec` and `f3b0b65`. The register said PASSED for roughly a day while the gate said FAILED (DEBT-54's own defect class). Recorded rather than quietly overwritten.
 
-**DEBT-44:** the next re-stamp must be run by an instance that issued no APPROVE on this delta and is not this instance.
+**DEBT-44 / P6:** commit this FAILED stamp before the fix. Re-stamp #6 must be run by an instance that issued no APPROVE on the fix and is not this instance, on a model other than the implementer's.
 
 — Atchim [ATCHIM!!] …excuse me.
