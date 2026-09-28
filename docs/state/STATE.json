@@ -1,13 +1,13 @@
 {
   "schema": 1,
-  "generated": "2026-09-28T22:10:01+00:00",
+  "generated": "2026-09-28T22:29:35+00:00",
   "note": "Derived from on-disk artifacts. Local verification status, not the board column (which stays canonical). Never hand-edit — regenerated on Stop.",
   "summary": {
     "total": 9,
-    "done_eligible": 2,
+    "done_eligible": 3,
     "in_qa": 2,
     "in_progress": 2,
-    "planned": 3
+    "planned": 2
   },
   "registers": {
     "assumptions_high_open": 0,
@@ -154,8 +154,8 @@
     {
       "id": "S-2.3",
       "uc": 2,
-      "status": "planned",
-      "stamp": "none",
+      "status": "done-eligible",
+      "stamp": "passed",
       "qa_report": true,
       "markers": {
         "containment": "required",
@@ -169,5 +169,5 @@
       }
     }
   ],
-  "next": "7 story(ies) not done-eligible; next: /qa on S-1.2 (in-qa)."
+  "next": "6 story(ies) not done-eligible; next: /qa on S-1.2 (in-qa)."
 }
