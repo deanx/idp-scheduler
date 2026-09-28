@@ -177,6 +177,44 @@ class _DropClassFilter(logging.Filter):
         )
 
 
+class _ObservingFilter(logging.Filter):
+    """Sees a drop-class record on the logger that EMITS it, before that
+    logger's own filters can suppress it. Never suppresses anything itself.
+
+    Wave B gate F-1: the SDK attaches a `DuplicateFilter` to
+    `opentelemetry.sdk._shared_internal`, which drops a repeat of the same
+    message in the same 20-second bucket BEFORE the record propagates to a
+    parent handler. So a second `record_experiment` in one process (the
+    watcher's `--auto-run` with more than one run per tick) never saw its
+    own "Queue full, dropping Span." and reported GREEN -- fail-open. A
+    filter placed FIRST on that logger runs before the de-duplication."""
+
+    def __init__(self, watcher: _FailureWatcher) -> None:
+        super().__init__()
+        self._watcher = watcher
+        self._drop_class = _DropClassFilter()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING and self._drop_class.filter(record):
+            self._watcher.failed = True
+        return True
+
+
+def _loggers_with_their_own_filters(root: str) -> list[logging.Logger]:
+    """Every EXISTING logger at or under `root` that carries filters (today:
+    the SDK's `DuplicateFilter`s). A filter on an originating logger runs
+    before propagation, so these are the ones a parent handler can miss."""
+    manager = logging.Logger.manager
+    found = [
+        logger
+        for name, logger in list(manager.loggerDict.items())
+        if isinstance(logger, logging.Logger)
+        and (name == root or name.startswith(root + "."))
+        and logger.filters
+    ]
+    return found
+
+
 def record_experiment(
     tracing_client: ExperimentRunner,
     *,
@@ -214,6 +252,10 @@ def record_experiment(
         otlp_logger.addHandler(otlp_watcher)
         langfuse_logger.addHandler(langfuse_watcher)
         otel_export_logger.addHandler(otel_export_watcher)
+        observer = _ObservingFilter(otel_export_watcher)
+        observed_loggers = _loggers_with_their_own_filters(OTEL_SDK_EXPORT_LOGGER_NAME)
+        for logger in observed_loggers:
+            logger.filters.insert(0, observer)
         # `to_raise` is set INSIDE an except block but raised OUTSIDE it
         # (below, after the `finally`) -- deliberately, to close the
         # `__context__` leak (Atchim suggestion, 2026-09-21): raising a NEW
@@ -272,6 +314,8 @@ def record_experiment(
             otlp_logger.removeHandler(otlp_watcher)
             langfuse_logger.removeHandler(langfuse_watcher)
             otel_export_logger.removeHandler(otel_export_watcher)
+            for logger in observed_loggers:
+                logger.removeFilter(observer)
 
     if to_raise is not None:
         raise to_raise

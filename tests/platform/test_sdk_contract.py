@@ -63,3 +63,17 @@ def test_the_sdk_still_links_items_to_a_dataset_run_by_duck_typing() -> None:
     assert 'hasattr(item, "id")' in source
     names = {f.name for f in fields(ExperimentItem)}
     assert {"id", "dataset_id", "input", "expected_output", "metadata"} <= names
+
+
+def test_the_otel_sdk_still_deduplicates_on_its_own_batch_logger() -> None:
+    """Why `tracing._ObservingFilter` exists: the SDK's batch-processor logger
+    carries a `DuplicateFilter` that drops a repeated message in a 20 s bucket
+    before propagation. If a bump removes it the observer is merely redundant;
+    if a bump moves it to a logger the observer does not reach, the two-run
+    test in test_tracing.py goes red."""
+    import logging
+
+    import opentelemetry.sdk._shared_internal as shared
+
+    names = {type(f).__name__ for f in logging.getLogger(shared.__name__).filters}
+    assert "DuplicateFilter" in names

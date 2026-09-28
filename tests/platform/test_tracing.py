@@ -694,3 +694,86 @@ def test_a_logs_or_metrics_pipeline_record_does_not_abort_a_healthy_run(
             return super().run_experiment(**kwargs)
 
     assert record_experiment(_OtherPipelineNoise(items), run_name="r", items=items, task=_task)
+
+
+# --- Wave B gate F-1 / F-2 ---------------------------------------------------
+
+import time  # noqa: E402
+
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor  # noqa: E402
+
+
+def _drop_a_span_in(items: list[Any]) -> tuple[Any, Any, Any]:
+    exporter = _BlockingExporter()
+    processor = BatchSpanProcessor(
+        exporter, max_queue_size=1, max_export_batch_size=1, schedule_delay_millis=60_000
+    )
+    tracer = _tracer_with(processor)
+
+    class _DropsSpans(_OkTracingClient):
+        def run_experiment(self, **kwargs: object) -> _FakeResult:
+            tracer.start_span("first").end()
+            exporter.exporting.wait(timeout=10)
+            for name in ("second", "third"):
+                tracer.start_span(name).end()
+            return super().run_experiment(**kwargs)
+
+    return _DropsSpans(items), exporter, processor
+
+
+def test_a_second_run_in_the_same_process_still_sees_its_own_span_drop() -> None:
+    """F-1: the SDK's `DuplicateFilter` suppresses the SAME drop message
+    within a 20-second bucket before it propagates, so the second of two
+    runs in one process (watch --auto-run) used to read GREEN."""
+    for _ in range(2):
+        items = _items(1)
+        client, exporter, processor = _drop_a_span_in(items)
+        try:
+            with pytest.raises(FlushFailedError):
+                record_experiment(client, run_name="r", items=items, task=_task)
+        finally:
+            exporter.release.set()
+            _shutdown(processor)
+
+
+def test_a_simple_span_processor_export_exception_fails_the_record_phase() -> None:
+    """F-2: `SimpleSpanProcessor` logs "Exception while exporting Span." on
+    `opentelemetry.sdk.trace.export`, a different logger from the batch
+    processor's; the parent watcher must catch both."""
+    items = _items(1)
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(_RaisingExporter()))
+    tracer = provider.get_tracer("debt27a")
+
+    class _SimpleExportRaises(_OkTracingClient):
+        def run_experiment(self, **kwargs: object) -> _FakeResult:
+            tracer.start_span("s").end()
+            return super().run_experiment(**kwargs)
+
+    with pytest.raises(FlushFailedError):
+        record_experiment(_SimpleExportRaises(items), run_name="r", items=items, task=_task)
+
+
+def test_the_observer_leaves_no_filter_behind_and_suppresses_nothing() -> None:
+    shared = logging.getLogger("opentelemetry.sdk._shared_internal")
+    before = list(shared.filters)
+    record_experiment(_OkTracingClient(_items(1)), run_name="r", items=_items(1), task=_task)
+    assert shared.filters == before
+
+
+def test_the_observer_never_hides_the_sdks_own_log_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The operator must still see the SDK's message; observing it may not
+    consume it. A unique message, so the SDK's own DuplicateFilter passes it."""
+    items = _items(1)
+    marker = f"Shutdown called, ignoring Span. [{time.time_ns()}]"
+
+    class _LogsOnTheSharedLogger(_OkTracingClient):
+        def run_experiment(self, **kwargs: object) -> _FakeResult:
+            logging.getLogger("opentelemetry.sdk._shared_internal").warning(marker)
+            return super().run_experiment(**kwargs)
+
+    with caplog.at_level(logging.WARNING):
+        record_experiment(_LogsOnTheSharedLogger(items), run_name="r", items=items, task=_task)
+    assert any(marker in r.getMessage() for r in caplog.records)
