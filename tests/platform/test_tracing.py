@@ -666,3 +666,31 @@ def test_a_healthy_real_sdk_export_does_not_fail_the_record_phase() -> None:
         assert record_experiment(_Healthy(items), run_name="r", items=items, task=_task)
     finally:
         _shutdown(processor)
+
+
+@pytest.mark.parametrize(
+    ("logger_name", "message"),
+    [
+        # The installed SDK's own wordings for its LOGS and METRICS pipelines,
+        # which share the batch processor and are reached by watching the
+        # whole `opentelemetry.sdk` tree.
+        ("opentelemetry.sdk._shared_internal", "Queue full, dropping Log."),
+        ("opentelemetry.sdk._logs._internal.export", "Exception while exporting logs."),
+        ("opentelemetry.sdk.metrics._internal.export", "Exception while exporting metrics"),
+        ("opentelemetry.sdk._logs._internal.export", "Dropping log and exiting the loop."),
+    ],
+)
+def test_a_logs_or_metrics_pipeline_record_does_not_abort_a_healthy_run(
+    logger_name: str, message: str
+) -> None:
+    """Wave B review: dormant today (langfuse configures only tracing), but a
+    dependency that enables either pipeline must not turn its routine
+    records into false FAILs."""
+    items = _items(1)
+
+    class _OtherPipelineNoise(_OkTracingClient):
+        def run_experiment(self, **kwargs: object) -> _FakeResult:
+            logging.getLogger(logger_name).error(message)
+            return super().run_experiment(**kwargs)
+
+    assert record_experiment(_OtherPipelineNoise(items), run_name="r", items=items, task=_task)

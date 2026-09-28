@@ -164,7 +164,17 @@ class _DropClassFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         message = record.getMessage().lower()
-        return any(marker in message for marker in _DROP_CLASS_MESSAGE_MARKERS)
+        # ...and it must be about a SPAN. Watching the whole `opentelemetry.sdk`
+        # tree also reaches the LOGS and METRICS pipelines, which share the
+        # batch processor and its wording ("Queue full, dropping Log.",
+        # "Exception while exporting logs.", "Exception while exporting
+        # metrics", and a benign "Dropping log and exiting the loop."). They
+        # are dormant here -- langfuse configures only a TracerProvider -- but
+        # a dependency that switched one on would otherwise abort healthy
+        # runs. The SDK interpolates the telemetry kind, so "span" is exact.
+        return "span" in message and any(
+            marker in message for marker in _DROP_CLASS_MESSAGE_MARKERS
+        )
 
 
 def record_experiment(
