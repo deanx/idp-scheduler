@@ -3386,10 +3386,14 @@ def test_verify_main_banner_follows_the_artifact_not_the_exit_code(
 ) -> None:
     """F-1 (DEBT-98's own symptom location): `main`'s wiring, including
     that `started` is stamped BEFORE the run writes its artifact."""
-    from idp_regression.orchestration import dotenv_support, facade
+    from idp_regression.orchestration import cli, dotenv_support, facade
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(dotenv_support, "load_dotenv", lambda *a, **k: None)
+    # `main` would bind a StreamHandler to pytest's capture stream and leave
+    # it on the `idp_regression` logger; a later test's background thread
+    # logging through it then hits "I/O operation on closed file".
+    monkeypatch.setattr(cli, "configure_logging", lambda: None)
     _pinned(tmp_path, "a.pdf")
     argv = ["--all", "--dataset", "ds", "--version", "2.0.0", "--store",
             str(tmp_path / "pins"), "--yes"]
