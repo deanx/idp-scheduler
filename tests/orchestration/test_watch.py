@@ -259,6 +259,32 @@ def test_a_probe_that_fails_every_tick_eventually_halts_instead_of_running_forev
     assert "4 tick(s)" in out
 
 
+def test_f4_ctrl_c_after_only_failed_ticks_below_the_ceiling_is_not_no_new_versions_found(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """S-01.4 re-stamp #4 F-4: `if healthy_ticks > 0` is the boundary
+    between "no new versions found" and "no answer" in the `interrupted`
+    arm -- and nothing exercised the `healthy_ticks == 0` leg WITHOUT
+    also tripping the consecutive-failure ceiling (the sibling test above
+    covers the ceiling-tripped case, a different `end_reason` branch
+    entirely). Every tick fails, the ceiling is set high enough never to
+    fire, and Ctrl-C lands first."""
+    probe = RaisesForeverProbe()
+    sleep_fn = _stop_after(5)
+
+    exit_code = run_watch_loop(
+        probe=probe,
+        sleep_fn=sleep_fn,
+        max_consecutive_tick_failures=100,  # never trips -- isolate healthy_ticks == 0
+        **_base_kwargs(),
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "no new versions found" not in out
+    assert "no answer -- 5 tick(s) never got an answer" in out
+
+
 def test_f5_a_majority_failure_rate_is_never_silently_hidden_by_one_success(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -320,6 +346,67 @@ def test_f5_a_majority_failure_rate_is_never_silently_hidden_by_one_success(
     assert "Stopped after 40 tick(s)" in out
     # the exact bug: this phrase, UNQUALIFIED, must never appear when any
     # tick failed.
+    assert "no new versions found." not in out
+    assert "no new versions found (" in out
+    assert "30 of 40 tick(s) got no answer)" in out
+
+
+def test_f1_indeterminate_ticks_interleaved_with_healthy_ones_are_not_folded_into_no_new_versions(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """S-01.4 re-stamp #4 F-1 (fail-open #6): `check_once`'s own
+    `consecutive_indeterminate_ticks` -> `max_indeterminate_ticks`
+    escalation only fires on a CONSECUTIVE run -- a resolved tick resets
+    it to zero. So an endpoint that is ambiguous 3 of every 4 ticks (the
+    same 30-of-40 ratio as the F-5 sibling above, on the NO-VERDICT axis
+    instead of the exception axis) never reaches the ceiling, and every
+    one of those ticks completes WITHOUT an exception -- `healthy_ticks`
+    counts it, and the old summary logic folded it straight into
+    unqualified "no new versions found". The invariant: the closing
+    summary must account for every tick that got no verdict, whether
+    that came from an exception OR a completed-but-indeterminate tick."""
+    from idp_regression.orchestration import watch as watch_module
+    from idp_regression.orchestration.check_versions import TickResult
+
+    state = TickState()
+    healthy_event: dict[str, Any] = {
+        "event": "check_tick", "outcome": "no_new_versions", "org_id": "org1",
+        "action_id": "x", "dataset_name": "ds1", "anchor": "1.0.0",
+        "tick_count": 0, "probed": [],
+    }
+    indeterminate_event: dict[str, Any] = {
+        "event": "check_tick", "outcome": "indeterminate", "org_id": "org1",
+        "action_id": "x", "dataset_name": "ds1", "anchor": "1.0.0",
+        "tick_count": 0, "probed": [],
+    }
+    calls = {"n": 0}
+
+    def _fake_check_once(**kwargs: object) -> TickResult:
+        n = calls["n"]
+        calls["n"] += 1
+        # 30 of 40 ticks come back ambiguous -- no exception, no
+        # escalation (never 4 consecutive), but no verdict either.
+        if n % 4 != 0:
+            return TickResult("indeterminate", state, dict(indeterminate_event), [])
+        return TickResult("no_new_versions", state, dict(healthy_event), [])
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(watch_module, "check_once", _fake_check_once)
+    sleep_fn = _stop_after(40)
+
+    try:
+        exit_code = run_watch_loop(
+            probe=FakeProbe({}),
+            sleep_fn=sleep_fn,
+            max_consecutive_tick_failures=100,
+            **_base_kwargs(),
+        )
+    finally:
+        monkeypatch.undo()
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Stopped after 40 tick(s)" in out
     assert "no new versions found." not in out
     assert "no new versions found (" in out
     assert "30 of 40 tick(s) got no answer)" in out
@@ -581,14 +668,32 @@ def test_watch_main_rejects_a_blank_or_invalid_run_identity_flag_pre_network(
 
 
 def test_auto_run_off_by_default_never_calls_run_eval() -> None:
+    """S-01.4 re-stamp #4 F-2: a spy that RECORDS rather than raises --
+    `_run_auto_run` wraps `run_eval_fn` in a broad `except Exception`
+    (by design, so a failed run doesn't crash the watcher), which
+    swallowed the old `_fail_if_called` sentinel's AssertionError
+    silently. Mutating `if auto_run:` to `if True:` survived the whole
+    suite because of exactly that: the assertion never had anywhere to
+    land. Observing the call count directly is what tells them apart."""
     probe = FakeProbe({**_controls_ok("1.0.0"), "1.0.1": ProbeResult.EXISTS})
+    calls: list[tuple[object, ...]] = []
 
-    def _fail_if_called(*args: object, **kwargs: object) -> int:
-        raise AssertionError("run_eval must not be called -- auto_run is False")
+    def _spy_run_eval(*args: object, **kwargs: object) -> int:
+        calls.append(args)
+        return 0
 
     run_watch_loop(
-        probe=probe, sleep_fn=_stop_after(1), run_eval_fn=_fail_if_called, **_base_kwargs()
+        probe=probe,
+        sleep_fn=_stop_after(1),
+        run_eval_fn=_spy_run_eval,
+        # max_runs_per_tick=1 so a wrongly-True auto_run WOULD reach the
+        # spy -- left at its own default (0), the "$max_runs_per_tick
+        # reached" skip would hide the mutant regardless of auto_run.
+        max_runs_per_tick=1,
+        **_base_kwargs(),
     )
+
+    assert calls == []
 
 
 def test_auto_run_is_bounded_by_max_runs_per_tick(capsys: pytest.CaptureFixture[str]) -> None:
@@ -875,24 +980,32 @@ def test_watch_main_releases_the_lock_after_a_halt_outcome(
 
 
 def test_watch_main_a_load_dotenv_failure_is_a_controlled_exit_not_a_traceback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """S-01.4 re-stamp #4 F-5 (M18): a bare `exit_code == 1` is not
+    mutation-sensitive here -- `_run()` reaches its OWN exit-1 path
+    further down (a missing credential, an unreachable state file) with
+    `load_dotenv()` deleted entirely, since nothing downstream depends on
+    it having run in this fixture. The specific log message pins that
+    `load_dotenv()` was actually called and actually raised."""
     def _raise() -> None:
         raise OSError("simulated unreadable .env")
 
     monkeypatch.setattr("idp_regression.orchestration.watch.load_dotenv", _raise)
     state_path = tmp_path / "state.json"
 
-    exit_code = main(
-        [
-            "--org", "org1",
-            "--action", "12345678-1234-1234-1234-123456789012",
-            "--dataset", "ds1",
-            "--state-file", str(state_path),
-        ]
-    )
+    with caplog.at_level(logging.ERROR):
+        exit_code = main(
+            [
+                "--org", "org1",
+                "--action", "12345678-1234-1234-1234-123456789012",
+                "--dataset", "ds1",
+                "--state-file", str(state_path),
+            ]
+        )
 
     assert exit_code == 1
+    assert "watch: unexpected error loading .env: OSError" in caplog.text
 
 
 # -- F-2: an OSError from state-file prep must never escape as a raw ---------

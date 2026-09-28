@@ -397,6 +397,17 @@ def run_watch_loop(
     detected_versions: list[str] = []
     healthy_ticks = 0
     failed_ticks = 0
+    # S-01.4 re-stamp #4 F-1 (fail-open #6): a completed tick whose OWN
+    # outcome is `OUTCOME_INDETERMINATE` got an answer -- the answer was
+    # just "still ambiguous" -- so it increments `healthy_ticks`, same as
+    # any other completed tick. `check_once`'s consecutive-indeterminate
+    # escalation only fires on an unbroken run, so an endpoint ambiguous
+    # 3 of every 4 ticks never trips it and every one of those ticks
+    # counted as unqualified "healthy". `indeterminate_ticks` is the
+    # cumulative (not consecutive) tally the summary needs to tell "no
+    # new versions found" from "we mostly couldn't tell" -- the same
+    # fix `failed_ticks` already got for the exception axis.
+    indeterminate_ticks = 0
     consecutive_tick_failures = 0
     started_at = clock()
     exit_code = 0
@@ -501,6 +512,8 @@ def run_watch_loop(
 
             consecutive_tick_failures = 0
             healthy_ticks += 1
+            if result.outcome == OUTCOME_INDETERMINATE:
+                indeterminate_ticks += 1
             state = result.new_state
             print(_human_tick_line(iteration, result.event, clock=clock))
             _emit_structured_event(result.event, json_events=json_events)
@@ -563,10 +576,15 @@ def run_watch_loop(
         # == 0`), and a run that never completed a single tick (every
         # attempted tick failed transiently, or Ctrl-C landed before the
         # first tick) is "no answer", never "no new versions found".
+        # F-1: "no answer" for the summary's qualifier means EITHER a
+        # tick that raised, or a tick that completed but resolved to no
+        # verdict at all (indeterminate) -- both axes are folded into
+        # one cumulative tally so neither can hide behind the other.
+        unanswered_ticks = failed_ticks + indeterminate_ticks
         if healthy_ticks > 0:
             found = "no new versions found"
-            if failed_ticks > 0:
-                found += f" ({failed_ticks} of {iteration} tick(s) got no answer)"
+            if unanswered_ticks > 0:
+                found += f" ({unanswered_ticks} of {iteration} tick(s) got no answer)"
         else:
             found = (
                 f"no answer -- {failed_ticks} tick(s) never got an answer"

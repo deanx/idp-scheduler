@@ -107,25 +107,35 @@ def test_malformed_action_id_exits_nonzero_without_calling_run_eval(
 
 @pytest.mark.parametrize("bad_version", ["../x", "1.0/../", "a/b", "has space", ""])
 def test_malformed_version_exits_nonzero_without_calling_run_eval(
-    bad_version: str, monkeypatch: pytest.MonkeyPatch
+    bad_version: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """S-01.4 re-stamp #4 F-3 (M22): a bare `exit_code != 0` is not
+    mutation-sensitive here -- `_fail_if_called` raising `AssertionError`
+    if `run_eval` WERE called would still be caught by `main()`'s own
+    outer catch-all and still exit 1 (same shape as the `--org`/
+    `--dataset` blank-value tests above), so deleting the `--version`
+    format guard entirely would still pass a bare exit-code check."""
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
     monkeypatch.setattr(cli, "run_eval", _fail_if_called)
 
-    exit_code = cli.main(
-        [
-            "--org",
-            "org-test-0000",
-            "--action",
-            _VALID_UUID,
-            "--version",
-            bad_version,
-            "--run",
-            "nightly",
-        ]
-    )
+    with caplog.at_level(logging.ERROR):
+        exit_code = cli.main(
+            [
+                "--org",
+                "org-test-0000",
+                "--action",
+                _VALID_UUID,
+                "--version",
+                bad_version,
+                "--run",
+                "nightly",
+                "--dataset",
+                "idp-regression-golden",
+            ]
+        )
 
     assert exit_code != 0
+    assert "run_eval: --version has an invalid format" in caplog.text
 
 
 def test_valid_args_call_run_eval_with_the_resolved_values(
@@ -596,30 +606,37 @@ def test_missing_dataset_exits_via_the_argparse_required_path_not_calling_run_ev
 def test_blank_dataset_flag_value_is_rejected_including_whitespace_only(
     blank_dataset_flag: str,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """N6 shape, carried over from the env-fallback guard: a
     whitespace-only `--dataset` VALUE (not env var -- there is no env
     fallback anymore) must be rejected exactly like an empty one,
-    mirroring bootstrap.py's credential guard."""
+    mirroring bootstrap.py's credential guard.
+
+    S-01.4 re-stamp #4 F-3 (M23): the specific message is asserted,
+    not just the exit code -- see the `--org` test's docstring above for
+    why a bare `exit_code != 0` here is not mutation-sensitive."""
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
     monkeypatch.setattr(cli, "run_eval", _fail_if_called)
 
-    exit_code = cli.main(
-        [
-            "--org",
-            "org-test-0000",
-            "--action",
-            _VALID_UUID,
-            "--version",
-            "1.0",
-            "--run",
-            "nightly",
-            "--dataset",
-            blank_dataset_flag,
-        ]
-    )
+    with caplog.at_level(logging.ERROR):
+        exit_code = cli.main(
+            [
+                "--org",
+                "org-test-0000",
+                "--action",
+                _VALID_UUID,
+                "--version",
+                "1.0",
+                "--run",
+                "nightly",
+                "--dataset",
+                blank_dataset_flag,
+            ]
+        )
 
     assert exit_code != 0
+    assert "run_eval: --dataset must not be blank" in caplog.text
 
 
 def test_version_one_char_past_the_64_char_cap_is_rejected(
@@ -1000,30 +1017,39 @@ def test_max_documents_per_run_flag_value_is_passed_through(
 def test_max_documents_per_run_zero_or_negative_is_a_usage_error(
     bad_value: str,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A10: '0 or negative is a usage error' -- there is no opt-out
-    flag."""
+    flag.
+
+    S-01.4 re-stamp #4 F-3 (M13): `exit_code == 1` alone is not
+    mutation-sensitive -- `_fail_if_called` raising `AssertionError` if
+    `run_eval` WERE reached (guard deleted) is caught by `main()`'s own
+    outer catch-all and ALSO exits 1, indistinguishably. The specific
+    message is what tells them apart."""
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
     monkeypatch.setattr(cli, "run_eval", _fail_if_called)
 
-    exit_code = cli.main(
-        [
-            "--action",
-            _VALID_UUID,
-            "--version",
-            "1.0",
-            "--run",
-            "nightly",
-            "--dataset",
-            "idp-regression-golden",
-            "--org",
-            "org-test-0000",
-            "--max-documents-per-run",
-            bad_value,
-        ]
-    )
+    with caplog.at_level(logging.ERROR):
+        exit_code = cli.main(
+            [
+                "--action",
+                _VALID_UUID,
+                "--version",
+                "1.0",
+                "--run",
+                "nightly",
+                "--dataset",
+                "idp-regression-golden",
+                "--org",
+                "org-test-0000",
+                "--max-documents-per-run",
+                bad_value,
+            ]
+        )
 
     assert exit_code == 1
+    assert "run_eval: --max-documents-per-run must be a positive integer" in caplog.text
 
 
 def test_max_documents_per_run_non_integer_is_an_argparse_usage_error(
