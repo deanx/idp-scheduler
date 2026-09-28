@@ -332,3 +332,37 @@ def test_run_level_gate_is_pass_only_for_a_complete_run_of_passing_documents(
     gates: list[str], status: run_artifact.RunStatus | None, expected: str
 ) -> None:
     assert run_artifact.run_level_gate(gates, status) == expected
+
+
+# --- S-01.4 re-stamp #7 F-6 (RA5, RA7): two guards with no test -----------
+
+def test_write_run_artifact_refuses_a_preplanted_symlink_at_the_target_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`O_NOFOLLOW` on the open: a symlink sitting where the artifact
+    would be written is refused, never followed. `run_id` is an
+    unpredictable uuid4 in production, so this is defense in depth, not
+    a reachable live path -- but nothing pinned it until now."""
+    monkeypatch.chdir(tmp_path)
+    os.makedirs(run_artifact.ARTIFACT_DIR_NAME, mode=0o700, exist_ok=True)
+    target = tmp_path / "elsewhere.json"
+    target.write_text("not a real artifact")
+    link_path = Path(run_artifact.artifact_path("run-a"))
+    link_path.symlink_to(target)
+
+    with caplog.at_level(logging.WARNING):
+        run_artifact.write_run_artifact("run-a", _SAMPLE_VERDICT_MAPS, status="complete")
+
+    assert link_path.is_symlink()  # untouched, not followed and overwritten
+    assert target.read_text() == "not a real artifact"
+
+
+def test_artifact_envelope_never_carries_an_abort_reason_on_a_complete_run() -> None:
+    """A caller passing `abort_reason` alongside `status="complete"`
+    (a bug, since a completed run has no reason to abort) must not have
+    it silently written -- the envelope's own `if status == "aborted"`
+    guard, not the caller, is what keeps the two fields consistent."""
+    envelope = run_artifact.artifact_envelope(
+        "run-a", _SAMPLE_VERDICT_MAPS, status="complete", abort_reason="should_be_dropped"
+    )
+    assert envelope["abort_reason"] is None

@@ -63,6 +63,7 @@ from idp_regression.orchestration.check_versions import (
     OUTCOME_NEW_VERSION_DETECTED,
     OUTCOME_NO_NEW_VERSIONS,
     OUTCOME_SKIPPED_LOCKED,
+    VERDICT_OUTCOMES,
     CheckVersionsRefusedError,
     StateFileLockedError,
     TickResult,
@@ -418,6 +419,20 @@ def run_watch_loop(
     # unclassified fails that test rather than silently landing here as
     # "healthy" a third time.
     no_verdict_ticks = 0
+    # S-01.4 re-stamp #7 F-1: counted POSITIVELY, from membership in
+    # `VERDICT_OUTCOMES`, never derived as `healthy_ticks - no_verdict_
+    # ticks` -- that subtraction is only correct while every outcome
+    # `check_once` can return is classified in EXACTLY one of the three
+    # sets, and a new outcome that misses classification (a bare-string
+    # literal from a new branch, never wrapped in an `OUTCOME_*`
+    # constant) would still increment `healthy_ticks` while landing in
+    # neither `NO_VERDICT_OUTCOMES` nor `HALT_OUTCOMES` -- silently
+    # counted as a resolved verdict by the subtraction, fail-open by
+    # construction. Counting positively means an unclassified outcome
+    # is counted as NEITHER a verdict NOR a no-verdict tick, so the
+    # summary undercounts rather than overclaims -- fail-closed, the
+    # posture every other guard in this codebase takes.
+    verdict_ticks = 0
     consecutive_tick_failures = 0
     started_at = clock()
     exit_code = 0
@@ -524,6 +539,8 @@ def run_watch_loop(
             healthy_ticks += 1
             if result.outcome in NO_VERDICT_OUTCOMES:
                 no_verdict_ticks += 1
+            elif result.outcome in VERDICT_OUTCOMES:
+                verdict_ticks += 1
             state = result.new_state
             print(_human_tick_line(iteration, result.event, clock=clock))
             _emit_structured_event(result.event, json_events=json_events)
@@ -603,7 +620,6 @@ def run_watch_loop(
         # `verdict_ticks = healthy_ticks - no_verdict_ticks` -- not on
         # whether any tick merely finished without raising.
         unanswered_ticks = failed_ticks + no_verdict_ticks
-        verdict_ticks = healthy_ticks - no_verdict_ticks
         if verdict_ticks > 0:
             found = "no new versions found"
             if unanswered_ticks > 0:

@@ -331,6 +331,58 @@ def test_f1_ceiling_reached_ticks_are_no_verdict_too_not_just_indeterminate(
     assert "no answer -- 40 tick(s) never got an answer" in out
 
 
+def test_f1_an_unrecognised_outcome_is_never_silently_counted_as_a_verdict(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """S-01.4 re-stamp #7 F-1: `verdict_ticks` used to be derived as
+    `healthy_ticks - no_verdict_ticks`, which is correct ONLY while every
+    outcome `check_once` can return is classified in exactly one of the
+    three partition sets. A future outcome that misses classification
+    entirely (a bare string literal from a new branch, never wrapped in
+    an `OUTCOME_*` constant and never added to any set) still increments
+    `healthy_ticks`, so the subtraction counted it as a resolved verdict
+    -- fail-open by construction. Counting `verdict_ticks` POSITIVELY,
+    from membership in `VERDICT_OUTCOMES`, means such a tick is counted
+    as NEITHER a verdict NOR a no-verdict tick: the summary undercounts
+    rather than overclaims."""
+    from idp_regression.orchestration import watch as watch_module
+    from idp_regression.orchestration.check_versions import TickResult
+
+    state = TickState()
+    unclassified_event: dict[str, Any] = {
+        "event": "check_tick", "outcome": "sweep_truncated_bare_literal",
+        "org_id": "org1", "action_id": "x", "dataset_name": "ds1",
+        "anchor": "1.0.0", "tick_count": 0, "probed": [],
+    }
+
+    def _fake_check_once(**kwargs: object) -> TickResult:
+        # Deliberately NOT one of check_versions.py's OUTCOME_* constants
+        # -- simulates a future branch that returns an unclassified
+        # outcome directly.
+        return TickResult("sweep_truncated_bare_literal", state, dict(unclassified_event), [])
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(watch_module, "check_once", _fake_check_once)
+    try:
+        exit_code = run_watch_loop(
+            probe=FakeProbe({}),
+            sleep_fn=_stop_after(10),
+            max_consecutive_tick_failures=100,
+            **_base_kwargs(),
+        )
+    finally:
+        monkeypatch.undo()
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    # The headline never claims a verdict was reached -- that is the
+    # invariant this test protects. The exact wording undercounts (it
+    # cannot describe a tick outcome it does not recognise), which is
+    # the deliberately safe side of this trade-off.
+    assert "no new versions found" not in out
+    assert "no answer" in out
+
+
 def test_f3_a_partial_verdict_run_still_reports_no_new_versions_found_qualified(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

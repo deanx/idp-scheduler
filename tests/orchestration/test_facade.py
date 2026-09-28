@@ -2868,3 +2868,71 @@ def test_run_eval_exact_documents_refuses_a_substring_selector_before_submitting
     fake_idp.calls.clear()
     assert run_eval(*args, documents=["1"], exact_documents=True) != 0
     assert fake_idp.calls == [], "refused before any submit"
+
+
+# --- S-01.4 re-stamp #7 F-3: the quota ceiling must count the SELECTED --
+# items, not the whole dataset, when --document filters the run.
+
+def test_run_eval_quota_ceiling_counts_the_selected_items_not_the_whole_dataset(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+) -> None:
+    """A two-item dataset filtered to one document must NOT trip a
+    ceiling of 1 -- the ceiling guards QUOTA, so it must count what will
+    actually be submitted, not the full dataset the filter narrowed."""
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    dataset = _two_item_dataset()
+    monkeypatch.setattr(facade, "make_platform", lambda: _RecordingPlatform(dataset))
+    path1, actual1 = _matching_actual_for("/documents", "doc-1")
+    fake_idp = _FakeIDPAdapter({path1: actual1})
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda org_id: fake_idp)
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012",
+            "1.0",
+            "nightly",
+            "idp-regression-golden",
+            "org-t",
+            max_documents_per_run=1,
+            documents=["doc-1"],
+        )
+
+    assert "quota_ceiling_exceeded" not in caplog.text
+    assert exit_code == 0
+
+
+# --- S-01.4 re-stamp #7 F-4: an unknown --classifier is a pre-run refusal,
+# reachable by direct callers (scripts/*.py) that bypass argparse's choices.
+
+def test_run_eval_unknown_classifier_is_refused_before_any_idp_call(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: object,
+) -> None:
+    _disable_dotenv_file_loading(monkeypatch, tmp_path)
+    _set_all_credential_env(monkeypatch)
+    recording_platform = _RecordingPlatform(_two_item_dataset())
+    monkeypatch.setattr(facade, "make_platform", lambda: recording_platform)
+
+    class _FailIfExtractCalled:
+        def extract(self, document_path: str, action_id: str, version: str) -> object:
+            raise AssertionError("extract() must not be called: unknown classifier is refused")
+
+    monkeypatch.setattr(facade, "make_idp_adapter", lambda org_id: _FailIfExtractCalled())
+
+    with caplog.at_level(logging.ERROR):
+        exit_code = run_eval(
+            "12345678-1234-1234-1234-123456789012",
+            "1.0",
+            "nightly",
+            "idp-regression-golden",
+            "org-t",
+            classifier="not-a-real-classifier",
+        )
+
+    assert exit_code == 1
+    assert "unknown_classifier" in caplog.text
+    assert recording_platform.mark_run_status_calls == []

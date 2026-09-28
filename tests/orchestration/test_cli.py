@@ -1149,3 +1149,92 @@ def test_dropping_exactly_one_required_flag_from_a_complete_argv_exits_2(
     exit_code = cli.main(_argv_without(flag))
 
     assert exit_code == 2
+
+
+# --- S-01.4 re-stamp #7 F-2/F-3: --platform-values and --document must ---
+# actually reach run_eval -- neither had a forwarding test.
+
+def test_platform_values_flag_is_passed_through_to_run_eval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(
+        cli, "run_eval",
+        lambda a, v, r, d, o, m, **kw: calls.append(kw["platform_values"]) or 0,  # type: ignore[func-returns-value]
+    )
+
+    exit_code = cli.main(
+        [
+            "--org", "org-test-0000", "--action", _VALID_UUID, "--version", "1.0",
+            "--run", "nightly", "--dataset", "idp-regression-golden",
+            "--platform-values", "verdicts-only",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == ["verdicts-only"]
+
+
+def test_platform_values_defaults_to_full_when_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(
+        cli, "run_eval",
+        lambda a, v, r, d, o, m, **kw: calls.append(kw["platform_values"]) or 0,  # type: ignore[func-returns-value]
+    )
+
+    exit_code = cli.main(
+        [
+            "--org", "org-test-0000", "--action", _VALID_UUID, "--version", "1.0",
+            "--run", "nightly", "--dataset", "idp-regression-golden",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == ["full"]
+
+
+def test_document_flag_is_passed_through_to_run_eval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str] | None] = []
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(
+        cli, "run_eval",
+        lambda a, v, r, d, o, m, **kw: calls.append(kw["documents"]) or 0,  # type: ignore[func-returns-value]
+    )
+
+    exit_code = cli.main(
+        [
+            "--org", "org-test-0000", "--action", _VALID_UUID, "--version", "1.0",
+            "--run", "nightly", "--dataset", "idp-regression-golden",
+            "--document", "doc-a", "--document", "doc-b",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [["doc-a", "doc-b"]]
+
+
+def test_document_defaults_to_none_when_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str] | None] = []
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(
+        cli, "run_eval",
+        lambda a, v, r, d, o, m, **kw: calls.append(kw["documents"]) or 0,  # type: ignore[func-returns-value]
+    )
+
+    exit_code = cli.main(
+        [
+            "--org", "org-test-0000", "--action", _VALID_UUID, "--version", "1.0",
+            "--run", "nightly", "--dataset", "idp-regression-golden",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls == [None]
