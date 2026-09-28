@@ -51,12 +51,23 @@ export function ValidateZipPage() {
   const [allowPartial, setAllowPartial] = useState(false);
   const [repin, setRepin] = useState(false);
   const [glob, setGlob] = useState("");
+  const [classifier, setClassifier] = useState("");
   const [advanced, setAdvanced] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Asked before anything is uploaded or priced: a missing credential
   // must cost nothing, not the first extraction.
   const preflight = useAsync(() => api.preflight(), []);
+  // Only a `pinned-file`-based custom scorer belongs in this workflow --
+  // a `regression`-based one reads empty-vs-empty as `missing`, which is
+  // wrong for a per-file pin (every field is critical here, including
+  // the ones the trusted version read as empty). The server enforces
+  // this too (compare_versions.py's own parser), so this filter is the
+  // courtesy, not the control.
+  const scorers = useAsync(() => api.scorers(), []);
+  const pinnedFileScorers = (scorers.data?.scorers ?? []).filter(
+    (s) => s.name === "pinned-file" || s.base === "pinned-file"
+  );
   // **Fail CLOSED.** Blocked until the preflight resolves and says
   // otherwise — while it is loading, and if the fetch failed. The
   // earlier `preflight.data ? … : false` disabled the guard exactly when
@@ -76,6 +87,7 @@ export function ValidateZipPage() {
     allow_partial: allowPartial,
     repin,
     glob: glob || undefined,
+    classifier: classifier || undefined,
   });
 
   const floorRequest = (): FloorRequest => ({
@@ -421,6 +433,28 @@ export function ValidateZipPage() {
             Spends one extra extraction per already-pinned document. Without it, re-running after
             a failure retries only what failed.
           </p>
+          <div className="field" style={{ marginTop: 10 }}>
+            <label htmlFor="classifier">Comparison strategy (verify half only)</label>
+            <select
+              id="classifier"
+              value={classifier}
+              onChange={(e) => setClassifier(e.target.value)}
+            >
+              <option value="">pinned-file (default)</option>
+              {pinnedFileScorers
+                .filter((s) => s.name !== "pinned-file")
+                .map((s) => (
+                  <option key={s.name} value={s.name}>
+                    {s.name}
+                  </option>
+                ))}
+            </select>
+            <span className="small muted">
+              Only scorers built on <code>pinned-file</code> are offered — a{" "}
+              <code>regression</code>-based one reads an untouched empty field as a loss, not
+              agreement, which is wrong for a pinned file.
+            </span>
+          </div>
         </details>
 
         <button

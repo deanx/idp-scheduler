@@ -270,6 +270,14 @@ export interface CompareRequest {
   /** Re-read already-pinned files — one extra extraction each. */
   repin?: boolean;
   glob?: string;
+  /**
+   * A registered comparison strategy for the VERIFY half only (default:
+   * pinned-file). Must be `pinned-file` itself or a custom scorer built
+   * on it — compare_versions.py's own parser is what enforces that, so
+   * an unknown or wrong-base name is refused server-side before any
+   * extraction, never silently accepted here.
+   */
+  classifier?: string;
 }
 
 export class ApiError extends Error {}
