@@ -217,7 +217,7 @@ def verify_args(store: Path, documents: Path) -> argparse.Namespace:
         file=None, all=True, dataset="invoices-golden", version=CANDIDATE, org="org-1",
         action="action-1", store=store, trusted_version=TRUSTED, run_name="ui-validate",
         zip_path=None, document_dir=documents, extract_to=None,
-        glob=batch.DEFAULT_DOCUMENT_PATTERNS, allow_missing=False, yes=True,
+        glob=batch.DEFAULT_DOCUMENT_PATTERNS, allow_missing=False, classifier=None, yes=True,
     )
 
 

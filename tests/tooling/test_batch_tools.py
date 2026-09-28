@@ -2046,6 +2046,7 @@ def _verify_args(tmp_path: Path, **overrides: Any) -> Any:
         "extract_to": None,
         "glob": batch.DEFAULT_DOCUMENT_PATTERNS,
         "allow_missing": False,
+        "classifier": None,
         "yes": True,
     }
     defaults.update(overrides)
@@ -2091,6 +2092,75 @@ def _pinned(
         )
     )
     return goldens
+
+
+# --- Custom-scorer wiring (UI-authored scorers reaching pin/verify) ------
+
+def test_verify_uses_the_default_pinned_file_classifier_when_none_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("IDP_DOCUMENT_DIR", raising=False)
+    _pinned(tmp_path, "inv-001.pdf")
+    run_eval = _RecordingRunEval()
+
+    verify_document.run(_verify_args(tmp_path, all=True), run_eval)
+
+    _, kwargs = run_eval.calls[0]
+    assert kwargs["classifier"] == verify_document.PINNED_FILE_CLASSIFIER
+
+
+def test_verify_forwards_a_named_classifier_to_run_eval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("IDP_DOCUMENT_DIR", raising=False)
+    _pinned(tmp_path, "inv-001.pdf")
+    run_eval = _RecordingRunEval()
+
+    exit_code, summary = verify_document.run(
+        _verify_args(tmp_path, all=True, classifier="my-pinned-rule"), run_eval
+    )
+
+    _, kwargs = run_eval.calls[0]
+    assert exit_code == 0
+    assert kwargs["classifier"] == "my-pinned-rule"
+    assert summary["classifier"] == "my-pinned-rule"
+
+
+def test_verify_parser_only_offers_pinned_file_based_custom_classifiers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A custom scorer built on `regression` reads empty-vs-empty as
+    `missing`, not agreement -- wrong for a per-file pin, where every
+    field is critical including the ones the trusted version read as
+    empty. It must not even be an offerable --classifier value here,
+    the same closed-choices refusal argparse gives a typo."""
+    from idp_regression.classifier.custom import ScorerSpec
+
+    custom_specs = {
+        "pinned-rule": ScorerSpec(
+            name="pinned-rule", description="", base="pinned-file", rules=()
+        ),
+        "regression-rule": ScorerSpec(
+            name="regression-rule", description="", base="regression", rules=()
+        ),
+    }
+    args = verify_document._parse_args(
+        [
+            "--all", "--dataset", "ds", "--version", "2.0.0",
+            "--classifier", "pinned-rule",
+        ],
+        custom_specs=custom_specs,
+    )
+    assert args.classifier == "pinned-rule"
+
+    with pytest.raises(SystemExit):
+        verify_document._parse_args(
+            [
+                "--all", "--dataset", "ds", "--version", "2.0.0",
+                "--classifier", "regression-rule",
+            ],
+            custom_specs=custom_specs,
+        )
 
 
 def test_verify_narrows_the_run_to_the_one_pinned_file(
@@ -2472,11 +2542,27 @@ def _compare_args(tmp_path: Path, **overrides: Any) -> Any:
         "repin": False,
         "allow_partial": False,
         "run_name": None,
+        "classifier": None,
         "plan": False,
         "yes": True,
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
+
+
+def test_compare_forwards_classifier_to_the_verify_half_only(tmp_path: Path) -> None:
+    archive = _zip(tmp_path, {f"inv-{i}.pdf": b"%PDF" for i in (1, 2)})
+    pin, verify = _FakeStage(), _FakeStage()
+
+    exit_code, _ = compare_versions.run(
+        _compare_args(tmp_path, zip_path=archive, classifier="my-pinned-rule"), pin, verify
+    )
+
+    assert exit_code == 0
+    assert "--classifier" not in pin.calls[0]
+    verify_argv = verify.calls[0]
+    assert "--classifier" in verify_argv
+    assert verify_argv[verify_argv.index("--classifier") + 1] == "my-pinned-rule"
 
 
 def test_compare_pins_at_the_trusted_version_then_verifies_the_candidate(

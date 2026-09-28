@@ -128,6 +128,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         ),
     )
     ap.add_argument("--run", dest="run_name", help="run name for the verification")
+    ap.add_argument(
+        "--classifier",
+        default=None,
+        help=(
+            "comparison strategy for the VERIFY half only (default: pinned-file). "
+            "Forwarded verbatim to verify_document.py, which is the one that "
+            "validates the name and restricts it to a pinned-file-based custom "
+            "scorer -- see that script's own --classifier help."
+        ),
+    )
     ap.add_argument("--plan", action="store_true", help="print the cost and stop")
     ap.add_argument("--yes", action="store_true", help="approve BOTH halves' quota")
     return ap.parse_args(argv)
@@ -314,6 +324,8 @@ def run(args: argparse.Namespace, pin: Any, verify: Any) -> tuple[int, dict[str,
         verify_argv.append("--allow-missing")
     if args.run_name:
         verify_argv += ["--run", args.run_name]
+    if args.classifier:
+        verify_argv += ["--classifier", args.classifier]
     verify_started = time.time()
     gate = verify.main(verify_argv)
 

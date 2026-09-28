@@ -67,7 +67,22 @@ DEFAULT_STORE = Path(".idp-regression-pins")
 PINNED_FILE_CLASSIFIER = "pinned-file"
 
 
-def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+def _parse_args(
+    argv: list[str] | None, *, custom_specs: dict[str, Any] | None = None
+) -> argparse.Namespace:
+    """`custom_specs` is `register_custom_classifiers()`'s return value,
+    passed in by `main()` (which calls it BEFORE this parser is built --
+    argparse freezes `choices` at construction time, `cli.py`'s own
+    reason). Only a custom spec whose `base` is `pinned-file` may be
+    named: a `regression`-based spec reads empty-vs-empty as `missing`,
+    not agreement, which is wrong for a per-file pin (every field is
+    critical here, including the ones the trusted version read as
+    empty). Restricting the CHOICES, not just documenting the rule,
+    means a typo or a wrong-base name is refused before any extraction,
+    the same posture every other guard in this script takes."""
+    pinned_file_custom_names = sorted(
+        name for name, spec in (custom_specs or {}).items() if spec.base == PINNED_FILE_CLASSIFIER
+    )
     ap = argparse.ArgumentParser(
         prog="verify_document",
         description="Re-check a pinned file against a new Action version.",
@@ -126,6 +141,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         ),
     )
     ap.add_argument("--run", dest="run_name", help="run name (default: composed from the file)")
+    ap.add_argument(
+        "--classifier",
+        choices=[PINNED_FILE_CLASSIFIER, *pinned_file_custom_names],
+        default=None,
+        help=(
+            f"comparison strategy (default: {PINNED_FILE_CLASSIFIER}). A custom scorer "
+            f"registered under .idp-regression-scorers/ may be named here only if its "
+            f"base is {PINNED_FILE_CLASSIFIER!r} -- a regression-based one is not offered."
+        ),
+    )
     ap.add_argument("--yes", action="store_true", help="approve the extraction(s)")
     return ap.parse_args(argv)
 
@@ -390,6 +415,12 @@ def run(args: argparse.Namespace, run_eval: Any) -> tuple[int, dict[str, Any]]:
         file=sys.stderr,
     )
 
+    # A caller-named custom classifier (parser-restricted to a
+    # `pinned-file` base, see `_parse_args`) takes the same empty-vs-
+    # empty-is-agreement contract as the shipped one and simply tightens
+    # it further -- the default remains the shipped `pinned-file`
+    # comparison, never `regression`.
+    classifier = args.classifier or PINNED_FILE_CLASSIFIER
     started = time.time()
     gate = run_eval(
         action,
@@ -399,17 +430,13 @@ def run(args: argparse.Namespace, run_eval: Any) -> tuple[int, dict[str, Any]]:
         org,
         len(selected),
         documents=selected,
-        # Not the default `regression` comparison: this file's golden is
-        # what the TRUSTED version read from it, so a field it read as
-        # empty being empty again is agreement, not a loss (see
-        # `classifier/registry.py`).
-        classifier=PINNED_FILE_CLASSIFIER,
+        classifier=classifier,
         # Ids this script resolved itself: a non-exact match is a bug, and
         # the substring fallback would measure a different item (DEBT-117).
         exact_documents=True,
     )
     return gate, {
-        "classifier": PINNED_FILE_CLASSIFIER,
+        "classifier": classifier,
         "document_dir": document_dir,
         "unpinned": unpinned,
         "documents": selected,
@@ -424,14 +451,37 @@ def run(args: argparse.Namespace, run_eval: Any) -> tuple[int, dict[str, Any]]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(argv)
+    import logging
 
+    from idp_regression.adapter.transport import sanitize_for_log
     from idp_regression.orchestration.cli import configure_logging
     from idp_regression.orchestration.dotenv_support import load_dotenv
     from idp_regression.orchestration.facade import run_eval
+    from idp_regression.orchestration.scorer_store import register_custom_classifiers
 
     configure_logging()
     load_dotenv()
+
+    # `register_custom_classifiers()` runs BEFORE the parser is built --
+    # `--classifier`'s `choices` are frozen at construction time (mirrors
+    # `cli.py`). A broken spec is reported and skipped, never fatal to a
+    # run that never names it.
+    custom_specs, spec_errors = register_custom_classifiers()
+    logger = logging.getLogger("idp_regression.orchestration.verify_document")
+    for message in spec_errors:
+        logger.warning("custom_scorer_not_loaded detail=%s", sanitize_for_log(message))
+
+    args = _parse_args(argv, custom_specs=custom_specs)
+
+    if args.classifier in custom_specs:
+        # Run identity (INV-04's reasoning): a spec file can be edited
+        # between two runs that both name --classifier my-rule.
+        logger.info(
+            "custom_scorer_selected name=%s base=%s spec_digest=%s",
+            args.classifier,
+            custom_specs[args.classifier].base,
+            custom_specs[args.classifier].digest(),
+        )
 
     exit_code, summary = run(args, run_eval)
     if not summary:
