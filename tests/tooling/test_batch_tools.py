@@ -3638,6 +3638,13 @@ def test_verify_main_offers_a_registered_pinned_file_custom_scorer_and_logs_its_
 
         assert exit_code == 0
         assert "custom_scorer_selected name=pin-rule base=pinned-file" in caplog.text
+        # Re-gate #3 F-11: the fake `run_eval` above can't see whether
+        # `main()` actually registered the name -- only that it accepted
+        # the argv. `main()` reading specs via `resolve_classifier`'s
+        # `load_specs()` (F-6's fix) and never separately REGISTERING
+        # them would still pass everything above; this is what pins
+        # that `main()` itself is the one call that writes the registry.
+        assert "pin-rule" in CLASSIFIERS
     finally:
         # register_custom_classifiers() writes into the SAME global
         # CLASSIFIERS dict every other test's registry assertions read --
