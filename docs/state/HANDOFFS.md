@@ -597,3 +597,42 @@ Done: Five Atchim findings from the first review fixed:
 Contract: all five INV-09 clauses now have non-tautological tests; `review-complete` is fail-closed on None hash; `verify-candidate/start` is fail-closed on None on either side.
 Open: DEBT-141 (urllib quoting), DEBT-116 re-weight, review-session TTL/cleanup UX — all carry-overs.
 Next: Atchim re-review of the fix round.
+
+### HANDOFF Dengoso/Atchim → Zangado (2026-09-28, S-02.1 /test stamp PASSED)
+Done: S-02.1 (two-stage job orchestration, ReviewSession, INV-09 gate) implemented and Atchim-approved at commit `deab50c`. One REQUEST CHANGES round: Atchim found a Critical fail-open in INV-09(e) — `None != None` evaluated False when a platform read failed at either review-complete or verify-start, letting quota spend proceed against an unverified golden. Fixed at the root (the sole `state=REVIEWED` writer now refuses when the hash is uncomputable) plus defence-in-depth at verify-start. Three Required findings also closed: INV-09(b)'s scope honestly narrowed (directory-existence only; byte integrity delegated to verify_document.py, documented in code), INV-09(d)'s subsumption reasoning verified sound (state machine, not a missing nonce), and a tautological observability test replaced with a real assertion. Stamp at `docs/qa/TEST-S-02.1-console-golden-review-gate.md`.
+Contract: 2049 tests pass, mypy strict clean, ruff clean, pip-audit clean. Independence is structural (Dengoso claude-sonnet-4-6, Atchim claude-opus-4-8) — satisfies the high-risk same-model block. `NFR-02` declares `Containment: REQUIRED` — a passing `/harden` report (HARDEN-02, Branca) is still owed before this story's Done, not yet run.
+Open: N7's no-flock test is weak (trivially-true assertion, not a genuine concurrency proof) — flagged for `/qa` to strengthen or accept as debt. INV-09(e)'s both-hashes-None case is untested but currently unreachable by construction (F1 closes the only path there) — Atchim recommends a forced-both-None test if `/qa` pins this as an SR-class regression in `docs/state/REGRESSIONS.md`. Two ADR-0008 debt items (DEBT-116 re-weight, review-session TTL/cleanup UX) plus new DEBT-141 (urllib-confinement workaround for the query-encoding weakness) remain unfiled — boardless project, no board to file against, record directly in `docs/state/DEBT.md` when next touched.
+Next: `/qa` (Zangado) audits S-02.1 against its DoD; SPEC-02 header is `Risk level: high` so a `/test` stamp was required before QA — satisfied. `/harden` (Branca, HARDEN-02) still owed for the Containment gate before Done. S-02.2 and S-02.3 remain unstarted.
+
+### HANDOFF 2026-09-28 Dengoso → Atchim (S-02.2 implementation done)
+
+Done: S-02.2 (T-02.2.1–T-02.2.4) — golden edit and whole-file replace API.
+  - PATCH /api/reviews/{session_id}/items/{document_id}: schema-validates before writing, deterministic-id upsert, refuses non-editable states, reverts REVIEWED→DRAFTED on edit.
+  - POST /api/reviews/{session_id}/replace: all-or-nothing batch via same jsonschema+validate_golden_structure calls as provision_golden_dataset.py, leaves drafted set intact on any invalid entry.
+  - Provenance: edited_document_ids in ReviewSession (backward-compatible load), included in GET response.
+  - 30 new tests in tests/ui/test_golden_edits.py; 2079 total pass.
+  - mypy strict clean, ruff clean, pip-audit clean.
+  Commit: f8215e3
+
+Contract: AC3 (single-field edit), AC4 (whole-file replace, named-invalid-entry), zero-quota assertions, INV-02 log redaction, provenance round-trip.
+
+Open: None gating Atchim review.
+
+Next: Atchim independent code review of commit f8215e3 (correctness/readability/architecture/security/performance).
+
+### HANDOFF 2026-09-28 Dengoso → Atchim (S-02.2 fix round, commit 8819958)
+
+Done: S-02.2 fix round — all C1/C2/R1/R2/S2 findings from Atchim's REQUEST CHANGES addressed.
+  - C1: TestGoldenEditsModule (7 tests) directly unit-tests item_id() and build_item_payload(); TestPatchPayloadInspection (2 tests) captures the actual payload passed to upsert_platform_item and asserts: exactly one call, id == uuid5(ITEM_NAMESPACE, f"{dataset}|{doc_id}"), expectedOutput.fields contains the edited value.
+  - C2: TestItemNamespaceNotDrifted asserts golden_edits.ITEM_NAMESPACE == provision_golden_dataset._ITEM_NAMESPACE at test time; drift now fails a test before silently double-spending quota.
+  - R1: PATCH-is-whole-item-replace semantics documented in the handler docstring (comment names R1 explicitly); TestPatchIsWholeItemReplace pins: sending one field writes only that field to the platform — no merge with prior item.
+  - R2: patch_review_item calls fetch_platform_item (module-level injectable) before upsert, compares each incoming field's value against the current platform item, and records only changed fields in provenance. Conservative fallback: platform unavailable → mark all incoming fields (never misses a real edit). post_replace_golden gets the same treatment per entry.
+  - S2: body document_id that disagrees with the URL parameter is rejected 422 before validation or any platform write.
+  - 2095 passed / 15 skipped. mypy strict clean, ruff clean.
+  Commit: 8819958
+
+Contract: All five findings have a real (non-vacuous) test. The conservative fallback (None → all-fields) means existing tests that don't mock fetch_platform_item still pass — fetch returns None via the real function (insights_from_env() → None in the test env) and all fields are recorded, which satisfies the assertions. New R2 tests explicitly mock both injections.
+
+Open: None gating re-review.
+
+Next: Atchim independent re-review of commit 8819958 on branch feat/S-01.2-idp-adapter.
