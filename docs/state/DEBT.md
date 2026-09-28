@@ -1064,3 +1064,17 @@ Found during Atchim's S-02.3/T-02.3.7 review. CT-07 (`docs/design/CONTRACTS.md`)
 **Fix:** either give `ReviewSession` a full document-id list (captured at draft time) to diff against and populate the field for real, or remove `missing_from_platform` from CT-07 and the endpoint docstring so the contract doesn't imply an unfulfilled guarantee.
 
 **Interest:** flat — a real "some pinned document silently never made it to the platform" scenario would currently go unsignaled by this field (though other checks, e.g. INV-09, may still catch it downstream).
+
+---
+
+## DEBT-149 — S-02.3's C2 regression test proves no-field-drop but not edit-value-transmission
+
+**Filed:** 2026-09-28  **Severity:** Low (test-strengthening, not a coverage hole)  **Status:** Open
+
+Found during `/test` SPEC-02's independent Atchim TDD gate for S-02.3. `GoldenReviewTable.test.tsx`'s "PATCH body contains ALL original fields when only one is edited (C2: no silent drop)" test types a new value into a field, saves, and asserts the PATCH body's `fields` keys contain both the edited and untouched field — a real, load-bearing guard against the C2 regression (a one-field edit silently dropping every other field). It does **not** also assert that the edited field's *value* in that same PATCH body equals the newly typed value — so a hypothetical implementation that preserved all field keys but ignored the actual edit would still pass this specific test (though it would presumably fail elsewhere, since nothing else in the frontend suite asserts value-transmission to the PATCH body either).
+
+**Why this is not blocking:** it's a different property than what C2 was about (no-drop, not edit-applied), and AC3's server-side reflection is already covered by S-02.2's payload-inspection tests (which prove the *backend* correctly applies whatever value it receives).
+
+**Fix:** add one assertion to the existing C2 test — `expect(entry.fields.invoice_total.value).toBe("9999.00")` (or equivalent) — converting it from a pure no-drop guard into a no-drop-and-edit-applied guard, at near-zero cost, on the exact quota-approval-adjacent surface with prior fail-open history.
+
+**Interest:** flat — a test-completeness nit, not a live defect.
