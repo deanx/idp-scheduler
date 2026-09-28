@@ -1078,3 +1078,23 @@ Found during `/test` SPEC-02's independent Atchim TDD gate for S-02.3. `GoldenRe
 **Fix:** add one assertion to the existing C2 test — `expect(entry.fields.invoice_total.value).toBe("9999.00")` (or equivalent) — converting it from a pure no-drop guard into a no-drop-and-edit-applied guard, at near-zero cost, on the exact quota-approval-adjacent surface with prior fail-open history.
 
 **Interest:** flat — a test-completeness nit, not a live defect.
+
+---
+
+## DEBT-150 — CT-07's `tables`/`prompts` shape doesn't match what `GET /api/reviews/{id}/values` actually returns
+
+**Filed:** 2026-09-28  **Severity:** Low (dead/unused in both layers, fails safe)  **Status:** Open
+
+Found during `/qa`'s S-02.3 audit. CT-07 (`docs/design/CONTRACTS.md`) and the ADR-0008 amendment's response example declare a shaped `tables[{name,match_key,rows[]}]` / `prompts[{key,answer,source}]` for the new values endpoint. The actual implementation (`api.py` ~L1082-1083) passes the raw platform dicts straight through instead (`expected.get("tables") or {}` etc.), never reshaping them. `GoldenReviewTable` doesn't consume `tables`/`prompts` at all today — only `fields` — so this is currently dead/unused in both the contract and the implementation, and fails safe (no wrong data is shown; the mismatch just means nothing is shown for those keys).
+
+**Fix:** either shape `tables`/`prompts` to CT-07's declared form when a real consumer needs them (a future story rendering line-item tables in the review screen), or narrow CT-07 to describe what the endpoint actually returns today, so the contract doesn't promise a shape nothing produces or consumes.
+
+**Interest:** grows only if/when a future story tries to consume `tables`/`prompts` from this endpoint expecting the documented shape and gets raw dicts instead — currently zero interest since nothing reads them.
+
+---
+
+## DEBT-151 — Housekeeping: stale artifacts flagged by `check_clean.py`
+
+**Filed:** 2026-09-28  **Severity:** Trivial  **Status:** Open
+
+`check_clean.py` (the `/qa` cleanliness gate, advisory at `prototype` rigor) has flagged the same 5 stale artifacts across multiple QA passes: `.DS_Store` (×2, repo root and `id_seeds/`) and three `logs/scheduled-runs/run-*.log` files. None are related to any SPEC-02 story — pre-existing operator-machine artifacts. Sweep them (`rm` + confirm `.gitignore` covers the patterns) at the next convenient touch; not gating anything.

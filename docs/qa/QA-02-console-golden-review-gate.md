@@ -62,8 +62,73 @@ No Critical. No Major. **Zero code-level defects found** — no `escaped-atchim`
 
 Note: S-02.3 (the console UI) is correctly out of scope for this audit — unimplemented, no frontend test files, as both stamps already state.
 
-## Done gate
+## Done gate (S-02.1, S-02.2)
 
 Feature rows all ✅ PASS, Containment ✅ CONTAINED, Observability ✅ VERIFIED, no high/critical CVE, no secret found, composition green.
 
 **S-02.1 and S-02.2 are DONE.**
+
+---
+
+# Audit of Story S-02.3 — Console UI: staged wizard, review screen, pending-reviews list (SPEC-02)
+
+**Verdict:** ⚠️ Pass with follow-ups — Done **NOT** blocked
+**Scope:** S-02.3 only (S-02.1/S-02.2 already Done above, not re-audited).
+**Commit audited:** `23e5a8e` (stamp) / `cbb7ef7` (implementation)
+**Author:** alex@deanx.com.br (solo). *(Note: the `/test` stamp records `alex@divinocosta.com.br` — same operator, git identity differs; F-4 below, non-blocking documentation nit.)*
+**Auditor:** Zangado
+
+## Verdict: S-02.3 is DONE — SPEC-02 as a whole is COMPLETE.
+
+All prerequisite gates confirmed satisfied:
+- **Rigor gate (Risk: high):** stamp `Source: /test gap-fill (Atchim TDD gate)`, fresh independent Atchim instance (DEBT-44 honored).
+- **Containment gate:** `HARDEN-02.md` ✅ CONTAINED; S-02.3 adds no new failure-prone seam — verified by a direct read of the new endpoint (below), not accepted on trust.
+- Every S-02.3 DoD checkbox is met or explicitly waived (T-02.3.6, see below).
+
+## Gate results (all re-run this pass)
+
+- **Frontend `npx vitest run`:** 80/80 passed (7 files).
+- **Backend `pytest -q`:** 2116 passed, 15 skipped (all `RUN_INTEGRATION_TESTS`-gated).
+- **CT-07 composition test** (`tests/ui/test_review_values.py`): 9/9 passed — O(1) call-count proof, INV-02 sentinel-not-in-logs proof, zero-quota proof, 503/404, provenance drafted/edited, multi-doc completeness.
+- **`pip-audit`:** no known vulnerabilities.
+- **`gitleaks`** (real run, `7b3807c..23e5a8e`): no leaks found.
+- **`check_clean.py`:** exit 0, advisory. 5 pre-existing stale artifacts flagged (`.DS_Store` ×2, three `logs/scheduled-runs/*.log`) — unrelated to S-02.3, not blocking.
+
+## Staleness check — clean
+
+`git diff cbb7ef7..23e5a8e --name-only` touches only docs (the stamp, DEBT/HANDOFFS/PROGRESS). No stamped `src/`/`tests/`/`frontend/` file changed after the stamp commit. No test-file deletions, no unexplained `.skip`/`.todo`.
+
+## Direct code read of the new endpoint (T-02.3.7 only)
+
+`fetch_platform_items` (api.py:184) + `GET /api/reviews/{session_id}/values` (api.py:1003), read directly:
+- Read-only, zero quota — one platform GET, no subprocess, no IDP call. Correctly absent from `/api/health`'s `quota_spending_routes` and `TestQuotaBoundary`. Containment N/A holds.
+- INV-02: the only log line (`review_values session_id=%s document_count=%d`) carries no field name or value — verified against the passing sentinel test.
+- 503 on platform unconfigured/unreachable, 404/422 on session miss.
+- No real/sensitive golden values anywhere in the new code, tests, or docs — synthetic sentinels only.
+
+## NFR-02 walk
+
+No new row warranted for S-02.3 — a pure frontend consumer plus one read-only addendum, its properties already covered by the existing suite and project invariants. All 8 feature rows remain ✅ PASS from the S-02.1/S-02.2 audit above.
+
+## LLM-Evals
+
+N/A confirmed — no LLM surface.
+
+## T-02.3.6 (manual E2E run-through) — WAIVED, with reason
+
+**Decision: explicit waiver, not a silent skip, not a blocker.**
+- **Who/when:** Zangado, this `/qa` pass, 2026-09-28.
+- **Why:** a meaningful EX-1/EX-2 run-through spends live IDP org quota on real files (`CLAUDE.md` forbids this casually), and live IDP submit/poll is itself still gated on **S-01.6** (a real action id + published version), which `## External services` records as not yet configured — so a true end-to-end wizard run cannot be performed on any corpus, synthetic or not, until that infra lands. A render-only smoke test would not exercise EX-1/EX-2's actual behaviors.
+- **Why it's safe to waive at prototype rigor:** the UI behavior it would confirm is already covered by 80 passing component tests spanning all 6 ACs and every state branch, plus 9 backend values-endpoint tests and S-02.1/S-02.2's integration coverage.
+- **Recommendation:** perform T-02.3.6 opportunistically on a synthetic corpus once S-01.6 provides a live action version. Does not gate S-02.3 Done.
+
+## Findings
+
+- **F-1 (new, non-blocking):** CT-07 tables/prompts shape drift — CT-07 and the ADR-0008 amendment declare a shaped `tables[{name,match_key,rows[]}]`/`prompts[{key,answer,source}]`, but the endpoint passes raw platform dicts through untransformed. `GoldenReviewTable` doesn't consume tables/prompts at all, so this is dead/unused in both layers and fails safe. Filed as new debt below. `escaped-atchim: yes` — a contract-vs-implementation mismatch outside the five-axis correctness focus, harmless because unconsumed.
+- **F-2 (already filed, DEBT-148):** `missing_from_platform` dead contract, confirmed in code, fails safe. `escaped-atchim: no` — Atchim found and filed it.
+- **F-3 (already filed, DEBT-149):** C2 regression test proves no-drop but not value-transmission. `escaped-atchim: no` — filed by the `/test` gate.
+- **F-4 (nit, non-blocking):** `/test` stamp's Author address differs from the repo's git identity — same operator, cosmetic; correct at next touch.
+
+## Done gate (S-02.3 / SPEC-02 overall)
+
+No Critical, no Major, no code-level defect. **S-02.3 is DONE. SPEC-02 (S-02.1, S-02.2, S-02.3) is COMPLETE.**
