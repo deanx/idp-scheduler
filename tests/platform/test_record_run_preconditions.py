@@ -1637,7 +1637,15 @@ def test_the_per_document_score_payload_has_exactly_one_target_and_a_data_type()
 # non-str/non-None comment reaches json.dumps raw: a TypeError escaping
 # record_run AFTER run_experiment already ingested the spans.
 
-@pytest.mark.parametrize("bad_comment", [object(), b"bytes", 42, {"k": "v"}])
+# S-01.3 re-stamp #7 F-1: a sentinel-bearing bad comment, so the raise
+# is pinned against INV-02 the same way every sibling guard in this file
+# is -- HEAD does not leak it, but nothing proved that until now.
+_SENTINEL_COMMENT_MARKER = "SENTINEL-COMMENT-do-not-leak-9d3e2b"
+
+
+@pytest.mark.parametrize(
+    "bad_comment", [object(), b"bytes", 42, {"k": "v"}, _SENTINEL_COMMENT_MARKER.encode()]
+)
 def test_a_non_string_non_null_comment_raises_typed_error_before_any_sdk_call(
     bad_comment: object,
 ) -> None:
@@ -1655,7 +1663,9 @@ def test_a_non_string_non_null_comment_raises_typed_error_before_any_sdk_call(
             dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
         )
 
-    assert "doc-0" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "doc-0" in message
+    assert _SENTINEL_COMMENT_MARKER not in message
     _assert_zero_platform_writes(http_client, tracing_client)
 
 
@@ -1716,3 +1726,23 @@ def test_the_built_comment_is_the_one_sent_in_the_score_payload() -> None:
     )
     score_calls = [c for c in http_client.calls if c[1] == "/api/public/scores"]
     assert score_calls and score_calls[0][2]["comment"] == "FAIL on: total"
+
+
+def test_a_null_comment_posts_as_null_not_the_string_none() -> None:
+    """S-01.3 re-stamp #7 F-2: comment is `NotRequired[str | None]`; the
+    `null` half was unpinned on the wire, and a `str(comment)` mutant
+    would have posted every PASS-gate score's comment as the literal
+    string `"None"`."""
+    adapter, http_client = _adapter_with_cache("item-1")
+    records: list[DocumentRecord] = [
+        {
+            "item_id": "item-1",
+            "document_id": "doc-0",
+            "scores": [_score(run_id="run-1", document_id="doc-0", name="gate", value="PASS")],
+        }
+    ]
+    adapter.record_run(
+        dataset_name="ds", run_name="r", run_id="run-1", records=records, metadata=_METADATA
+    )
+    score_calls = [c for c in http_client.calls if c[1] == "/api/public/scores"]
+    assert score_calls and score_calls[0][2]["comment"] is None
