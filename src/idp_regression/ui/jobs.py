@@ -317,6 +317,118 @@ def build_noise_floor_argv(
     return argv
 
 
+def build_pin_argv(
+    *,
+    document_dir: Path,
+    dataset: str,
+    org: str,
+    action: str,
+    trusted_version: str,
+    plan_only: bool,
+    max_documents: int | None = None,
+    glob: str | None = None,
+) -> list[str]:
+    """The exact command for `pin_document.py --all`, as a list.
+
+    Stage 1 of the two-stage golden-review workflow: pin every document
+    in `document_dir` at the trusted version, producing the draft golden
+    set the curator will review before stage 2 is priced and approved.
+
+    Mirrors `build_compare_argv`'s validation/lock pattern exactly.
+    """
+    _validate({
+        "dataset": dataset,
+        "org": org,
+        "action": action,
+        "trusted_version": trusted_version,
+    })
+    resolved = document_dir.resolve()
+    _require(resolved.is_dir(), f"{resolved} is not a directory")
+
+    argv = [
+        sys.executable,
+        str(SCRIPTS_DIR / "pin_document.py"),
+        "--document-dir", str(resolved),
+        "--all",
+        "--dataset", dataset,
+        "--org", org,
+        "--action", action,
+        "--version", trusted_version,
+    ]
+    if max_documents is not None:
+        _require(0 < max_documents <= 1000, "max_documents must be between 1 and 1000")
+        argv += ["--max-documents", str(max_documents)]
+    if glob:
+        _require(
+            all(part.strip() and "/" not in part for part in glob.split(",")),
+            "glob must be comma-separated filename patterns, with no path separators",
+        )
+        argv += ["--glob", glob]
+    argv.append("--plan" if plan_only else "--yes")
+    return argv
+
+
+def build_verify_argv(
+    *,
+    document_dir: Path,
+    dataset: str,
+    org: str,
+    action: str,
+    trusted_version: str,
+    candidate_version: str,
+    plan_only: bool,
+    max_documents: int | None = None,
+    glob: str | None = None,
+) -> list[str]:
+    """The exact command for `verify_document.py --all`, as a list.
+
+    Stage 2 of the two-stage golden-review workflow: verify every pinned
+    document in `document_dir` against the candidate version. Must only
+    be called after INV-09's five clauses have been satisfied.
+
+    `--action` and `--trusted-version` are always explicit: when the pin
+    store holds more than one (action, version), the script refuses to
+    guess, and the review session's own fields are the authoritative
+    answer to "which pin set".
+    """
+    _validate({
+        "dataset": dataset,
+        "org": org,
+        "action": action,
+        "trusted_version": trusted_version,
+        "candidate_version": candidate_version,
+    })
+    _require(
+        trusted_version != candidate_version,
+        "the trusted and candidate versions are the same -- that comparison cannot fail",
+    )
+    resolved = document_dir.resolve()
+    _require(resolved.is_dir(), f"{resolved} is not a directory")
+
+    argv = [
+        sys.executable,
+        str(SCRIPTS_DIR / "verify_document.py"),
+        "--document-dir", str(resolved),
+        "--all",
+        "--dataset", dataset,
+        "--org", org,
+        "--action", action,
+        "--trusted-version", trusted_version,
+        "--version", candidate_version,
+    ]
+    if max_documents is not None:
+        _require(0 < max_documents <= 1000, "max_documents must be between 1 and 1000")
+        argv += ["--max-documents", str(max_documents)]
+    if glob:
+        _require(
+            all(part.strip() and "/" not in part for part in glob.split(",")),
+            "glob must be comma-separated filename patterns, with no path separators",
+        )
+        argv += ["--glob", glob]
+    argv.append("--plan" if plan_only else "--yes")
+    return argv
+
+
 _EXPLICIT_TOTAL = re.compile(r"(\d+)\s+real\s+IDP\s+extraction", re.IGNORECASE)
 _ANY_EXTRACTION_COUNT = re.compile(r"(\d+)(?:\s+[A-Za-z]+){0,4}\s+extraction", re.IGNORECASE)
 
