@@ -69,12 +69,21 @@ class TestQuotaBoundary:
     #: named constant so widening it is a visible edit -- and asserted
     #: against `/api/health`, so the set and what the console TELLS an
     #: operator about it cannot drift apart (Zangado QA F-A).
+    #:
+    #: S-02.1 (2026-09-28): two new routes added for the two-stage
+    #: golden-review workflow (T-02.1.8). The set grows from 2 to 4.
     SPENDS_QUOTA = {
         ("/api/workflows/compare/start", ("POST",)),
         # The noise floor spends quota too -- it reads a sample twice.
         # Guarded on identical terms (approved count + server-side
         # preflight); listed so that stays a deliberate choice.
         ("/api/workflows/floor/start", ("POST",)),
+        # Stage 1 of the two-stage golden-review workflow (ADR-0008):
+        # pin every document at the trusted version (N extractions).
+        ("/api/workflows/draft-golden/start", ("POST",)),
+        # Stage 2 of the two-stage golden-review workflow (ADR-0008):
+        # verify every pinned document at the candidate version (N extractions).
+        ("/api/workflows/verify-candidate/start", ("POST",)),
     }
 
     def test_only_the_named_routes_can_start_an_extraction(self, client: TestClient) -> None:
@@ -117,6 +126,14 @@ class TestQuotaBoundary:
             ("/api/platform/trend", ("GET",)),
             ("/api/platform/datasets", ("GET",)),
             ("/api/platform/datasets/{name}", ("GET",)),
+            # S-02.1 (2026-09-28) — two-stage golden-review workflow
+            ("/api/workflows/draft-golden/plan", ("POST",)),
+            ("/api/workflows/draft-golden/start", ("POST",)),
+            ("/api/workflows/verify-candidate/plan", ("POST",)),
+            ("/api/workflows/verify-candidate/start", ("POST",)),
+            ("/api/reviews", ("GET",)),
+            ("/api/reviews/{session_id}", ("GET",)),
+            ("/api/reviews/{session_id}/complete", ("POST",)),
         }
         assert paths == allowed, (
             "a new route appeared. Confirm whether it spends IDP quota or writes to the "
@@ -131,10 +148,12 @@ class TestQuotaBoundary:
         workflow existed. Leaving it would be a comfortable lie in the
         one place an operator might check."""
         body = client.get("/api/health").json()
-        assert body["quota_spending_routes"] == [
-            "POST /api/workflows/compare/start",
-            "POST /api/workflows/floor/start",
-        ]
+        # Check all four spending routes are declared (S-02.1 added two more)
+        declared = set(body["quota_spending_routes"])
+        assert "POST /api/workflows/compare/start" in declared
+        assert "POST /api/workflows/floor/start" in declared
+        assert "POST /api/workflows/draft-golden/start" in declared
+        assert "POST /api/workflows/verify-candidate/start" in declared
         assert body["quota_requires_approved_count"] is True
 
     def test_no_operator_facing_prose_states_a_quota_route_COUNT(

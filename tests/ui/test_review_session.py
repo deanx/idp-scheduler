@@ -37,7 +37,7 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def make_session(workspace: Path) -> ReviewSession:  # noqa: ARG001 — sets up workspace
+def make_session(workspace: Path) -> ReviewSession:
     return ReviewSession(
         session_id="abc123",
         dataset="test-dataset",

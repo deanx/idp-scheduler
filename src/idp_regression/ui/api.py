@@ -48,8 +48,11 @@ that is exactly as narrow as the host's own account separation.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
+import logging
 import subprocess
+import uuid as _uuid_mod
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -62,6 +65,7 @@ from idp_regression.classifier import custom as custom_scorers
 from idp_regression.classifier.registry import CLASSIFIERS, DEFAULT_CLASSIFIER
 from idp_regression.classifier.scoring import ScoreContext, ScoreResult
 from idp_regression.orchestration import scorer_store
+from idp_regression.orchestration.facade import DEFAULT_MAX_DOCUMENTS_PER_RUN
 from idp_regression.orchestration.version_discovery import (
     AnchorNotSemverError,
     discover_versions,
@@ -69,6 +73,55 @@ from idp_regression.orchestration.version_discovery import (
 from idp_regression.platform.errors import TransportError as PlatformTransportError
 from idp_regression.platform.insights import configuration_hint, insights_from_env
 from idp_regression.ui import jobs, preflight, reader, uploads, workspace
+from idp_regression.ui.review_sessions import (
+    ReviewSession,
+    ReviewSessionCorruptError,
+    ReviewSessionNotFoundError,
+    ReviewSessionState,
+    list_sessions,
+    load_session,
+    save_session,
+)
+
+_api_logger = logging.getLogger(__name__)
+
+
+def fetch_golden_hash(dataset: str, workspace_path: Path) -> str | None:  # noqa: ARG001
+    """Fetch the current platform dataset items and compute a content hash.
+
+    Used at review-completion (to record what the curator approved) and at
+    verify-candidate/start (to detect if the golden was swapped — INV-09(e)).
+
+    Returns None when the platform is not configured; in that case, the
+    verify-candidate/start route refuses with a 409 (cannot verify a hash
+    we cannot compute).
+
+    This function is module-level and injectable (monkeypatched in tests)
+    so the CI-runnable INV-09(e) unit test never needs a live platform instance.
+
+    `workspace_path` is reserved for a future implementation that reads a
+    local cache; for now the platform is always the source.
+    """
+    insights = insights_from_env()
+    if insights is None:
+        return None
+    try:
+        status, body = insights._http.request(
+            "GET",
+            "/api/public/dataset-items?datasetName="
+            + dataset.replace(" ", "%20")
+            + "&limit=1000",
+        )
+    except OSError:
+        return None
+    if status != 200:
+        return None
+    data = body.get("data") if isinstance(body, dict) else None
+    items = list(data) if isinstance(data, list) else []
+    # Deterministic: sort by item id so insertion order does not affect the hash
+    items_sorted = sorted(items, key=lambda i: str(i.get("id", "")))
+    canonical = json.dumps(items_sorted, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 FRONTEND_DIST = Path(__file__).resolve().parents[3] / "frontend" / "dist"
 
@@ -613,6 +666,379 @@ def create_app(*, dev_cors: bool = False, scorer_dir: Path | None = None) -> Fas
             raise HTTPException(status_code=409, detail=str(exc)) from None
         return job.to_json()
 
+    # ---------------------------------------- two-stage golden-review workflow
+
+    def _draft_argv(payload: dict[str, Any], *, plan_only: bool) -> list[str]:
+        document_dir = payload.get("document_dir")
+        upload_id = str(payload.get("upload_id", "")).strip()
+        if upload_id:
+            try:
+                unpacked = uploads.unpack(upload_id)
+            except FileNotFoundError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from None
+            except uploads.UploadRejectedError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from None
+            resolved = Path(unpacked["document_dir"])
+        elif document_dir:
+            resolved = Path(str(document_dir))
+        else:
+            raise HTTPException(status_code=422, detail="upload_id or document_dir is required")
+        trusted = str(payload.get("trusted_version", "")).strip()
+        candidate = str(payload.get("candidate_version", "")).strip()
+        if not trusted:
+            raise HTTPException(status_code=422, detail="trusted_version is required")
+        if not candidate:
+            raise HTTPException(status_code=422, detail="candidate_version is required")
+        try:
+            return jobs.build_pin_argv(
+                document_dir=resolved,
+                dataset=str(payload.get("dataset", "")),
+                org=str(payload.get("org", "")),
+                action=str(payload.get("action", "")),
+                trusted_version=trusted,
+                plan_only=plan_only,
+                max_documents=payload.get("max_documents"),
+                glob=payload.get("glob") or None,
+            )
+        except jobs.JobRejectedError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    def _verify_argv(
+        session: ReviewSession, *, plan_only: bool
+    ) -> list[str]:
+        try:
+            return jobs.build_verify_argv(
+                document_dir=Path(session.document_dir),
+                dataset=session.dataset,
+                org=session.org_id,
+                action=session.action_id,
+                trusted_version=session.trusted_version,
+                candidate_version=session.candidate_version,
+                plan_only=plan_only,
+            )
+        except jobs.JobRejectedError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    @app.post("/api/workflows/draft-golden/plan")
+    def post_draft_golden_plan(payload: Annotated[dict[str, Any], Body()]) -> dict[str, Any]:
+        """Price the drafting stage (stage 1). Spends nothing."""
+        argv = _draft_argv(payload, plan_only=True)
+        try:
+            extractions, lines = jobs.plan(argv)
+        except jobs.JobRejectedError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=504, detail="the plan timed out") from None
+        return {
+            "planned_extractions": extractions,
+            "command": " ".join(argv),
+            "output": lines,
+            "confirm_with": {"approved_extractions": extractions},
+        }
+
+    @app.post("/api/workflows/draft-golden/start")
+    def post_draft_golden_start(payload: Annotated[dict[str, Any], Body()]) -> dict[str, Any]:
+        """Start the draft/pin stage. **This spends real IDP quota.**
+
+        On success, creates a ReviewSession (state=drafted) that ties this
+        stage-1 job to the forthcoming human review and stage-2 verify.
+
+        N5: refuses a corpus above DEFAULT_MAX_DOCUMENTS_PER_RUN BEFORE
+        creating any ReviewSession file, so no session exists on refusal.
+        """
+        approved = payload.get("approved_extractions")
+        if not isinstance(approved, int) or isinstance(approved, bool):
+            raise HTTPException(
+                status_code=422,
+                detail="approved_extractions (an integer, from the plan) is required -- "
+                "this is the --yes for a job that spends real quota",
+            )
+        _require_runnable()
+        plan_argv = _draft_argv(payload, plan_only=True)
+        try:
+            planned, _ = jobs.plan(plan_argv)
+        except jobs.JobRejectedError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        # N5: ceiling check BEFORE creating the ReviewSession file
+        if planned > DEFAULT_MAX_DOCUMENTS_PER_RUN:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"corpus has {planned} documents, which exceeds the ceiling "
+                    f"of {DEFAULT_MAX_DOCUMENTS_PER_RUN}. run_eval aborts above this "
+                    "ceiling rather than truncating, so a larger corpus can never be run. "
+                    "Reduce the corpus or raise --max-documents (up to 1000)."
+                ),
+            )
+        run_argv = plan_argv[:-1] + ["--yes"]
+        try:
+            job = registry.start(
+                "pin-document",
+                run_argv,
+                planned_extractions=planned,
+                approved_extractions=approved,
+            )
+        except jobs.WorkspaceBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except jobs.JobRejectedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+        # Resolve session parameters from the payload
+        document_dir = payload.get("document_dir", "")
+        upload_id = str(payload.get("upload_id", "")).strip()
+        if upload_id:
+            try:
+                unpacked = uploads.unpack(upload_id)
+                document_dir = unpacked["document_dir"]
+            except (FileNotFoundError, uploads.UploadRejectedError):
+                pass  # document_dir stays as-is from payload
+        archive_sha256 = str(payload.get("archive_sha256", ""))
+        session_id = _uuid_mod.uuid4().hex
+        session = ReviewSession(
+            session_id=session_id,
+            dataset=str(payload.get("dataset", "")),
+            org_id=str(payload.get("org", "")),
+            action_id=str(payload.get("action", "")),
+            trusted_version=str(payload.get("trusted_version", "")),
+            candidate_version=str(payload.get("candidate_version", "")),
+            document_dir=str(document_dir),
+            archive_sha256=archive_sha256,
+            approved_golden_hash=None,
+            stage1_job_id=job.id,
+            stage2_job_id=None,
+            state=ReviewSessionState.DRAFTED,
+            created_at=dt.datetime.now(dt.UTC).isoformat(),
+        )
+        save_session(session, workspace.workspace_root())
+        _api_logger.info(
+            "draft_golden_started session_id=%s job_id=%s planned=%s",
+            session_id, job.id, planned,
+        )
+        result = job.to_json()
+        result["session_id"] = session_id
+        return result
+
+    # --------------------------------------------------------- review sessions
+
+    @app.get("/api/reviews")
+    def get_reviews() -> dict[str, Any]:
+        """All review sessions in this workspace (pending list, T-02.1.7)."""
+        sessions = list_sessions(workspace.workspace_root())
+        return {"sessions": [s.to_dict() for s in sessions]}
+
+    @app.get("/api/reviews/{session_id}")
+    def get_review(session_id: str) -> dict[str, Any]:
+        """Single session read (T-02.1.7, N1: must return in < 2s for 100-doc session)."""
+        try:
+            session = load_session(session_id, workspace.workspace_root())
+        except ReviewSessionNotFoundError:
+            raise HTTPException(
+                status_code=404, detail=f"no review session {session_id!r}"
+            ) from None
+        except ReviewSessionCorruptError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        return session.to_dict()
+
+    @app.post("/api/reviews/{session_id}/complete")
+    def post_review_complete(session_id: str) -> dict[str, Any]:
+        """Mark the review as complete, capturing the platform golden hash (INV-09d).
+
+        This is the step that records *what the curator actually reviewed*
+        so that verify-candidate/start can detect a golden swap during the
+        unlocked review pause (INV-09 clause e).
+        """
+        try:
+            session = load_session(session_id, workspace.workspace_root())
+        except ReviewSessionNotFoundError:
+            raise HTTPException(
+                status_code=404, detail=f"no review session {session_id!r}"
+            ) from None
+        except ReviewSessionCorruptError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+        golden_hash = fetch_golden_hash(session.dataset, workspace.workspace_root())
+        session.approved_golden_hash = golden_hash
+        session.state = ReviewSessionState.REVIEWED
+        save_session(session, workspace.workspace_root())
+        _api_logger.info(
+            "review_complete session_id=%s state=reviewed",
+            session_id,
+        )
+        return session.to_dict()
+
+    # ------------------------------------------------ verify-candidate
+
+    @app.post("/api/workflows/verify-candidate/plan")
+    def post_verify_candidate_plan(
+        payload: Annotated[dict[str, Any], Body()]
+    ) -> dict[str, Any]:
+        """Price the verify stage (stage 2). Requires a reviewed session."""
+        session_id = str(payload.get("session_id", "")).strip()
+        if not session_id:
+            raise HTTPException(status_code=422, detail="session_id is required")
+        try:
+            session = load_session(session_id, workspace.workspace_root())
+        except ReviewSessionNotFoundError:
+            raise HTTPException(
+                status_code=404, detail=f"no review session {session_id!r}"
+            ) from None
+        except ReviewSessionCorruptError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        if session.state not in (ReviewSessionState.REVIEWED, ReviewSessionState.VERIFYING):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"session {session_id!r} is in state {session.state.value!r}; "
+                    "it must be in 'reviewed' state before verification can be priced"
+                ),
+            )
+        argv = _verify_argv(session, plan_only=True)
+        try:
+            extractions, lines = jobs.plan(argv)
+        except jobs.JobRejectedError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=504, detail="the plan timed out") from None
+        return {
+            "planned_extractions": extractions,
+            "command": " ".join(argv),
+            "output": lines,
+            "confirm_with": {"approved_extractions": extractions, "session_id": session_id},
+            "session": session.to_dict(),
+        }
+
+    @app.post("/api/workflows/verify-candidate/start")
+    def post_verify_candidate_start(
+        payload: Annotated[dict[str, Any], Body()]
+    ) -> dict[str, Any]:
+        """Start the verify stage. **This spends real IDP quota.**
+
+        Enforces all five INV-09 clauses:
+        (a) session exists and is in 'reviewed' state
+        (b) document_dir and archive_sha256 still match what stage 1 pinned
+        (c) approved_extractions from a FRESH --plan computed now, after review
+        (d) approval bound to this route + session_id (cross-route replay refused)
+        (e) live platform dataset item hash matches ReviewSession.approved_golden_hash
+        """
+        session_id = str(payload.get("session_id", "")).strip()
+        approved = payload.get("approved_extractions")
+
+        # INV-09(a) — session must exist
+        if not session_id:
+            raise HTTPException(status_code=422, detail="session_id is required")
+        try:
+            session = load_session(session_id, workspace.workspace_root())
+        except ReviewSessionNotFoundError:
+            raise HTTPException(
+                status_code=409,
+                detail=f"no review session {session_id!r} — INV-09(a): session must exist",
+            ) from None
+        except ReviewSessionCorruptError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+        # Idempotent: already verified → return existing job
+        if session.state == ReviewSessionState.VERIFIED and session.stage2_job_id:
+            try:
+                existing_job = registry.get(session.stage2_job_id)
+                return existing_job.to_json()
+            except KeyError:
+                # Job not in this process's memory (console restarted); return session info
+                return {"id": session.stage2_job_id, "session": session.to_dict()}
+
+        # INV-09(a) — session must be in reviewed state
+        if session.state != ReviewSessionState.REVIEWED:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"session {session_id!r} is in state {session.state.value!r}; "
+                    "verify-candidate/start requires state='reviewed' — the curator must "
+                    "complete the review step before stage 2 can be approved (INV-09 clause a)"
+                ),
+            )
+
+        # INV-09(b) — document_dir must still exist
+        doc_dir = Path(session.document_dir)
+        if not doc_dir.is_dir():
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"document directory {str(doc_dir)!r} no longer exists; the corpus "
+                    "must be present for stage 2 (INV-09 clause b). Re-upload and re-pin."
+                ),
+            )
+
+        # approved_extractions type check (must be before plan — gives a clear 422)
+        if not isinstance(approved, int) or isinstance(approved, bool):
+            raise HTTPException(
+                status_code=422,
+                detail="approved_extractions (an integer, from the plan) is required -- "
+                "this is the --yes for a job that spends real quota",
+            )
+
+        _require_runnable()
+
+        # INV-09(c) — compute a FRESH plan (after review, not stage 1's plan)
+        plan_argv = _verify_argv(session, plan_only=True)
+        try:
+            planned, _ = jobs.plan(plan_argv)
+        except jobs.JobRejectedError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+        # INV-09(c) / (d) — approved count must match THIS route's fresh plan
+        if approved != planned:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"approval is for {approved} extractions but this job plans {planned} "
+                    f"right now — re-plan and confirm the current cost (INV-09 clauses c/d: "
+                    "the count is bound to this route's fresh plan, never a stage-1 carry-over)"
+                ),
+            )
+
+        # INV-09(e) — live platform hash must still match approved_golden_hash
+        current_hash = fetch_golden_hash(session.dataset, workspace.workspace_root())
+        _api_logger.info(
+            "verify_candidate_inv09e_check session_id=%s hash_match=%s",
+            session_id,
+            current_hash == session.approved_golden_hash,
+        )
+        if current_hash != session.approved_golden_hash:
+            session.state = ReviewSessionState.STALE
+            save_session(session, workspace.workspace_root())
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "the platform golden dataset has changed since the curator's review "
+                    "(the current item hash no longer matches approved_golden_hash) — "
+                    "INV-09 clause (e): start a new review session to re-approve the "
+                    "updated golden before spending verification quota"
+                ),
+            )
+
+        run_argv = plan_argv[:-1] + ["--yes"]
+        try:
+            job = registry.start(
+                "verify-candidate",
+                run_argv,
+                planned_extractions=planned,
+                approved_extractions=approved,
+            )
+        except jobs.WorkspaceBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except jobs.JobRejectedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+
+        session.state = ReviewSessionState.VERIFYING
+        session.stage2_job_id = job.id
+        save_session(session, workspace.workspace_root())
+        _api_logger.info(
+            "verify_candidate_started session_id=%s job_id=%s planned=%s",
+            session_id, job.id, planned,
+        )
+        result = job.to_json()
+        result["session_id"] = session_id
+        return result
+
     # ------------------------------------------------ platform (read)
 
     @app.get("/api/platform/capabilities")
@@ -692,6 +1118,8 @@ def create_app(*, dev_cors: bool = False, scorer_dir: Path | None = None) -> Fas
             "quota_spending_routes": [
                 "POST /api/workflows/compare/start",
                 "POST /api/workflows/floor/start",
+                "POST /api/workflows/draft-golden/start",
+                "POST /api/workflows/verify-candidate/start",
             ],
             "quota_requires_approved_count": True,
             "workspace": str(workspace.workspace_root()),

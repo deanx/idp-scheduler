@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 SESSIONS_SUBDIR: str = "review-sessions"
 
 
-class ReviewSessionState(str, Enum):
+class ReviewSessionState(str, Enum):  # noqa: UP042 — StrEnum is 3.11+, str+Enum works on 3.13
     """The lifecycle of a two-stage golden-review session."""
 
     DRAFTED = "drafted"    # stage 1 complete; waiting for human review
@@ -95,7 +95,7 @@ class ReviewSession:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ReviewSession":
+    def from_dict(cls, data: dict[str, Any]) -> ReviewSession:
         """Fail-closed: any missing/wrong-typed field raises `ReviewSessionCorruptError`."""
         required_str_fields = (
             "session_id", "dataset", "org_id", "action_id",
