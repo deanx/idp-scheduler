@@ -468,7 +468,8 @@ def _enumerate_contexts(spec: ScorerSpec | None = None) -> list[ScoreContext]:
 def _fails_the_gate(ctx: ScoreContext, result: object) -> bool:
     """Whether this one field fails `overall_gate`, given a scorer result:
     the same rule `overall_gate` applies, with a ScoreResult's flags OR-ed
-    onto the golden's."""
+    onto the golden's. `test_fails_the_gate_agrees_with_overall_gate_on_every_leaf`
+    holds it to `overall_gate` itself, never to a copy of this rule."""
     verdict = result.verdict if isinstance(result, ScoreResult) else result
     critical = ctx.critical or (isinstance(result, ScoreResult) and result.critical)
     format_critical = ctx.format_critical or (
@@ -476,6 +477,11 @@ def _fails_the_gate(ctx: ScoreContext, result: object) -> bool:
     )
     if verdict in ("missing", "wrong_value"):
         return bool(critical)
+    # A table cell is gated by its BLOCK, which reads only missing/wrong_value
+    # (`overall_gate`); a row carries no `format_critical`, so a cell's
+    # `wrong_format` never fails, whatever the flags say (re-stamp #3 H-1).
+    if ctx.kind == "table_column":
+        return False
     return verdict == "wrong_format" and bool(format_critical)
 
 

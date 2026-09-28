@@ -401,3 +401,126 @@ def test_a_directly_built_relaxing_spec_cannot_pass_a_failing_gate(target: str) 
     )
     custom = cs.build_classifier(spec_)
     assert custom.gate(custom.classify(_GOLDEN, _WRONG)) == "FAIL"
+
+
+# --- Wave C S-01.1 re-stamp #3 H-1: `_fails_the_gate` must BE the gate ------
+#
+# The row gate reads only `missing`/`wrong_value` on a critical block; a row
+# carries no `format_critical`. `_fails_the_gate` counted a table cell's
+# `wrong_format` + `format_critical` as failing, so a directly built spec
+# rewriting a critical cell's `wrong_value` into that turned the gate GREEN
+# while the proof -- and the construction test, which used `_fails_the_gate`
+# as its own oracle -- saw nothing. The oracle below is `overall_gate`.
+
+_ALL_RESULTS: list[object] = [
+    *cs.SCORER_VERDICTS,
+    *(ScoreResult(v, critical=c, format_critical=f)  # type: ignore[arg-type]
+      for v in cs.SCORER_VERDICTS for c in (False, True) for f in (False, True)),
+]
+
+
+def _gate_of_one_leaf(context: ScoreContext, result: object) -> bool:
+    """What `overall_gate` says about a map holding just this leaf, built the
+    way `gate.py` builds it: flags OR-ed, a cell's escalation on its block."""
+    from idp_regression.classifier.gate import overall_gate
+
+    verdict = result.verdict if isinstance(result, ScoreResult) else result
+    critical = context.critical or (isinstance(result, ScoreResult) and result.critical)
+    fmt = context.format_critical or (isinstance(result, ScoreResult) and result.format_critical)
+    if context.kind == "table_column":
+        leaf: object = {"verdict": "detail", "critical": critical, "type": None,
+                        "rows": [{"match_key": "A", "column": context.name, "verdict": verdict,
+                                  "expected": None, "actual": None, "confidence": None}]}
+    else:
+        leaf = {"verdict": verdict, "expected": None, "actual": None, "confidence": None,
+                "critical": critical, "format_critical": fmt, "type": None}
+    return overall_gate(cast(VerdictMap, {context.name: leaf})) == "FAIL"
+
+
+def test_fails_the_gate_agrees_with_overall_gate_on_every_leaf() -> None:
+    disagreements = [
+        (c.kind, c.critical, c.format_critical, r)
+        for c in cs._enumerate_contexts()
+        for r in _ALL_RESULTS
+        if not (c.kind == "table_column"
+                and (r.verdict if isinstance(r, ScoreResult) else r) == "new_table")
+        and cs._fails_the_gate(c, r) != _gate_of_one_leaf(c, r)
+    ]
+    assert disagreements == []
+
+
+#: `fields` must be non-empty; one non-critical field that matches.
+_ONE_FIELD = {"total": {"value": "1", "type": "number", "critical": False}}
+_ONE_ACTUAL = {"total": {"value": "1", "confidence": 0.99}}
+
+
+def _critical_table() -> tuple[Golden, NormalizedOutput]:
+    golden = cast(Golden, {"fields": _ONE_FIELD, "tables": {"line_items": {
+        "match_key": "sku", "critical": True,
+        "rows": [{"sku": "A", "amount": "100"}]}}})
+    actual = cast(NormalizedOutput, {"status": "SUCCEEDED", "fields": _ONE_ACTUAL, "tables": {
+        "line_items": [{"sku": {"value": "A"}, "amount": {"value": "999"}}]}})
+    return golden, actual
+
+
+@pytest.mark.parametrize("when", [{}, {"kind": "table_column"}])
+def test_a_directly_built_spec_cannot_pass_a_critical_table_cell(when: dict[str, object]) -> None:
+    golden, actual = _critical_table()
+    base = CLASSIFIERS["regression"]
+    assert base.gate(base.classify(golden, actual)) == "FAIL"
+    spec_ = cs.ScorerSpec(
+        name="relax-cell", description="", base="regression",
+        rules=(cs.Rule(when=when, then={"verdict": "wrong_format", "format_critical": True}),),
+    )
+    custom = cs.build_classifier(spec_)
+    assert custom.gate(custom.classify(golden, actual)) == "FAIL"
+    assert cs.verify_monotone(spec_), "the spec as written relaxes a table cell"
+
+
+def test_verify_monotone_accepts_a_legitimate_format_tightening() -> None:
+    """Re-stamp #3 L-1: the proof must not refuse a correct spec -- treating a
+    format difference as a gated value difference only tightens."""
+    parsed = cs.parse_spec({"name": "format-is-a-failure", "base": "regression",
+                            "rules": [{"when": {"verdict_is": ["wrong_format"]},
+                                       "then": {"verdict": "wrong_value", "critical": True}}]})
+    assert cs.verify_monotone(parsed) == []
+
+
+# --- Re-stamp #3 M-1: prompts get the run's scorer, not the default ---------
+
+def _prompt_case(answer: str) -> tuple[Golden, NormalizedOutput]:
+    golden = cast(Golden, {"fields": _ONE_FIELD, "prompts": {"vendor_name": {"answer": answer,
+                                                                    "critical": True}}})
+    actual = cast(NormalizedOutput, {"status": "SUCCEEDED", "fields": _ONE_ACTUAL, "prompts": {
+        "vendor_name": {"answer": answer, "confidence": 0.1}}})
+    return golden, actual
+
+
+def test_pinned_file_reads_an_empty_prompt_against_an_empty_answer_as_agreement() -> None:
+    golden, actual = _prompt_case("")
+    pinned = CLASSIFIERS["pinned-file"]
+    verdicts = pinned.classify(golden, actual)
+    assert verdicts["vendor_name"]["verdict"] == "match"
+    assert pinned.gate(verdicts) == "PASS"
+
+
+def test_a_custom_rule_scoped_to_prompts_is_applied_to_prompts() -> None:
+    golden, actual = _prompt_case("Acme Corp")
+    parsed = cs.parse_spec({"name": "prompt-floor", "base": "regression",
+                            "rules": [{"when": {"kind": "prompt", "confidence_below": 0.5,
+                                                "verdict_is": ["match"]},
+                                       "then": {"verdict": "wrong_value", "critical": True}}]})
+    custom = cs.build_classifier(parsed)
+    assert custom.gate(custom.classify(golden, actual)) == "FAIL"
+
+
+# --- Re-stamp #2 G-2 / #3: the runtime row-vocabulary guard ------------------
+
+def test_a_scorer_returning_new_table_for_a_cell_is_refused() -> None:
+    from idp_regression.classifier.gate import make_classifier
+    from idp_regression.classifier.types import MalformedActualError
+
+    golden, actual = _critical_table()
+    classify = make_classifier(lambda ctx: "new_table" if ctx.kind == "table_column" else "match")
+    with pytest.raises(MalformedActualError, match="not valid for a table row"):
+        classify(golden, actual)
