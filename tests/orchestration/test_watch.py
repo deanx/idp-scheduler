@@ -300,7 +300,15 @@ def test_f1_ceiling_reached_ticks_are_no_verdict_too_not_just_indeterminate(
     the same fail-open, one outcome over. Reproduced through the REAL
     `check_once`, not a monkeypatched double, with a real Protocol probe
     that answers UNKNOWN to every non-control candidate -- the exact
-    live repro (small `--max-probes-per-tick`, generous lookahead)."""
+    live repro (small `--max-probes-per-tick`, generous lookahead).
+
+    S-01.4 re-stamp #6 F-3: EVERY one of the 40 ticks is no-verdict here
+    (0 exceptions, 0 verdicts) -- re-stamp #5's own fix still branched on
+    `healthy_ticks > 0` ("a tick completed"), so this exact run still
+    printed the unqualified-looking `no new versions found (40 of 40...)`
+    headline. The correct output when NO tick ever resolved a verdict is
+    the same honest `no answer` phrasing the exception-only case already
+    used -- there is nothing to call "found" here."""
     probe = FakeProbe(_controls_ok("1.0.0"), default=ProbeResult.UNKNOWN)
     sleep_fn = _stop_after(40)
 
@@ -319,9 +327,56 @@ def test_f1_ceiling_reached_ticks_are_no_verdict_too_not_just_indeterminate(
 
     out = capsys.readouterr().out
     assert exit_code == 0
-    assert "no new versions found." not in out
-    assert "no new versions found (" in out
-    assert "40 of 40 tick(s) got no answer)" in out
+    assert "no new versions found" not in out
+    assert "no answer -- 40 tick(s) never got an answer" in out
+
+
+def test_f3_a_partial_verdict_run_still_reports_no_new_versions_found_qualified(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """S-01.4 re-stamp #6 F-3, the other half: when at least ONE tick DID
+    resolve a verdict, the headline stays 'no new versions found', with
+    the no-verdict ticks named in the parenthetical -- unchanged from
+    re-stamp #5's intent, now correctly gated on `verdict_ticks`, not
+    `healthy_ticks`."""
+    from idp_regression.orchestration import watch as watch_module
+    from idp_regression.orchestration.check_versions import TickResult
+
+    state = TickState()
+    healthy_event: dict[str, Any] = {
+        "event": "check_tick", "outcome": "no_new_versions", "org_id": "org1",
+        "action_id": "x", "dataset_name": "ds1", "anchor": "1.0.0",
+        "tick_count": 0, "probed": [],
+    }
+    indeterminate_event: dict[str, Any] = {
+        "event": "check_tick", "outcome": "indeterminate", "org_id": "org1",
+        "action_id": "x", "dataset_name": "ds1", "anchor": "1.0.0",
+        "tick_count": 0, "probed": [],
+    }
+    calls = {"n": 0}
+
+    def _fake_check_once(**kwargs: object) -> TickResult:
+        n = calls["n"]
+        calls["n"] += 1
+        if n == 0:
+            return TickResult("no_new_versions", state, dict(healthy_event), [])
+        return TickResult("indeterminate", state, dict(indeterminate_event), [])
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(watch_module, "check_once", _fake_check_once)
+    try:
+        exit_code = run_watch_loop(
+            probe=FakeProbe({}),
+            sleep_fn=_stop_after(10),
+            max_consecutive_tick_failures=100,
+            **_base_kwargs(max_indeterminate_ticks=1000),
+        )
+    finally:
+        monkeypatch.undo()
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "no new versions found (9 of 10 tick(s) got no answer)" in out
 
 
 def test_f5_a_majority_failure_rate_is_never_silently_hidden_by_one_success(

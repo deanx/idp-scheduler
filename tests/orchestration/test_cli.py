@@ -95,25 +95,33 @@ def test_idp_action_id_env_var_is_no_longer_read_as_a_fallback(
     ["not-a-uuid", "", "1234-abcd", "12345678-1234-1234-1234-12345678901"],
 )
 def test_malformed_action_id_exits_nonzero_without_calling_run_eval(
-    bad_action_id: str, monkeypatch: pytest.MonkeyPatch
+    bad_action_id: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """S-01.4 re-stamp #6 F-1 (MB6b): the fixture omitted `--dataset`, so
+    a mutated (deleted) UUID guard survived `test_cli.py` alone -- exit
+    non-zero came from the missing `--dataset` (exit 2) either way, and
+    was only incidentally caught elsewhere by an unrelated test."""
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
     monkeypatch.setattr(cli, "run_eval", _fail_if_called)
 
-    exit_code = cli.main(
-        [
-            "--org",
-            "org-test-0000",
-            "--action",
-            bad_action_id,
-            "--version",
-            "1.0",
-            "--run",
-            "nightly",
-        ]
-    )
+    with caplog.at_level(logging.ERROR):
+        exit_code = cli.main(
+            [
+                "--org",
+                "org-test-0000",
+                "--action",
+                bad_action_id,
+                "--version",
+                "1.0",
+                "--run",
+                "nightly",
+                "--dataset",
+                "idp-regression-golden",
+            ]
+        )
 
     assert exit_code != 0
+    assert "run_eval: --action is not a valid UUID" in caplog.text
 
 
 @pytest.mark.parametrize("bad_version", ["../x", "1.0/../", "a/b", "has space", ""])
@@ -1097,5 +1105,47 @@ def test_max_documents_per_run_non_integer_is_an_argparse_usage_error(
             "banana",
         ]
     )
+
+    assert exit_code == 2
+
+
+# --- S-01.4 re-stamp #6 F-1: one parametrized sweep over EVERY required --
+# flag, closing the vacuous-test class the last two re-stamps kept finding
+# one instance at a time (`--action` MB8/MB6b, `--run` MB11) rather than
+# sweeping it once. A COMPLETE, otherwise-valid argv with exactly ONE
+# required flag dropped must exit 2 -- argparse's own `required=True`,
+# never a downstream guard's `return 1` reached via some OTHER missing
+# flag, which is what made every prior single-flag test's `!= 0` or even
+# `== 2` (with a second flag also missing) unable to tell "this flag's
+# own guard fired" from "a different flag's guard fired instead".
+
+_COMPLETE_ARGV = {
+    "--org": "org-test-0000",
+    "--action": _VALID_UUID,
+    "--version": "1.0",
+    "--run": "nightly",
+    "--dataset": "idp-regression-golden",
+}
+
+
+def _argv_without(flag: str) -> list[str]:
+    parts: list[str] = []
+    for name, value in _COMPLETE_ARGV.items():
+        if name == flag:
+            continue
+        parts += [name, value]
+    return parts
+
+
+@pytest.mark.parametrize("flag", sorted(_COMPLETE_ARGV))
+def test_dropping_exactly_one_required_flag_from_a_complete_argv_exits_2(
+    flag: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "load_dotenv", lambda: None)
+    monkeypatch.setattr(cli, "run_eval", _fail_if_called)
+    monkeypatch.delenv("IDP_ACTION_ID", raising=False)
+    monkeypatch.delenv("GOLDEN_DATASET_NAME", raising=False)
+
+    exit_code = cli.main(_argv_without(flag))
 
     assert exit_code == 2

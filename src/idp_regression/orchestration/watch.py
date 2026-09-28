@@ -592,15 +592,26 @@ def run_watch_loop(
         # (`NO_VERDICT_OUTCOMES` -- indeterminate OR ceiling_reached) --
         # every one of those axes is folded into one cumulative tally so
         # none of them can hide behind another.
+        #
+        # S-01.4 re-stamp #6 F-3: re-stamp #5 built `unanswered_ticks` but
+        # left the HEADLINE branching on `healthy_ticks > 0` -- "a tick
+        # completed", not "a tick resolved a verdict" -- so a run where
+        # EVERY completed tick was ceiling_reached/indeterminate (0
+        # exceptions, 0 verdicts) still said "no new versions found",
+        # only the parenthetical noting every tick as unanswered. The
+        # branch must be on whether a VERDICT happened at all --
+        # `verdict_ticks = healthy_ticks - no_verdict_ticks` -- not on
+        # whether any tick merely finished without raising.
         unanswered_ticks = failed_ticks + no_verdict_ticks
-        if healthy_ticks > 0:
+        verdict_ticks = healthy_ticks - no_verdict_ticks
+        if verdict_ticks > 0:
             found = "no new versions found"
             if unanswered_ticks > 0:
                 found += f" ({unanswered_ticks} of {iteration} tick(s) got no answer)"
         else:
             found = (
-                f"no answer -- {failed_ticks} tick(s) never got an answer"
-                if failed_ticks > 0
+                f"no answer -- {unanswered_ticks} tick(s) never got an answer"
+                if unanswered_ticks > 0
                 else "no answer -- watcher stopped before any tick completed"
             )
     elif end_reason == "refused":

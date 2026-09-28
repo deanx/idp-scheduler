@@ -937,7 +937,19 @@ def test_the_outcome_partition_is_total_and_disjoint() -> None:
     """A future outcome added to check_versions.py and left unclassified
     must fail HERE, never join `NO_VERDICT_OUTCOMES` or `HALT_OUTCOMES`
     silently -- the exact shape that let `OUTCOME_CEILING_REACHED` count
-    as 'healthy' in watch.py's summary until this re-stamp."""
+    as 'healthy' in watch.py's summary until this re-stamp.
+
+    S-01.4 re-stamp #6 F-2: comparing `VERDICT | NO_VERDICT | HALT` to
+    `ALL_TICK_OUTCOMES` alone is a TAUTOLOGY -- `ALL_TICK_OUTCOMES` is
+    DEFINED as that same union, in the same module, so a fourth outcome
+    added anywhere (a new `elif` in `check_once` returning an
+    unclassified string) passes this assert trivially: nothing here is
+    independent of the partition itself. The vocabulary must be derived
+    from something the partition does NOT define -- the module's own
+    `OUTCOME_*` constants, and `watch.py`'s independently-maintained
+    display table -- and both cross-checked against the partition."""
+    import idp_regression.orchestration.check_versions as check_versions_module
+    from idp_regression.orchestration import watch as watch_module
     from idp_regression.orchestration.check_versions import (
         ALL_TICK_OUTCOMES,
         HALT_OUTCOMES,
@@ -949,6 +961,9 @@ def test_the_outcome_partition_is_total_and_disjoint() -> None:
         OUTCOME_INDETERMINATE,
         OUTCOME_NEW_VERSION_DETECTED,
         OUTCOME_NO_NEW_VERSIONS,
+        OUTCOME_REFUSED_UNINITIALISED,
+        OUTCOME_REFUSED_UNPARSEABLE_VERSION_SCHEME,
+        OUTCOME_SKIPPED_LOCKED,
         VERDICT_OUTCOMES,
     )
 
@@ -961,8 +976,31 @@ def test_the_outcome_partition_is_total_and_disjoint() -> None:
     assert not (VERDICT_OUTCOMES & NO_VERDICT_OUTCOMES)
     assert not (VERDICT_OUTCOMES & HALT_OUTCOMES)
     assert not (NO_VERDICT_OUTCOMES & HALT_OUTCOMES)
-    # Total: every outcome check_once can return is classified somewhere.
     assert VERDICT_OUTCOMES | NO_VERDICT_OUTCOMES | HALT_OUTCOMES == ALL_TICK_OUTCOMES
+
+    # Independent derivation 1: every `OUTCOME_*` module attribute, minus
+    # the three that are never a `TickResult.outcome` (raised as
+    # `CheckVersionsRefusedError`, or the CLI's own locked-tick skip). A
+    # new `OUTCOME_*` constant added and used in a new branch WITHOUT
+    # being added to one of the three sets fails here even if it is
+    # never referenced by `ALL_TICK_OUTCOMES`'s own definition.
+    every_outcome_constant = {
+        value
+        for name, value in vars(check_versions_module).items()
+        if name.startswith("OUTCOME_") and isinstance(value, str)
+    }
+    never_a_tick_result_outcome = {
+        OUTCOME_REFUSED_UNINITIALISED,
+        OUTCOME_REFUSED_UNPARSEABLE_VERSION_SCHEME,
+        OUTCOME_SKIPPED_LOCKED,
+    }
+    assert every_outcome_constant - never_a_tick_result_outcome == ALL_TICK_OUTCOMES
+
+    # Independent derivation 2: `watch.py`'s own display table, which a
+    # human maintains separately for the console -- if it and the
+    # partition ever disagree, one of the two was updated and the other
+    # was not.
+    assert set(watch_module._OUTCOME_PHRASES) - {OUTCOME_SKIPPED_LOCKED} == ALL_TICK_OUTCOMES
 
 
 def test_a_ceiling_reached_tick_still_carrying_unknowns_does_not_reset_the_streak_to_verdict() -> (
