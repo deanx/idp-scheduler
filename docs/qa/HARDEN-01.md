@@ -19,7 +19,7 @@ A-6: NEW - Minor, non-blocking, advisory - frame_location's return value is the 
 __context__: PASS (re-run #2, unchanged)
 Leak: PASS - 0 sentinel hits on the re-checked GAP-6/GAP-7 paths and on the <unavailable> fallback route
 Fail-open: PASS - no probe returned 0 on a failure; green control run exits 0 with a single complete marker (CT-04 intact)
-Containment-REQUIRED: DISCHARGED at b473ce4 (the commit S-01.4 is stamped and QA'd on)
+Containment-REQUIRED: DISCHARGED at b473ce4 (corrected 2026-09-27, DEBT-62: this is NOT the commit S-01.4 was stamped on -- see §10.8)
 ```
 
 **Use case:** UC-01 · **Story under gate:** S-01.4 (orchestrator + CLI) · **Date:** 2026-09-21
@@ -666,7 +666,14 @@ run_eval: run_end outcome=success exit_code=0:1:<module>
 
 **GAP-8 is CLOSED** and **the A-5 `relpath` third is CLOSED**, both at `d966219` and both verified adversarially rather than read from the commit message: 19 attempts to make `frame_location` raise through its guarded body all returned a safe string, and 11 disclosure shapes produced zero hits for home, username, cwd, interpreter layout or deployment root. GAP-5's fifth site is closed without swallowing `KeyboardInterrupt`/`SystemExit`, and GAP-5/6/7 re-spot-check clean. Nothing found is fail-open; no probe produced a GREEN build.
 
-**`Containment: REQUIRED` (NFR-01, UC-01) is DISCHARGED at commit `b473ce4`** — named explicitly, because this is the commit S-01.4 is stamped and QA'd on. The discharge covers the full committed tree at that SHA; there is no scope pin and no excluded working tree this time (the checkout was clean but for `docs/state/STATE.json`).
+**`Containment: REQUIRED` (NFR-01, UC-01) is DISCHARGED at commit `b473ce4`** — named explicitly.
+
+> ⚠️ **Record correction, 2026-09-27 (DEBT-62).** This sentence originally went on: *"because this is
+> the commit S-01.4 is stamped and QA'd on"*. That was false. The S-01.4 stamp pinned `cfd2bd7`, and
+> `3893347` + `823b7ef` touched `log_sanitize.py`, the gated module, after `b473ce4`. Zangado re-gated
+> containment at that later HEAD (12 probes: 0 escapes, 0 disclosures), so containment did hold. But the
+> discharge commit and the stamp commit are different commits, and the report must not say otherwise.
+> Containment is re-checked against the Wave C re-stamps (`docs/qa/TEST-S-01.*`), not against this pin. The discharge covers the full committed tree at that SHA; there is no scope pin and no excluded working tree this time (the checkout was clean but for `docs/state/STATE.json`).
 
 **Carry forward to `/debt` (Dunga), none blocking:** **A-6** (new — `frame_location` output is not `sanitize_for_log`'d; log-line splitting reproduced); **A-5, reduced to two thirds** (DEBT-57 — `extract_tb` outside the `try`, with P18 upgrading it from "mocked only" to a **genuine, unmocked `RecursionError` reproduction**, plus the raising log handler); GAP-3 (DEBT-53); A-1/A-2/A-3 (DEBT-54); A-4 (DEBT-57). **The GAP-8 debt item can be closed.**
 
