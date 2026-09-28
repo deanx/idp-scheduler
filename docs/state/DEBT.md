@@ -978,3 +978,47 @@ Also lagging: **DEBT-48's FO-7 row** says "Third leg now confirmed open … CARD
 **Impact:** golden-hash verification silently fails for dataset names with special characters — INV-09(e) 409s (fail-closed), but the error message says "hash changed" rather than "malformed request". No silent green build; the failure mode is a noisy refusal.
 
 **Interest:** flat until a dataset name with `&`/`#`/`?` is used in practice.
+
+---
+
+## DEBT-142 — `POST /reviews/{id}/replace` is not actually all-or-nothing on the platform-write side
+
+**Filed:** 2026-09-28  **Severity:** Moderate  **Status:** ~~Closed 2026-09-28~~ — option (c) implemented: `REPLACE_FAILED` state forces session non-approvable on mid-batch write failure; `/complete` refuses that state; successful `/replace` restores to DRAFTED. 2101 passed, mypy/ruff clean. (NFR-02 `Containment: REQUIRED`; `/harden` verdict was ❌ GAPS on this finding — see `docs/qa/HARDEN-02.md` Probe 4)
+
+**What.** `provision_golden_dataset.py`'s existing all-or-nothing guarantee validates every entry before any write — but `POST /reviews/{id}/replace` only reuses that *validation* step. Its own write loop has no staging or rollback: if `upsert_platform_item` fails partway through a batch (probed: failure on the 3rd of 5 entries), the entries written before the failure stay written. The platform ends up holding a half-replaced dataset while the operation reports failure and the ADR-0008/S-02.2-DoD claim — "a failed replace leaves the drafted set intact" — is false for this path.
+
+**Why it matters.** For a `reviewed` session, INV-09(e) still catches it downstream (the mutated dataset's hash won't match `approved_golden_hash`, so verify-start 409s — no silently-wrong GREEN). For a `drafted` session, there is no such backstop: the curator is told the replace failed and reasonably believes the drafted set is untouched, but it isn't — a subsequent `/complete` can approve the half-replaced, part-old/part-new golden without anyone knowing it's a mongrel.
+
+**Fix:** stage the replace (write to a temp/shadow location and swap) or capture prior item state and compensate on failure, so a partial platform-write failure either fully applies or fully reverts. At minimum, force the session to a non-approvable/re-draft-required state on partial failure and correct the docstring/DoD claim to match reality until the real fix lands.
+
+**Interest:** grows with the corpus size a replace targets — a larger golden.json replace has a wider partial-failure window.
+
+---
+
+## DEBT-143 — `POST /reviews/{id}/complete` accepts an empty golden set, producing a vacuous INV-09(e) match
+
+**Filed:** 2026-09-28  **Severity:** Low  **Status:** ~~Closed 2026-09-28~~ — `fetch_golden_hash` now returns `None` for zero items (maps "empty" to "unreachable" for INV-09(e)); existing `None → 409` guard at `/complete` already handles it. 2101 passed, mypy/ruff clean. (NFR-02 `Containment: REQUIRED`; `/harden` verdict was ❌ GAPS on this finding — see `docs/qa/HARDEN-02.md` Probe 1c)
+
+**What.** `approved_golden_hash` is `sha256(json.dumps(sorted(items)))`. Over zero platform items this is a fixed constant, not `None` — so INV-09(e)'s `current_hash is not None and approved_golden_hash is not None and current_hash == approved_golden_hash` check is satisfied vacuously whenever the dataset is empty at both review-complete and verify-start. A draft/pin stage that silently wrote zero platform items (a crash or silent platform-write failure upstream, outside this story) would produce an empty dataset that sails through the swap-guard that INV-09(e) exists to enforce.
+
+**Why it is not worse than Low:** the *deletion-to-empty* case (non-empty at review-complete, emptied before verify-start) is still caught — the empty-set hash differs from the non-empty one, so it 409s as `stale`. Only the *empty-at-both-times* case is vacuous, and it requires the upstream draft stage to have already failed silently — a precondition this story doesn't control.
+
+**Fix:** `/reviews/{id}/complete` should refuse `items == []` the same way it already refuses `fetch_golden_hash() is None`, so "nothing was drafted" can never be recorded as an approved golden.
+
+**Interest:** flat — only reachable when the upstream draft stage has already failed in a way nothing else catches.
+
+---
+
+## DEBT-144 — `fetch_golden_hash` only catches `OSError`; other failures 500 instead of 409
+
+**Filed:** 2026-09-28  **Severity:** Low (hardening nit)  **Status:** Open
+
+Found during `/harden` (Probe 1a2, `docs/qa/HARDEN-02.md`). A `fetch_golden_hash` failure that isn't an `OSError` (a JSON parse error, `AttributeError` from a malformed platform response) propagates uncaught from `/reviews/{id}/complete` as a 500, instead of the clean 409 the endpoint gives for the `None`-return case. Containment-safe (no bad hash is ever persisted; state stays `drafted`) but ungraceful for an operator. Fix: widen the except clause or add a narrow catch around the hash-fetch call specifically.
+
+---
+
+## DEBT-145 — `ReviewSession.from_dict` does not type-check optional fields on load
+
+**Filed:** 2026-09-28  **Severity:** Low (defense-in-depth, not currently exploitable)  **Status:** Open
+
+Found during `/harden` (Probe 2, `docs/qa/HARDEN-02.md`). Required string fields are validated on load (a wrong type raises `ReviewSessionCorruptError`), but optional fields (`approved_golden_hash`, `stage2_job_id`) are not — a hand-corrupted file with `approved_golden_hash: 99999` (an int) loads without error. Confirmed not exploitable: `current_hash` is always a sha256 hex string, so an int can never equal it, and the mismatch still correctly 409s. Recommend asserting `str | None` on these fields for defense-in-depth, not because a live exploit exists.

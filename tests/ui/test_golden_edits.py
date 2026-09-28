@@ -1090,3 +1090,223 @@ class TestDocumentIdMismatch:
         assert response.status_code == 422, (
             "a body document_id that disagrees with the URL parameter must be rejected"
         )
+
+
+# ---------------------------------------------------------------------------
+# DEBT-142 — mid-batch write failure forces REPLACE_FAILED; /complete blocked
+# ---------------------------------------------------------------------------
+
+
+class TestReplaceMidBatchFailure:
+    """DEBT-142 fix: a mid-batch upsert failure forces session to REPLACE_FAILED.
+
+    Probe: 5-entry batch, upsert fails on the 3rd entry (same technique Branca used).
+    Asserts:
+    - The endpoint returns 502.
+    - The session state is 'replace_failed' (not 'drafted').
+    - approved_golden_hash is cleared.
+    - POST /reviews/{id}/complete returns 409 when state is replace_failed (not approvable).
+    - A successful /replace from replace_failed state transitions back to drafted.
+    """
+
+    _FIVE_ENTRY_GOLDEN: dict[str, Any] = {
+        "E-001": {
+            "document_id": "inv-001.pdf",
+            "fields": {"total": {"value": "100.00", "type": "number"}},
+        },
+        "E-002": {
+            "document_id": "inv-002.pdf",
+            "fields": {"total": {"value": "200.00", "type": "number"}},
+        },
+        "E-003": {
+            "document_id": "inv-003.pdf",
+            "fields": {"total": {"value": "300.00", "type": "number"}},
+        },
+        "E-004": {
+            "document_id": "inv-004.pdf",
+            "fields": {"total": {"value": "400.00", "type": "number"}},
+        },
+        "E-005": {
+            "document_id": "inv-005.pdf",
+            "fields": {"total": {"value": "500.00", "type": "number"}},
+        },
+    }
+
+    def _make_fail_on_nth(self, n: int) -> Any:
+        """Return a upsert stub that succeeds for the first n-1 calls, fails on call n."""
+        call_count: list[int] = [0]
+
+        def _stub(dataset: str, payload: dict[str, Any], workspace_path: Any) -> str | None:
+            call_count[0] += 1
+            if call_count[0] == n:
+                return f"HTTP 503 (simulated failure on call {n})"
+            return None
+
+        return _stub
+
+    def test_mid_batch_failure_returns_502(
+        self, client: TestClient, ws: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A upsert failure mid-batch must yield a 502 response."""
+        session = _make_session(ws, state=ReviewSessionState.DRAFTED)
+        monkeypatch.setattr(
+            "idp_regression.ui.api.upsert_platform_item",
+            self._make_fail_on_nth(3),
+        )
+        response = client.post(
+            f"/api/reviews/{session.session_id}/replace",
+            json={"entries": self._FIVE_ENTRY_GOLDEN},
+        )
+        assert response.status_code == 502
+
+    def test_mid_batch_failure_forces_replace_failed_state(
+        self, client: TestClient, ws: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEBT-142: session must be in 'replace_failed' state after a mid-batch write failure.
+
+        The curator sees a 502 AND the session state changes — so /complete is blocked
+        until the golden is fully repaired, preventing approval of a partial (mongrel) golden.
+        """
+        session = _make_session(ws, state=ReviewSessionState.DRAFTED)
+        monkeypatch.setattr(
+            "idp_regression.ui.api.upsert_platform_item",
+            self._make_fail_on_nth(3),
+        )
+        client.post(
+            f"/api/reviews/{session.session_id}/replace",
+            json={"entries": self._FIVE_ENTRY_GOLDEN},
+        )
+        reloaded = load_session(session.session_id, ws)
+        assert reloaded.state == ReviewSessionState.REPLACE_FAILED, (
+            "a mid-batch write failure must force the session to REPLACE_FAILED state "
+            "(not leave it in DRAFTED — that would let /complete approve a partial golden)"
+        )
+        assert reloaded.approved_golden_hash is None, (
+            "approved_golden_hash must be cleared when a replace fails mid-batch"
+        )
+
+    def test_complete_refuses_replace_failed_session(
+        self, client: TestClient, ws: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEBT-142: /complete must return 409 when the session is in REPLACE_FAILED state.
+
+        A partial golden must not be approvable — doing so would let verify-candidate/start
+        run INV-09(e) against a mongrel golden set and produce a silently-wrong result.
+        """
+        # Simulate a session already in REPLACE_FAILED state (e.g. from a previous run)
+        session = _make_session(ws, state=ReviewSessionState.REPLACE_FAILED)
+        monkeypatch.setattr(
+            "idp_regression.ui.api.fetch_golden_hash",
+            lambda dataset, workspace_path: "some-hash",
+        )
+        response = client.post(f"/api/reviews/{session.session_id}/complete")
+        assert response.status_code == 409, (
+            "/complete must return 409 for a REPLACE_FAILED session — "
+            "a partial golden must never be approved"
+        )
+        # Session state must not have changed
+        reloaded = load_session(session.session_id, ws)
+        assert reloaded.state == ReviewSessionState.REPLACE_FAILED
+
+    def test_successful_replace_from_replace_failed_transitions_to_drafted(
+        self, client: TestClient, ws: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A successful /replace on a REPLACE_FAILED session transitions back to DRAFTED.
+
+        This allows a curator to repair the golden after a partial failure without
+        starting a fresh session.
+        """
+        session = _make_session(ws, state=ReviewSessionState.REPLACE_FAILED)
+        monkeypatch.setattr(
+            "idp_regression.ui.api.upsert_platform_item",
+            lambda dataset, payload, workspace_path: None,
+        )
+        response = client.post(
+            f"/api/reviews/{session.session_id}/replace",
+            json={"entries": _VALID_GOLDEN_FILE},
+        )
+        assert response.status_code == 200
+        reloaded = load_session(session.session_id, ws)
+        assert reloaded.state == ReviewSessionState.DRAFTED, (
+            "a successful /replace from REPLACE_FAILED must transition back to DRAFTED "
+            "so the session is approvable again"
+        )
+
+
+# ---------------------------------------------------------------------------
+# DEBT-143 — empty platform dataset causes /complete to refuse (409)
+# ---------------------------------------------------------------------------
+
+
+class TestCompleteRefusesEmptyDataset:
+    """DEBT-143 fix: /complete must refuse when the platform dataset is empty.
+
+    sha256([]) is a fixed constant — an empty dataset at both /complete and
+    verify-candidate/start would satisfy INV-09(e) vacuously.  fetch_golden_hash
+    now returns None for an empty item list, so the existing None → 409 guard
+    handles it identically to an unreachable platform.
+    """
+
+    def test_complete_refuses_when_dataset_is_empty(
+        self, client: TestClient, ws: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """DEBT-143: /complete must return 409 when fetch_golden_hash returns None for empty set.
+
+        This is the same 409 it returns for an unreachable platform, exercised via the
+        existing None-return path (fetch_golden_hash now returns None for items == []).
+        """
+        session = _make_session(ws, state=ReviewSessionState.DRAFTED)
+        # Simulate fetch_golden_hash returning None (as it now does for an empty dataset)
+        monkeypatch.setattr(
+            "idp_regression.ui.api.fetch_golden_hash",
+            lambda dataset, workspace_path: None,
+        )
+        response = client.post(f"/api/reviews/{session.session_id}/complete")
+        assert response.status_code == 409, (
+            "/complete must refuse (409) when fetch_golden_hash returns None — "
+            "this covers both 'platform unreachable' and 'empty dataset' (DEBT-143)"
+        )
+        # Session state must remain DRAFTED (not transition to REVIEWED)
+        reloaded = load_session(session.session_id, ws)
+        assert reloaded.state == ReviewSessionState.DRAFTED
+        assert reloaded.approved_golden_hash is None
+
+    def test_fetch_golden_hash_returns_none_for_empty_items(
+        self, ws: Path
+    ) -> None:
+        """fetch_golden_hash returns None when the platform returns zero items (DEBT-143).
+
+        Tested at the unit level by monkeypatching the HTTP response inline via
+        monkeypatching insights_from_env to return a fake client.
+        """
+        # Unit-test the fixed behavior: an empty item list → None, not a fixed hash constant.
+        # We test this indirectly by ensuring the existing None-guard catches it.
+        # The actual fetch_golden_hash unit test uses a fake insights object.
+        import hashlib
+
+        # Verify the PREVIOUS (unfixed) behavior produced a non-None constant.
+        # If items == [], the old code would have computed: sha256(json.dumps([]))
+        empty_canonical = json.dumps([], sort_keys=True, separators=(",", ":"))
+        empty_hash = hashlib.sha256(empty_canonical.encode()).hexdigest()
+        # Confirm this is a fixed constant (not None) — this was the bug.
+        assert empty_hash is not None
+        assert len(empty_hash) == 64
+        # The fix: fetch_golden_hash now returns None for empty items.
+        # We verify this by patching insights_from_env and checking the function's output.
+        from unittest.mock import MagicMock, patch
+
+        fake_body: dict[str, Any] = {"data": []}  # empty items
+        fake_http = MagicMock()
+        fake_http.request.return_value = (200, fake_body)
+        fake_insights = MagicMock()
+        fake_insights._http = fake_http
+
+        with patch("idp_regression.ui.api.insights_from_env", return_value=fake_insights):
+            from idp_regression.ui.api import fetch_golden_hash
+            result = fetch_golden_hash("test-dataset", ws)
+
+        assert result is None, (
+            "fetch_golden_hash must return None for an empty platform dataset (DEBT-143 fix) — "
+            f"got {result!r} instead. An empty dataset must not produce a hash that satisfies "
+            "INV-09(e) vacuously."
+        )

@@ -57,6 +57,10 @@ class ReviewSessionState(str, Enum):  # noqa: UP042 — StrEnum is 3.11+, str+En
     VERIFYING = "verifying"  # stage 2 job is running
     VERIFIED = "verified"  # stage 2 job completed (pass or fail — gate decides)
     STALE = "stale"        # INV-09 refused stage 2 (golden changed under review)
+    REPLACE_FAILED = "replace_failed"  # POST /replace failed mid-batch; golden is partial —
+    # must NOT be approved via /complete until a new /replace or /edit fully repairs the set.
+    # DEBT-142: option (c) — a partial write that cannot be atomically rolled back forces
+    # the session into this state so the curator cannot silently approve a mongrel golden.
 
 
 @dataclass

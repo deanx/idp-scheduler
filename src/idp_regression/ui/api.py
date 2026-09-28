@@ -124,6 +124,14 @@ def fetch_golden_hash(dataset: str, workspace_path: Path) -> str | None:  # noqa
         return None
     data = body.get("data") if isinstance(body, dict) else None
     items = list(data) if isinstance(data, list) else []
+    # DEBT-143 fix: treat an empty item list the same as an unreachable platform.
+    # sha256([]) is a fixed constant, not None — so INV-09(e)'s hash-match check
+    # would be satisfied vacuously for an empty dataset at both review-complete and
+    # verify-start.  Returning None here lets the existing None → 409 guard at
+    # /complete refuse "nothing was drafted" the same way it refuses an unreachable
+    # platform, so the swap-guard cannot be satisfied by a silently-empty golden set.
+    if not items:
+        return None
     # Deterministic: sort by item id so insertion order does not affect the hash
     items_sorted = sorted(items, key=lambda i: str(i.get("id", "")))
     canonical = json.dumps(items_sorted, sort_keys=True, separators=(",", ":"))
@@ -209,7 +217,13 @@ def upsert_platform_item(
 
 
 #: Session states that allow golden edits; VERIFYING/VERIFIED/STALE are refused.
-_EDITABLE_STATES = (ReviewSessionState.DRAFTED, ReviewSessionState.REVIEWED)
+# REPLACE_FAILED is included so a curator can retry /replace or issue PATCH edits
+# to repair the partial golden before calling /complete again.
+_EDITABLE_STATES = (
+    ReviewSessionState.DRAFTED,
+    ReviewSessionState.REVIEWED,
+    ReviewSessionState.REPLACE_FAILED,
+)
 
 FRONTEND_DIST = Path(__file__).resolve().parents[3] / "frontend" / "dist"
 
@@ -945,13 +959,31 @@ def create_app(*, dev_cors: bool = False, scorer_dir: Path | None = None) -> Fas
         except ReviewSessionCorruptError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
 
+        # DEBT-142 fix: a session in REPLACE_FAILED state has a partial (mongrel) golden
+        # set — some entries were written, some were not.  /complete must never approve
+        # a partial golden, because a subsequent /complete would hash and record the
+        # partial set, and verify-candidate/start would then pass INV-09(e) vacuously
+        # (current_hash == approved_golden_hash — both computed over the same mongrel).
+        # Force the curator to repair the golden (via /replace or PATCH) before approving.
+        if session.state == ReviewSessionState.REPLACE_FAILED:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"session {session_id!r} is in state 'replace_failed': a previous "
+                    "whole-file replace failed mid-batch and the platform golden set is "
+                    "partially updated. Re-run POST /replace with the corrected file to "
+                    "fully repair the golden before completing the review — INV-09 clause (e)."
+                ),
+            )
+
         golden_hash = fetch_golden_hash(session.dataset, workspace.workspace_root())
-        # Fail-closed: a None hash means the platform is unreachable or not
-        # configured.  Persisting None would leave approved_golden_hash=None,
-        # and None == None is False in Python (so the verify-candidate/start
-        # mismatch check would pass vacuously when the platform is also
-        # unreachable at stage-2 time).  Refuse now rather than silently
-        # record an unverifiable approval — INV-09 clause (e).
+        # Fail-closed: a None hash means the platform is unreachable, not configured,
+        # OR the dataset is empty (DEBT-143 fix: fetch_golden_hash returns None for
+        # an empty item list so "nothing was drafted" cannot be recorded as an approval).
+        # Persisting None would leave approved_golden_hash=None, and None == None is False
+        # in Python (so the verify-candidate/start mismatch check would pass vacuously
+        # when the platform is also unreachable at stage-2 time).  Refuse now rather than
+        # silently record an unverifiable approval — INV-09 clause (e).
         if golden_hash is None:
             raise HTTPException(
                 status_code=409,
@@ -1102,10 +1134,17 @@ def create_app(*, dev_cors: bool = False, scorer_dir: Path | None = None) -> Fas
         Reuses provision_golden_dataset.py's existing schema validation logic —
         specifically the same underlying jsonschema + validate_golden_structure calls.
 
-        All-or-nothing: one invalid entry refuses the WHOLE batch with the invalid
-        entry's key named, and leaves the previously-drafted set completely intact
-        (no partial write). This is the same "one bad entry refuses the batch" rule
-        provision_golden_dataset.py enforces per the 2026-09-27 user decision (DEBT-92).
+        All-or-nothing on VALIDATION: one invalid entry refuses the WHOLE batch with
+        the invalid entry's key named, and no upsert is attempted.
+
+        DEBT-142 (option c): all-or-nothing on the WRITE side is NOT guaranteed by
+        staging or rollback — the platform has no transaction API.  Instead, if
+        upsert_platform_item fails partway through the batch, the session is forced
+        into REPLACE_FAILED state (non-approvable).  The curator sees a 502 AND the
+        session state changes, so /complete is blocked until the golden is fully
+        repaired via another /replace or a series of PATCH calls.  This is weaker
+        than true atomicity but stronger than leaving the session in DRAFTED (which
+        would let /complete silently approve a partial golden).
 
         Both endpoints spend ZERO IDP quota (platform writes only, no extraction).
         """
@@ -1153,6 +1192,9 @@ def create_app(*, dev_cors: bool = False, scorer_dir: Path | None = None) -> Fas
             )
 
         # All entries are valid; write them all to the platform.
+        # DEBT-142 fix (option c): if any upsert fails, force session to REPLACE_FAILED
+        # before raising — this prevents /complete from approving the partial golden.
+        # The platform has no staging or transaction API, so true rollback is not possible.
         for key, entry in sorted(entries.items()):
             document_id = entry.get("document_id", key)
             item_payload = build_item_payload(session.dataset, str(document_id), entry)
@@ -1160,9 +1202,25 @@ def create_app(*, dev_cors: bool = False, scorer_dir: Path | None = None) -> Fas
                 session.dataset, item_payload, workspace.workspace_root()
             )
             if upsert_err:
+                # Force session into REPLACE_FAILED: the golden set is now partial
+                # (some entries were written, some were not).  /complete is blocked
+                # in this state — the curator must re-run /replace or PATCH to repair.
+                session.state = ReviewSessionState.REPLACE_FAILED
+                session.approved_golden_hash = None  # any prior hash is now invalid
+                save_session(session, workspace.workspace_root())
+                _api_logger.warning(
+                    "golden_replace_partial_failure session_id=%s failed_key=%s "
+                    "state=replace_failed",
+                    session_id, key,
+                )
                 raise HTTPException(
                     status_code=502,
-                    detail=f"platform write failed for {key!r}: {upsert_err}",
+                    detail=(
+                        f"platform write failed for {key!r}: {upsert_err}. "
+                        "The golden set is now partially updated — the session has been "
+                        "marked 'replace_failed' to prevent approving an incomplete golden. "
+                        "Re-run POST /replace with the full corrected file to repair."
+                    ),
                 )
 
         # R2: Update provenance — only fields whose value actually changed vs the current
@@ -1186,8 +1244,11 @@ def create_app(*, dev_cors: bool = False, scorer_dir: Path | None = None) -> Fas
                 existing = list(session.edited_document_ids.get(doc_id, []))
                 session.edited_document_ids[doc_id] = sorted(set(existing) | set(changed))
 
-        # If the session was REVIEWED, revert to DRAFTED (platform items have changed).
-        if session.state == ReviewSessionState.REVIEWED:
+        # State transition on success:
+        # - REVIEWED → DRAFTED: platform items have changed, approved_golden_hash is stale.
+        # - REPLACE_FAILED → DRAFTED: the repair succeeded, session is approvable again.
+        # - DRAFTED stays DRAFTED.
+        if session.state in (ReviewSessionState.REVIEWED, ReviewSessionState.REPLACE_FAILED):
             session.state = ReviewSessionState.DRAFTED
             session.approved_golden_hash = None
 

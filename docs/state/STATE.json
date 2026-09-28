@@ -1,25 +1,25 @@
 {
   "schema": 1,
-  "generated": "2026-09-26T01:16:19+00:00",
+  "generated": "2026-09-28T20:34:55+00:00",
   "note": "Derived from on-disk artifacts. Local verification status, not the board column (which stays canonical). Never hand-edit — regenerated on Stop.",
   "summary": {
-    "total": 6,
+    "total": 9,
     "done_eligible": 0,
-    "in_qa": 3,
-    "in_progress": 1,
-    "planned": 2
+    "in_qa": 4,
+    "in_progress": 2,
+    "planned": 3
   },
   "registers": {
     "assumptions_high_open": 0,
     "regressions_pending": 3,
-    "debt_items": 35
+    "debt_items": 37
   },
   "stories": [
     {
       "id": "S-1.1",
       "uc": 1,
-      "status": "in-qa",
-      "stamp": "passed",
+      "status": "in-progress",
+      "stamp": "invalidated",
       "qa_report": true,
       "markers": {
         "containment": "required",
@@ -116,7 +116,58 @@
         "llm_evals": "n/a",
         "observability": "unmet"
       }
+    },
+    {
+      "id": "S-2.1",
+      "uc": 2,
+      "status": "in-qa",
+      "stamp": "passed",
+      "qa_report": false,
+      "markers": {
+        "containment": "required",
+        "llm_evals": "n/a",
+        "observability": "required"
+      },
+      "gates": {
+        "containment": "unmet",
+        "llm_evals": "n/a",
+        "observability": "unmet"
+      }
+    },
+    {
+      "id": "S-2.2",
+      "uc": 2,
+      "status": "in-qa",
+      "stamp": "passed",
+      "qa_report": false,
+      "markers": {
+        "containment": "required",
+        "llm_evals": "n/a",
+        "observability": "required"
+      },
+      "gates": {
+        "containment": "unmet",
+        "llm_evals": "n/a",
+        "observability": "unmet"
+      }
+    },
+    {
+      "id": "S-2.3",
+      "uc": 2,
+      "status": "planned",
+      "stamp": "none",
+      "qa_report": false,
+      "markers": {
+        "containment": "required",
+        "llm_evals": "n/a",
+        "observability": "required"
+      },
+      "gates": {
+        "containment": "unmet",
+        "llm_evals": "n/a",
+        "observability": "unmet"
+      }
     }
   ],
-  "next": "6 story(ies) not done-eligible; next: /qa on S-1.1 (in-qa)."
+  "next": "9 story(ies) not done-eligible; next: /qa on S-1.2 (in-qa)."
 }
