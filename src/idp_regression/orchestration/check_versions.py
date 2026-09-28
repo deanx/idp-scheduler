@@ -96,6 +96,54 @@ _ZERO_EXIT_OUTCOMES = frozenset(
     {OUTCOME_NO_NEW_VERSIONS, OUTCOME_SKIPPED_LOCKED, OUTCOME_INDETERMINATE}
 )
 
+# --- S-01.4 re-stamp #5 F-1 (fail-open #7): an explicit, TOTAL partition -----
+# of every outcome `check_once` can return, so a caller counting "did this
+# tick get an answer" derives it from membership in a declared set rather
+# than an equality check against ONE outcome constant. `watch.py`'s summary
+# used to count only `OUTCOME_INDETERMINATE` as "no verdict", so
+# `OUTCOME_CEILING_REACHED` (a tick whose own probing budget ran out before
+# it could resolve -- just as much "no answer" as an ambiguous one) was
+# silently folded into "healthy", exit 0, "no new versions found". The
+# fix is this partition, not a second special case: `NO_VERDICT_OUTCOMES`
+# is closed over BOTH outcomes that leave a tick without a verdict, and
+# `test_a_third_no_verdict_outcome_would_fail_the_totality_test` (in
+# `tests/orchestration/test_check_versions.py`) proves a FUTURE outcome
+# added here and left unclassified breaks a test rather than silently
+# joining "healthy".
+#
+# `OUTCOME_REFUSED_UNINITIALISED`, `OUTCOME_REFUSED_UNPARSEABLE_VERSION_SCHEME`
+# and `OUTCOME_SKIPPED_LOCKED` are deliberately absent from this partition:
+# none of them is ever a `TickResult.outcome` -- the first two are raised as
+# `CheckVersionsRefusedError` before `check_once` ever returns, and the third
+# is set by the CLI's own locked-tick skip, never by `check_once` itself.
+
+#: A tick that completed AND resolved to an actual answer about whether a
+#: new version exists.
+VERDICT_OUTCOMES: frozenset[str] = frozenset(
+    {OUTCOME_NO_NEW_VERSIONS, OUTCOME_NEW_VERSION_DETECTED}
+)
+
+#: A tick that completed but did NOT resolve to a verdict -- still
+#: ambiguous (unresolved candidates pending), or its own probing budget
+#: (`--max-probes-per-tick` / sweep truncation) ran out before it could
+#: resolve. Both read, honestly, as "we don't know yet", never as "no new
+#: versions" -- the exact distinction F-1 closes.
+NO_VERDICT_OUTCOMES: frozenset[str] = frozenset(
+    {OUTCOME_INDETERMINATE, OUTCOME_CEILING_REACHED}
+)
+
+#: A tick whose outcome means the watcher itself cannot usefully continue.
+#: Mirrors `watch.py`'s own `_HALT_OUTCOMES` -- kept as one shared
+#: definition (imported there) so the two can never drift apart.
+HALT_OUTCOMES: frozenset[str] = frozenset(
+    {OUTCOME_ANCHOR_VANISHED, OUTCOME_DISCRIMINATOR_INVALID, OUTCOME_DETECTOR_DEGRADED}
+)
+
+#: Every outcome `check_once` can return, for the totality test only --
+#: production code should classify via the three sets above, never
+#: enumerate this directly.
+ALL_TICK_OUTCOMES: frozenset[str] = VERDICT_OUTCOMES | NO_VERDICT_OUTCOMES | HALT_OUTCOMES
+
 
 class CheckVersionsRefusedError(Exception):
     """A fail-closed refusal decided before (or instead of) probing —

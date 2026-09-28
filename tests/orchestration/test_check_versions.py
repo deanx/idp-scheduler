@@ -929,3 +929,73 @@ def test_main_a_load_dotenv_failure_is_a_controlled_exit_not_a_traceback(
     )
 
     assert exit_code == 1
+
+
+# --- S-01.4 re-stamp #5 F-1: the outcome partition is total and disjoint --
+
+def test_the_outcome_partition_is_total_and_disjoint() -> None:
+    """A future outcome added to check_versions.py and left unclassified
+    must fail HERE, never join `NO_VERDICT_OUTCOMES` or `HALT_OUTCOMES`
+    silently -- the exact shape that let `OUTCOME_CEILING_REACHED` count
+    as 'healthy' in watch.py's summary until this re-stamp."""
+    from idp_regression.orchestration.check_versions import (
+        ALL_TICK_OUTCOMES,
+        HALT_OUTCOMES,
+        NO_VERDICT_OUTCOMES,
+        OUTCOME_ANCHOR_VANISHED,
+        OUTCOME_CEILING_REACHED,
+        OUTCOME_DETECTOR_DEGRADED,
+        OUTCOME_DISCRIMINATOR_INVALID,
+        OUTCOME_INDETERMINATE,
+        OUTCOME_NEW_VERSION_DETECTED,
+        OUTCOME_NO_NEW_VERSIONS,
+        VERDICT_OUTCOMES,
+    )
+
+    assert {OUTCOME_NO_NEW_VERSIONS, OUTCOME_NEW_VERSION_DETECTED} == VERDICT_OUTCOMES
+    assert {OUTCOME_INDETERMINATE, OUTCOME_CEILING_REACHED} == NO_VERDICT_OUTCOMES
+    assert {
+        OUTCOME_ANCHOR_VANISHED, OUTCOME_DISCRIMINATOR_INVALID, OUTCOME_DETECTOR_DEGRADED,
+    } == HALT_OUTCOMES
+    # Disjoint: no outcome may appear in more than one bucket.
+    assert not (VERDICT_OUTCOMES & NO_VERDICT_OUTCOMES)
+    assert not (VERDICT_OUTCOMES & HALT_OUTCOMES)
+    assert not (NO_VERDICT_OUTCOMES & HALT_OUTCOMES)
+    # Total: every outcome check_once can return is classified somewhere.
+    assert VERDICT_OUTCOMES | NO_VERDICT_OUTCOMES | HALT_OUTCOMES == ALL_TICK_OUTCOMES
+
+
+def test_a_ceiling_reached_tick_still_carrying_unknowns_does_not_reset_the_streak_to_verdict() -> (
+    None
+):
+    """The consecutive-indeterminate counter's own reset -- `else:
+    consecutive_indeterminate_ticks = 0` -- fires on ANY non-indeterminate
+    outcome, including `ceiling_reached`, even when that tick still has
+    unresolved candidates pending. Recorded as a standing gap (DEBT), not
+    fixed by this re-stamp: `ceiling_reached` deliberately does not
+    escalate to `detector_degraded` on its own (a budget constraint is
+    not evidence the detector is broken), so a genuinely persistent
+    ceiling_reached run never halts via THIS counter. What this re-stamp
+    fixes is that watch.py's SUMMARY no longer calls that run 'healthy'
+    -- this test pins the state transition so a future change to the
+    escalation logic is deliberate, not accidental."""
+    probe = FakeProbe(_controls_ok("1.0.0"), default=ProbeResult.UNKNOWN)
+    state = TickState(consecutive_indeterminate_ticks=5)
+    result = check_once(
+        probe=probe,
+        org_id="org1",
+        action_id="12345678-1234-1234-1234-123456789012",
+        dataset_name="ds1",
+        state=state,
+        known_version="1.0.0",
+        max_probes_per_tick=2,  # small enough to hit the ceiling with unknowns pending
+        patch_lookahead=5,
+        minor_lookahead=5,
+        major_lookahead=2,
+        sweep_every_n_ticks=0,
+        max_probes_per_sweep=0,
+        max_indeterminate_ticks=3,
+    )
+    assert result.outcome == OUTCOME_CEILING_REACHED
+    assert result.new_state.pending_unknowns  # unresolved candidates still pending
+    assert result.new_state.consecutive_indeterminate_ticks == 0

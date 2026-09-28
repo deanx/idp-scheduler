@@ -37,17 +37,22 @@ from idp_regression.orchestration.watch import (
 
 class FakeProbe:
     """Same scripted double as tests/orchestration/test_check_versions.py
-    -- any version not in `responses` is ABSENT (a real vendor 404s an
-    un-probed version)."""
+    -- any version not in `responses` is ABSENT by default (a real vendor
+    404s an un-probed version); `default=ProbeResult.UNKNOWN` (added
+    S-01.4 re-stamp #5 F-1) scripts a persistently-ambiguous endpoint
+    instead, for the ceiling_reached/indeterminate repro."""
 
-    def __init__(self, responses: dict[str, ProbeResult]) -> None:
+    def __init__(
+        self, responses: dict[str, ProbeResult], default: ProbeResult = ProbeResult.ABSENT
+    ) -> None:
         self.responses = responses
+        self.default = default
         self.calls: list[str] = []
         self.last_status_code: int | None = 200
 
     def probe(self, org_id: str, action_id: str, version: str) -> ProbeResult:
         self.calls.append(version)
-        return self.responses.get(version, ProbeResult.ABSENT)
+        return self.responses.get(version, self.default)
 
 
 class RaisesOnceThenProbe:
@@ -283,6 +288,40 @@ def test_f4_ctrl_c_after_only_failed_ticks_below_the_ceiling_is_not_no_new_versi
     assert exit_code == 0
     assert "no new versions found" not in out
     assert "no answer -- 5 tick(s) never got an answer" in out
+
+
+def test_f1_ceiling_reached_ticks_are_no_verdict_too_not_just_indeterminate(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """S-01.4 re-stamp #5 F-1 (fail-open #7): re-stamp #4 counted only
+    `OUTCOME_INDETERMINATE` as 'no verdict', but `OUTCOME_CEILING_REACHED`
+    (a tick whose own probing budget ran out before it could resolve) is
+    JUST as much a non-answer and was silently folded into 'healthy' --
+    the same fail-open, one outcome over. Reproduced through the REAL
+    `check_once`, not a monkeypatched double, with a real Protocol probe
+    that answers UNKNOWN to every non-control candidate -- the exact
+    live repro (small `--max-probes-per-tick`, generous lookahead)."""
+    probe = FakeProbe(_controls_ok("1.0.0"), default=ProbeResult.UNKNOWN)
+    sleep_fn = _stop_after(40)
+
+    exit_code = run_watch_loop(
+        probe=probe,
+        sleep_fn=sleep_fn,
+        max_consecutive_tick_failures=100,
+        **_base_kwargs(
+            max_probes_per_tick=3,
+            patch_lookahead=5,
+            minor_lookahead=5,
+            major_lookahead=2,
+            max_indeterminate_ticks=1000,  # isolate the SUMMARY, not the escalation
+        ),
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "no new versions found." not in out
+    assert "no new versions found (" in out
+    assert "40 of 40 tick(s) got no answer)" in out
 
 
 def test_f5_a_majority_failure_rate_is_never_silently_hidden_by_one_success(

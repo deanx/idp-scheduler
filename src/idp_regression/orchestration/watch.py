@@ -53,6 +53,8 @@ from idp_regression.adapter.version_probe import (
     parse_semver,
 )
 from idp_regression.orchestration.check_versions import (
+    HALT_OUTCOMES,
+    NO_VERDICT_OUTCOMES,
     OUTCOME_ANCHOR_VANISHED,
     OUTCOME_CEILING_REACHED,
     OUTCOME_DETECTOR_DEGRADED,
@@ -95,9 +97,10 @@ logger = logging.getLogger("idp_regression.orchestration.watch")
 #: look like probing abuse in an access log.
 DEFAULT_INTERVAL_SECONDS = 300
 
-_HALT_OUTCOMES = frozenset(
-    {OUTCOME_ANCHOR_VANISHED, OUTCOME_DISCRIMINATOR_INVALID, OUTCOME_DETECTOR_DEGRADED}
-)
+# S-01.4 re-stamp #5 F-1: ONE shared definition with check_versions.py's
+# own partition, imported rather than duplicated, so the two can never
+# drift apart the way the indeterminate-only check just did.
+_HALT_OUTCOMES = HALT_OUTCOMES
 
 #: "Cheap one" (2026-09-23 re-review): a positive-control response of
 #: `ProbeResult.UNKNOWN` (a 429, a 5xx, a malformed response -- see
@@ -397,17 +400,24 @@ def run_watch_loop(
     detected_versions: list[str] = []
     healthy_ticks = 0
     failed_ticks = 0
-    # S-01.4 re-stamp #4 F-1 (fail-open #6): a completed tick whose OWN
-    # outcome is `OUTCOME_INDETERMINATE` got an answer -- the answer was
-    # just "still ambiguous" -- so it increments `healthy_ticks`, same as
-    # any other completed tick. `check_once`'s consecutive-indeterminate
-    # escalation only fires on an unbroken run, so an endpoint ambiguous
-    # 3 of every 4 ticks never trips it and every one of those ticks
-    # counted as unqualified "healthy". `indeterminate_ticks` is the
-    # cumulative (not consecutive) tally the summary needs to tell "no
-    # new versions found" from "we mostly couldn't tell" -- the same
-    # fix `failed_ticks` already got for the exception axis.
-    indeterminate_ticks = 0
+    # S-01.4 re-stamp #4 F-1 (fail-open #6), widened by re-stamp #5 F-1
+    # (fail-open #7): a completed tick whose OWN outcome is one of
+    # `NO_VERDICT_OUTCOMES` got an answer -- the answer was just "still
+    # ambiguous" (`indeterminate`) or "ran out of probing budget before
+    # it could resolve" (`ceiling_reached`) -- so it increments
+    # `healthy_ticks`, same as any other completed tick. Counting only
+    # `OUTCOME_INDETERMINATE` (re-stamp #4's fix) left `ceiling_reached`
+    # silently folded into "healthy" -- the SAME fail-open, one outcome
+    # over, closed by re-stamp #4's own fix creating exactly what R1
+    # warns about (closing the reported case, not the invariant).
+    # `no_verdict_ticks` is the cumulative (not consecutive) tally the
+    # summary needs to tell "no new versions found" from "we mostly
+    # couldn't tell", derived from the SAME partition
+    # `test_the_outcome_partition_is_total_and_disjoint` holds
+    # `check_versions.py` to, so a future outcome added there and left
+    # unclassified fails that test rather than silently landing here as
+    # "healthy" a third time.
+    no_verdict_ticks = 0
     consecutive_tick_failures = 0
     started_at = clock()
     exit_code = 0
@@ -512,8 +522,8 @@ def run_watch_loop(
 
             consecutive_tick_failures = 0
             healthy_ticks += 1
-            if result.outcome == OUTCOME_INDETERMINATE:
-                indeterminate_ticks += 1
+            if result.outcome in NO_VERDICT_OUTCOMES:
+                no_verdict_ticks += 1
             state = result.new_state
             print(_human_tick_line(iteration, result.event, clock=clock))
             _emit_structured_event(result.event, json_events=json_events)
@@ -576,11 +586,13 @@ def run_watch_loop(
         # == 0`), and a run that never completed a single tick (every
         # attempted tick failed transiently, or Ctrl-C landed before the
         # first tick) is "no answer", never "no new versions found".
-        # F-1: "no answer" for the summary's qualifier means EITHER a
-        # tick that raised, or a tick that completed but resolved to no
-        # verdict at all (indeterminate) -- both axes are folded into
-        # one cumulative tally so neither can hide behind the other.
-        unanswered_ticks = failed_ticks + indeterminate_ticks
+        # F-1 (re-stamp #4, widened by re-stamp #5): "no answer" for the
+        # summary's qualifier means EITHER a tick that raised, or a tick
+        # that completed but resolved to no verdict at all
+        # (`NO_VERDICT_OUTCOMES` -- indeterminate OR ceiling_reached) --
+        # every one of those axes is folded into one cumulative tally so
+        # none of them can hide behind another.
+        unanswered_ticks = failed_ticks + no_verdict_ticks
         if healthy_ticks > 0:
             found = "no new versions found"
             if unanswered_ticks > 0:

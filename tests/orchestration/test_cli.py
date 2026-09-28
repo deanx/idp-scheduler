@@ -32,12 +32,23 @@ def _fail_if_called(*args: object, **kwargs: object) -> int:
 def test_missing_version_exits_nonzero_without_calling_run_eval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """S-01.4 re-stamp #5 F-3 (MB5): the fixture also omitted `--dataset`,
+    so a mutated `--version` `required=False` still failed via the
+    MISSING `--dataset` (exit 2) instead -- indistinguishable from
+    `--version`'s own required=True firing. Exact-code-2 plus a complete
+    argv, matching the `--action`/`--dataset` siblings' own exact-2
+    rationale above."""
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
     monkeypatch.setattr(cli, "run_eval", _fail_if_called)
 
-    exit_code = cli.main(["--org", "org-test-0000", "--action", _VALID_UUID, "--run", "nightly"])
+    exit_code = cli.main(
+        [
+            "--org", "org-test-0000", "--action", _VALID_UUID, "--run", "nightly",
+            "--dataset", "idp-regression-golden",
+        ]
+    )
 
-    assert exit_code != 0
+    assert exit_code == 2
 
 
 def test_missing_action_exits_via_the_argparse_required_path_not_calling_run_eval(
@@ -640,26 +651,35 @@ def test_blank_dataset_flag_value_is_rejected_including_whitespace_only(
 
 
 def test_version_one_char_past_the_64_char_cap_is_rejected(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """S-01.4 re-stamp #5 F-3 (MB4): the fixture omitted `--dataset`, so
+    argparse's own `required=True` failed FIRST (exit 2) and the version-
+    length guard was never reached -- widening the cap regex survived
+    every run. Both the specific message and a complete argv are
+    required, same class as re-stamp #4's three fixes above."""
     monkeypatch.setattr(cli, "load_dotenv", lambda: None)
     monkeypatch.setattr(cli, "run_eval", _fail_if_called)
     version = "a" * 65
 
-    exit_code = cli.main(
-        [
-            "--org",
-            "org-test-0000",
-            "--action",
-            _VALID_UUID,
-            "--version",
-            version,
-            "--run",
-            "nightly",
-        ]
-    )
+    with caplog.at_level(logging.ERROR):
+        exit_code = cli.main(
+            [
+                "--org",
+                "org-test-0000",
+                "--action",
+                _VALID_UUID,
+                "--version",
+                version,
+                "--run",
+                "nightly",
+                "--dataset",
+                "idp-regression-golden",
+            ]
+        )
 
     assert exit_code != 0
+    assert "run_eval: --version has an invalid format" in caplog.text
 
 
 # --- INV-02/N5, DEBT-44 gate fifth instance finding (b) -----------------
