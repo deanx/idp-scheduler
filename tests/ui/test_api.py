@@ -134,6 +134,9 @@ class TestQuotaBoundary:
             ("/api/reviews", ("GET",)),
             ("/api/reviews/{session_id}", ("GET",)),
             ("/api/reviews/{session_id}/complete", ("POST",)),
+            # S-02.2 (2026-09-28) — golden edit and whole-file replace
+            ("/api/reviews/{session_id}/items/{document_id}", ("PATCH",)),
+            ("/api/reviews/{session_id}/replace", ("POST",)),
         }
         assert paths == allowed, (
             "a new route appeared. Confirm whether it spends IDP quota or writes to the "

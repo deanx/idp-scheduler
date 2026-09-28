@@ -52,6 +52,7 @@ def make_session(workspace: Path) -> ReviewSession:
         stage2_job_id=None,
         state=ReviewSessionState.DRAFTED,
         created_at="2026-09-28T00:00:00Z",
+        edited_document_ids={},
     )
 
 

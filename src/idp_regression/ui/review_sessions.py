@@ -76,6 +76,7 @@ class ReviewSession:
     stage2_job_id: str | None         # None until stage 2 starts
     state: ReviewSessionState
     created_at: str                    # ISO 8601
+    edited_document_ids: dict[str, list[str]]  # T-02.2.3: document_id → list of edited field names
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -92,6 +93,7 @@ class ReviewSession:
             "stage2_job_id": self.stage2_job_id,
             "state": self.state.value,
             "created_at": self.created_at,
+            "edited_document_ids": self.edited_document_ids,
         }
 
     @classmethod
@@ -115,6 +117,17 @@ class ReviewSession:
                 f"session record has invalid state: {data.get('state')!r}"
             ) from exc
 
+        # edited_document_ids: optional for backward compatibility with S-02.1 sessions.
+        # Defaults to {} if the field is absent (sessions written before T-02.2.3 land here).
+        raw_provenance = data.get("edited_document_ids", {})
+        if not isinstance(raw_provenance, dict):
+            raw_provenance = {}
+        edited_document_ids: dict[str, list[str]] = {
+            k: list(v) if isinstance(v, list) else []
+            for k, v in raw_provenance.items()
+            if isinstance(k, str)
+        }
+
         return cls(
             session_id=data["session_id"],
             dataset=data["dataset"],
@@ -129,6 +142,7 @@ class ReviewSession:
             stage2_job_id=data.get("stage2_job_id"),
             state=state,
             created_at=data["created_at"],
+            edited_document_ids=edited_document_ids,
         )
 
 

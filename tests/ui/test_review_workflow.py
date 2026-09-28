@@ -90,6 +90,7 @@ def _make_review_session(
         stage2_job_id=stage2_job_id,
         state=state,
         created_at="2026-09-28T00:00:00Z",
+        edited_document_ids={},
     )
     save_session(session, ws)
     return session
@@ -752,6 +753,7 @@ class TestGetReviews:
             stage2_job_id=None,
             state=ReviewSessionState.DRAFTED,
             created_at="2026-09-28T00:00:00Z",
+            edited_document_ids={},
         )
         save_session(session, ws)
 

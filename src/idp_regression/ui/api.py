@@ -73,6 +73,7 @@ from idp_regression.orchestration.version_discovery import (
 from idp_regression.platform.errors import TransportError as PlatformTransportError
 from idp_regression.platform.insights import configuration_hint, insights_from_env
 from idp_regression.ui import jobs, preflight, reader, uploads, workspace
+from idp_regression.ui.golden_edits import build_item_payload, validate_entry
 from idp_regression.ui.review_sessions import (
     ReviewSession,
     ReviewSessionCorruptError,
@@ -127,6 +128,44 @@ def fetch_golden_hash(dataset: str, workspace_path: Path) -> str | None:  # noqa
     items_sorted = sorted(items, key=lambda i: str(i.get("id", "")))
     canonical = json.dumps(items_sorted, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()
+
+def upsert_platform_item(
+    dataset: str,  # noqa: ARG001 — reserved for a future path that keys on dataset+item
+    item_payload: dict[str, Any],
+    workspace_path: Path,  # noqa: ARG001 — reserved for a future local-cache path
+) -> str | None:
+    """Upsert one dataset item to the platform.
+
+    Returns None on success, or a short error string on failure.
+    Never echoes golden values in the return value — INV-02.
+
+    Module-level and injectable (monkeypatched in tests) so the edit/replace
+    endpoints can be tested without a live platform instance. Same pattern
+    as `fetch_golden_hash`.
+
+    Spends zero IDP quota — this is a platform dataset-item write, not an
+    extraction call.
+    """
+    insights = insights_from_env()
+    if insights is None:
+        return "platform not configured"
+    try:
+        # DEBT-141 applies here too: dataset names with &, #, ? etc. need
+        # percent-encoding on the READ path. On the WRITE path the dataset
+        # name is in the JSON body, so this particular debt does not apply.
+        status, _body = insights._http.request(
+            "POST", "/api/public/dataset-items", item_payload
+        )
+        if status >= 400:
+            # Never print body: the platform's dataset-item 400 can echo back golden values.
+            return f"HTTP {status}"
+        return None
+    except OSError as exc:
+        return f"transport: {type(exc).__name__}"
+
+
+#: Session states that allow golden edits; VERIFYING/VERIFIED/STALE are refused.
+_EDITABLE_STATES = (ReviewSessionState.DRAFTED, ReviewSessionState.REVIEWED)
 
 FRONTEND_DIST = Path(__file__).resolve().parents[3] / "frontend" / "dist"
 
@@ -813,6 +852,7 @@ def create_app(*, dev_cors: bool = False, scorer_dir: Path | None = None) -> Fas
             stage2_job_id=None,
             state=ReviewSessionState.DRAFTED,
             created_at=dt.datetime.now(dt.UTC).isoformat(),
+            edited_document_ids={},
         )
         save_session(session, workspace.workspace_root())
         _api_logger.info(
@@ -884,6 +924,188 @@ def create_app(*, dev_cors: bool = False, scorer_dir: Path | None = None) -> Fas
         _api_logger.info(
             "review_complete session_id=%s state=reviewed",
             session_id,
+        )
+        return session.to_dict()
+
+    # ---------------------------------------- golden edit / replace (T-02.2.1 / T-02.2.2)
+
+    @app.patch("/api/reviews/{session_id}/items/{document_id}")
+    def patch_review_item(
+        session_id: str,
+        document_id: str,
+        body: Annotated[dict[str, Any], Body()],
+    ) -> dict[str, Any]:
+        """Edit a single golden item for this review session (T-02.2.1).
+
+        Validates the edit against the committed golden schema BEFORE writing.
+        On success, upserts via the same deterministic-id path
+        provision_golden_dataset.py uses.
+        On schema failure, refuses (422) naming the specific invalid field —
+        no partial write (the item is left exactly as it was).
+
+        Only operates on sessions in DRAFTED or REVIEWED state.
+        A REVIEWED session is reverted to DRAFTED after the edit (the
+        platform items have changed, so the approved_golden_hash is stale and
+        the curator must re-call /complete to re-capture it).
+        """
+        try:
+            session = load_session(session_id, workspace.workspace_root())
+        except ReviewSessionNotFoundError:
+            raise HTTPException(
+                status_code=404, detail=f"no review session {session_id!r}"
+            ) from None
+        except ReviewSessionCorruptError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+        if session.state not in _EDITABLE_STATES:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"session {session_id!r} is in state {session.state.value!r}; "
+                    "golden edits are only allowed in 'drafted' or 'reviewed' state"
+                ),
+            )
+
+        # Normalise: if the body omits document_id, inject the URL parameter.
+        entry = dict(body)
+        entry.setdefault("document_id", document_id)
+
+        # Validate against the committed schema BEFORE any write.
+        error = validate_entry(entry)
+        if error:
+            raise HTTPException(
+                status_code=422,
+                detail=f"edit rejected for document {document_id!r}: {error}",
+            )
+
+        # Upsert to the platform via the deterministic-id path.
+        item_payload = build_item_payload(session.dataset, document_id, entry)
+        upsert_err = upsert_platform_item(
+            session.dataset, item_payload, workspace.workspace_root()
+        )
+        if upsert_err:
+            raise HTTPException(
+                status_code=502,
+                detail=f"platform write failed: {upsert_err}",
+            )
+
+        # Update provenance: track which fields were edited in this document.
+        edited_fields = list(entry.get("fields", {}).keys())
+        existing = list(session.edited_document_ids.get(document_id, []))
+        merged = sorted(set(existing) | set(edited_fields))
+        session.edited_document_ids[document_id] = merged
+
+        # If the session was REVIEWED, revert to DRAFTED: the platform items have
+        # changed, so approved_golden_hash is stale.  The curator must re-call
+        # /complete to re-approve the updated golden.
+        if session.state == ReviewSessionState.REVIEWED:
+            session.state = ReviewSessionState.DRAFTED
+            session.approved_golden_hash = None
+
+        save_session(session, workspace.workspace_root())
+
+        # INV-02: log session_id and document_id only — never field names or values.
+        _api_logger.info(
+            "golden_item_edited session_id=%s document_id=%s",
+            session_id,
+            document_id,
+        )
+        return session.to_dict()
+
+    @app.post("/api/reviews/{session_id}/replace")
+    def post_replace_golden(
+        session_id: str,
+        body: Annotated[dict[str, Any], Body()],
+    ) -> dict[str, Any]:
+        """Replace the entire drafted golden set with a curator-supplied file (T-02.2.2).
+
+        Accepts a dict of entries (the same format provision_golden_dataset.py uses).
+        Reuses provision_golden_dataset.py's existing schema validation logic —
+        specifically the same underlying jsonschema + validate_golden_structure calls.
+
+        All-or-nothing: one invalid entry refuses the WHOLE batch with the invalid
+        entry's key named, and leaves the previously-drafted set completely intact
+        (no partial write). This is the same "one bad entry refuses the batch" rule
+        provision_golden_dataset.py enforces per the 2026-09-27 user decision (DEBT-92).
+
+        Both endpoints spend ZERO IDP quota (platform writes only, no extraction).
+        """
+        try:
+            session = load_session(session_id, workspace.workspace_root())
+        except ReviewSessionNotFoundError:
+            raise HTTPException(
+                status_code=404, detail=f"no review session {session_id!r}"
+            ) from None
+        except ReviewSessionCorruptError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+
+        if session.state not in _EDITABLE_STATES:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"session {session_id!r} is in state {session.state.value!r}; "
+                    "golden replacement is only allowed in 'drafted' or 'reviewed' state"
+                ),
+            )
+
+        entries_raw = body.get("entries")
+        if not isinstance(entries_raw, dict) or not entries_raw:
+            raise HTTPException(
+                status_code=422,
+                detail="body must contain a non-empty 'entries' object",
+            )
+        entries: dict[str, Any] = entries_raw
+
+        # Validate ALL entries first — all-or-nothing (provision_golden_dataset.py rule).
+        invalid: list[tuple[str, str]] = []
+        for key, entry in sorted(entries.items()):
+            reason = validate_entry(entry)
+            if reason is not None:
+                invalid.append((key, reason))
+
+        if invalid:
+            key, reason = invalid[0]
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"{len(invalid)} invalid entr(ies); nothing provisioned. "
+                    f"First invalid entry: {key!r} — {reason}"
+                ),
+            )
+
+        # All entries are valid; write them all to the platform.
+        for key, entry in sorted(entries.items()):
+            document_id = entry.get("document_id", key)
+            item_payload = build_item_payload(session.dataset, str(document_id), entry)
+            upsert_err = upsert_platform_item(
+                session.dataset, item_payload, workspace.workspace_root()
+            )
+            if upsert_err:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"platform write failed for {key!r}: {upsert_err}",
+                )
+
+        # Update provenance: mark ALL document_ids in the replacement as edited.
+        for entry in entries.values():
+            doc_id = str(entry.get("document_id", ""))
+            if doc_id:
+                edited_fields = list(entry.get("fields", {}).keys())
+                existing = list(session.edited_document_ids.get(doc_id, []))
+                session.edited_document_ids[doc_id] = sorted(set(existing) | set(edited_fields))
+
+        # If the session was REVIEWED, revert to DRAFTED (platform items have changed).
+        if session.state == ReviewSessionState.REVIEWED:
+            session.state = ReviewSessionState.DRAFTED
+            session.approved_golden_hash = None
+
+        save_session(session, workspace.workspace_root())
+
+        # INV-02: log session_id and entry count only — never field names or values.
+        _api_logger.info(
+            "golden_set_replaced session_id=%s entry_count=%s",
+            session_id,
+            len(entries),
         )
         return session.to_dict()
 
