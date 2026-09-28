@@ -295,6 +295,37 @@ class TestCompleteReview:
             "a sensitive value (golden field or dataset name) appeared in api logs"
         )
 
+    def test_complete_refuses_when_golden_hash_uncomputable(
+        self, client: TestClient, ws: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """review-complete must refuse (409, not 200) when fetch_golden_hash returns None.
+
+        Persisting None would leave approved_golden_hash=None, and
+        None != None is False in Python — so the INV-09(e) check at
+        verify-candidate/start would pass vacuously when the platform is
+        also unreachable at stage-2 time: the exact fail-open this surface
+        exists to prevent.
+        """
+        session = _make_review_session(ws)
+        # Simulate platform unavailable
+        monkeypatch.setattr(
+            "idp_regression.ui.api.fetch_golden_hash",
+            lambda dataset, workspace: None,
+        )
+        response = client.post(f"/api/reviews/{session.session_id}/complete")
+        assert response.status_code == 409, (
+            f"review-complete must refuse (409) when the golden hash is uncomputable, "
+            f"got {response.status_code}: {response.json()}"
+        )
+        # Session must NOT have been transitioned to reviewed state
+        loaded = load_session(session.session_id, ws)
+        assert loaded.state == ReviewSessionState.DRAFTED, (
+            "session must remain in DRAFTED state when review-complete is refused"
+        )
+        assert loaded.approved_golden_hash is None, (
+            "approved_golden_hash must not be set when review-complete is refused"
+        )
+
 
 # ---------------------------------------------------------------------------
 # T-02.1.6 — POST /api/workflows/verify-candidate/{plan,start} (INV-09)
@@ -405,25 +436,31 @@ class TestVerifyCandidateINV09:
         detail = response.json().get("detail", "")
         assert "7" in detail or "approval" in detail.lower() or "extractions" in detail.lower()
 
-    def test_inv09d_cross_route_replay_refused(
+    def test_inv09d_subsumed_by_a_and_c(
         self, client: TestClient, ws: Path, docs_dir: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """INV-09(d): a stage-1 approval (from draft-golden/start) cannot be replayed
-        against verify-candidate/start — approval is bound to route+session_id."""
-        # Simulate: the draft route plans N=5, then the operator replays that
-        # approval against verify-candidate/start which plans M=5 (same count
-        # but different route — the route binding must catch this).
-        #
-        # The implementation must refuse cross-route replay. Because the routes
-        # are independent, this is tested by sending a verify-candidate/start
-        # request that carries a session_id-bound token from a draft approval.
-        # The simplest test: verify-candidate/start must always compute its OWN
-        # fresh plan and compare against that — a stale-session or wrong-route
-        # approval 409s regardless of whether the number matches.
-        #
-        # Here we send an "approval" from a session that is still in DRAFTED
-        # state (has not been reviewed yet), proving the route cannot be short-
-        # circuited by any approval number.
+        """INV-09(d): approval is bound to this route+session_id.
+
+        Implementation note — (d) is subsumed by (a) and (c) together:
+
+        * To replay a stage-1 approval (from draft-golden/start) against
+          verify-candidate/start, an attacker would need a session already in
+          REVIEWED state — which requires the curator to have explicitly called
+          POST /api/reviews/{session_id}/complete.  (a) enforces this: any
+          DRAFTED session is refused before quota is considered.
+
+        * (c) independently requires the approved_extractions to match a FRESH
+          plan computed at verify time, bound to THIS corpus+dataset — a count
+          carried over from a different context will drift if the corpus differs.
+
+        Together, these two checks mean: without a valid reviewed session AND a
+        matching fresh-plan count, no approval can proceed.  There is no separate
+        approval token; the session state machine IS the binding.
+
+        This test exercises the (a) gate: a DRAFTED session is refused regardless
+        of whether the approval count matches the fresh plan.  The comment above
+        explains why no additional route-binding enforcement is needed.
+        """
         drafted_session = _make_review_session(
             ws,
             session_id="cross-route-session",
@@ -439,7 +476,7 @@ class TestVerifyCandidateINV09:
                 "approved_extractions": 5,  # correct count, wrong state
             },
         )
-        # Must refuse because the session is not in REVIEWED state
+        # Must refuse because the session is not in REVIEWED state (INV-09 clause a)
         assert response.status_code == 409, response.json()
 
     def test_inv09e_adversarial_golden_swap_unit(
@@ -540,6 +577,74 @@ class TestVerifyCandidateINV09:
         )
         # Should succeed (not 409) — the hash matches
         assert response.status_code == 200, response.json()
+
+    def test_inv09e_refuses_when_current_hash_is_none(
+        self, client: TestClient, ws: Path, docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """INV-09(e) — fail-closed: verify-candidate/start refuses when the
+        live platform hash cannot be computed (platform unreachable at stage-2).
+
+        None != None is False in Python, so a naive equality check would PASS
+        when both hashes are None — this test pins the fail-closed fix.
+        """
+        session = _make_review_session(
+            ws,
+            state=ReviewSessionState.REVIEWED,
+            approved_golden_hash="hash-set-at-review-time",
+            document_dir=str(docs_dir),
+        )
+        # Platform is unreachable at verify time
+        monkeypatch.setattr(
+            "idp_regression.ui.api.fetch_golden_hash",
+            lambda dataset, workspace: None,
+        )
+        from idp_regression.ui import jobs, preflight
+        monkeypatch.setattr(jobs, "plan", lambda argv, **kw: (3, ["3 extractions"]))
+        monkeypatch.setattr(
+            preflight, "check", lambda: {"can_run_validation": True, "blockers": []}
+        )
+        response = client.post(
+            "/api/workflows/verify-candidate/start",
+            json={"session_id": session.session_id, "approved_extractions": 3},
+        )
+        assert response.status_code == 409, (
+            f"verify-candidate/start must 409 when current_hash is None, "
+            f"got {response.status_code}: {response.json()}"
+        )
+
+    def test_inv09e_refuses_when_approved_golden_hash_is_none(
+        self, client: TestClient, ws: Path, docs_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """INV-09(e) — fail-closed: verify-candidate/start refuses when
+        approved_golden_hash is None (session was somehow persisted without
+        a real approval — second-layer defence after the review-complete fix).
+        """
+        # Force a session into REVIEWED state with approved_golden_hash=None
+        # (this bypasses review-complete's own None refusal — tests defence-in-depth)
+        session = _make_review_session(
+            ws,
+            state=ReviewSessionState.REVIEWED,
+            approved_golden_hash=None,  # abnormal; review-complete now refuses this
+            document_dir=str(docs_dir),
+        )
+        # Platform returns a real hash at verify time
+        monkeypatch.setattr(
+            "idp_regression.ui.api.fetch_golden_hash",
+            lambda dataset, workspace: "real-hash",
+        )
+        from idp_regression.ui import jobs, preflight
+        monkeypatch.setattr(jobs, "plan", lambda argv, **kw: (3, ["3 extractions"]))
+        monkeypatch.setattr(
+            preflight, "check", lambda: {"can_run_validation": True, "blockers": []}
+        )
+        response = client.post(
+            "/api/workflows/verify-candidate/start",
+            json={"session_id": session.session_id, "approved_extractions": 3},
+        )
+        assert response.status_code == 409, (
+            f"verify-candidate/start must 409 when approved_golden_hash is None, "
+            f"got {response.status_code}: {response.json()}"
+        )
 
     def test_verify_candidate_start_idempotent_for_already_verified_session(
         self, client: TestClient, ws: Path, docs_dir: Path
@@ -754,18 +859,30 @@ class TestObservability:
         self, client: TestClient, ws: Path, docs_dir: Path, monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture
     ) -> None:
-        """A draft-golden/start attempt emits a log event (even on rejection)."""
-        # We want to confirm the observability hook fires regardless of whether
-        # the job succeeds. A rejection after planning still logs.
-        from idp_regression.ui import preflight
+        """A successful draft-golden/start emits exactly one 'draft_golden_started' log line.
+
+        N3 (observability): each named stage transition emits exactly one
+        structured line.  The log fires AFTER the job is started and the
+        ReviewSession is saved — it is not emitted on rejection.  This test
+        uses a successful start (approved == planned) to verify the line fires.
+        """
+        from idp_regression.ui import jobs, preflight
+        from idp_regression.ui.jobs import JobRegistry
         monkeypatch.setattr(
             preflight, "check", lambda: {"can_run_validation": True, "blockers": []}
         )
-        from idp_regression.ui import jobs
         monkeypatch.setattr(jobs, "plan", lambda argv, **kw: (2, ["2 extractions"]))
+        # Avoid actually spawning a subprocess
+        monkeypatch.setattr(
+            JobRegistry,
+            "start",
+            lambda self, kind, argv, planned_extractions, approved_extractions: _FakeJob(
+                kind=kind, id="fake-draft-job"
+            ),
+        )
 
         with caplog.at_level(logging.INFO, logger="idp_regression.ui.api"):
-            client.post(
+            response = client.post(
                 "/api/workflows/draft-golden/start",
                 json={
                     "document_dir": str(docs_dir),
@@ -774,18 +891,18 @@ class TestObservability:
                     "action": "act-001",
                     "trusted_version": "1.0.0",
                     "candidate_version": "2.0.0",
-                    "approved_extractions": 999,  # wrong — will be rejected at registry
+                    "approved_extractions": 2,  # matches plan — successful start
                 },
             )
-        # Some form of draft_golden log must appear
+        assert response.status_code == 200, response.json()
         draft_lines = [
             line for line in caplog.messages
-            if "draft_golden" in line or "draft" in line.lower()
+            if "draft_golden_started" in line
         ]
-        # At minimum, we expect the rejection to be logged
-        # (pass even if only a single line mentioning draft or rejection)
-        # The key invariant is that the call is observable
-        assert len(draft_lines) >= 0  # permissive — exact wording is implementation choice
+        assert len(draft_lines) == 1, (
+            f"expected exactly 1 'draft_golden_started' log line, "
+            f"got {len(draft_lines)}: {draft_lines}"
+        )
 
     def test_review_complete_log_contains_session_id_not_field_values(
         self, client: TestClient, ws: Path, monkeypatch: pytest.MonkeyPatch,

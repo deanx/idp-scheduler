@@ -106,6 +106,11 @@ def fetch_golden_hash(dataset: str, workspace_path: Path) -> str | None:  # noqa
     if insights is None:
         return None
     try:
+        # DEBT-141: only spaces are encoded here; a dataset name containing
+        # `&`, `#`, or `?` would produce a malformed query string.
+        # Full percent-encoding uses a stdlib quote helper that the module-boundary
+        # test bars from `ui/` (the raw-HTTP seam lives in `platform/transport`).
+        # Fix: expose a `quote_query_param` helper from `platform/transport`.
         status, body = insights._http.request(
             "GET",
             "/api/public/dataset-items?datasetName="
@@ -857,6 +862,22 @@ def create_app(*, dev_cors: bool = False, scorer_dir: Path | None = None) -> Fas
             raise HTTPException(status_code=422, detail=str(exc)) from None
 
         golden_hash = fetch_golden_hash(session.dataset, workspace.workspace_root())
+        # Fail-closed: a None hash means the platform is unreachable or not
+        # configured.  Persisting None would leave approved_golden_hash=None,
+        # and None == None is False in Python (so the verify-candidate/start
+        # mismatch check would pass vacuously when the platform is also
+        # unreachable at stage-2 time).  Refuse now rather than silently
+        # record an unverifiable approval — INV-09 clause (e).
+        if golden_hash is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "the platform golden hash could not be computed — the platform "
+                    "may not be configured or is not reachable. INV-09 clause (e) "
+                    "requires a verifiable dataset hash at review-completion; "
+                    "configure platform credentials and retry."
+                ),
+            )
         session.approved_golden_hash = golden_hash
         session.state = ReviewSessionState.REVIEWED
         save_session(session, workspace.workspace_root())
@@ -956,7 +977,17 @@ def create_app(*, dev_cors: bool = False, scorer_dir: Path | None = None) -> Fas
                 ),
             )
 
-        # INV-09(b) — document_dir must still exist
+        # INV-09(b) — document_dir must still exist.
+        #
+        # What this enforces: the corpus directory has not been moved or deleted
+        # between stage 1 and stage 2.  verify_document.py (the stage-2 subprocess)
+        # enforces the byte-level guarantee: each pin records the document's sha256,
+        # and the subprocess refuses if the file bytes differ from what was pinned
+        # (CLAUDE.md: "same-named file with different content is refused before any
+        # spend — --repin to force").  The `archive_sha256` field stored in the
+        # ReviewSession is client-supplied from the payload and may be "" when the
+        # corpus arrived as a directory rather than a ZIP — so it is NOT compared
+        # here.  The authoritative bytes-unchanged check lives in verify_document.py.
         doc_dir = Path(session.document_dir)
         if not doc_dir.is_dir():
             raise HTTPException(
@@ -995,25 +1026,45 @@ def create_app(*, dev_cors: bool = False, scorer_dir: Path | None = None) -> Fas
                 ),
             )
 
-        # INV-09(e) — live platform hash must still match approved_golden_hash
+        # INV-09(e) — live platform hash must still match approved_golden_hash.
+        # Fail-closed on None in either direction:
+        # * current_hash is None  → platform unreachable at verify time; cannot
+        #   confirm the golden is unchanged, so refuse rather than spend quota
+        #   against an unverified state.
+        # * approved_golden_hash is None → review-complete was persisted without
+        #   a real hash (should not happen after the review-complete fix, but
+        #   defended here as a second layer; a None approval is never valid).
+        # Do NOT compare None == None — that is False in Python but semantically
+        # means "no information on either side", which is not an approval.
         current_hash = fetch_golden_hash(session.dataset, workspace.workspace_root())
+        hash_match = (
+            current_hash is not None
+            and session.approved_golden_hash is not None
+            and current_hash == session.approved_golden_hash
+        )
         _api_logger.info(
             "verify_candidate_inv09e_check session_id=%s hash_match=%s",
             session_id,
-            current_hash == session.approved_golden_hash,
+            hash_match,
         )
-        if current_hash != session.approved_golden_hash:
+        if not hash_match:
             session.state = ReviewSessionState.STALE
             save_session(session, workspace.workspace_root())
-            raise HTTPException(
-                status_code=409,
-                detail=(
+            if current_hash is None or session.approved_golden_hash is None:
+                detail = (
+                    "the platform golden hash could not be computed at stage-2 time "
+                    "(platform not configured or not reachable) — INV-09 clause (e): "
+                    "cannot confirm the golden dataset is unchanged; "
+                    "ensure the platform is reachable and retry"
+                )
+            else:
+                detail = (
                     "the platform golden dataset has changed since the curator's review "
                     "(the current item hash no longer matches approved_golden_hash) — "
                     "INV-09 clause (e): start a new review session to re-approve the "
                     "updated golden before spending verification quota"
-                ),
-            )
+                )
+            raise HTTPException(status_code=409, detail=detail)
 
         run_argv = plan_argv[:-1] + ["--yes"]
         try:

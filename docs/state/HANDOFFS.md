@@ -586,3 +586,14 @@ Done: S-02.1 — two-stage job orchestration, ReviewSession, and the INV-09 appr
 Contract: `fetch_golden_hash` is a module-level function in `api.py` (monkeypatchable for CI); N5 ceiling check (`DEFAULT_MAX_DOCUMENTS_PER_RUN`) happens BEFORE `save_session`; review step holds NO workspace lock (deliberate, per ADR-0008); `quota_spending_routes` in `/api/health` is now 4 routes, and `TestQuotaBoundary` asserts the same set — the drift that hit twice before cannot recur without a test failure.
 Open: S-02.2 (golden edit/replace API) and S-02.3 (console UI) are unstarted. The two DEBT items owed from ADR-0008 (DEBT-116 re-weight, review-session TTL/cleanup UX) are still unfiled.
 Next: Atchim reviews S-02.1 — five axes (correctness, readability, architecture, security, performance), focus on INV-09 enforcement correctness and the fail-closed guarantees.
+
+### HANDOFF Dengoso → Atchim (2026-09-28, S-02.1 fix round — REQUEST CHANGES addressed)
+Done: Five Atchim findings from the first review fixed:
+  F1/F2 (CRITICAL): `post_review_complete` now refuses 409 when `fetch_golden_hash` returns None (was silently persisting None). `post_verify_candidate_start` INV-09(e) check is now fail-closed: `current_hash is None OR approved_golden_hash is None → 409` before the equality compare. The `None != None is False` fail-open is closed. Three new regression tests pin both failure modes and the second-layer defence.
+  F3 (REQUIRED): INV-09(b) code comment now explicitly states that `archive_sha256` is client-supplied (possibly ""), and that byte-level corpus integrity is delegated to `verify_document.py`'s own pin-sha check inside the subprocess — not enforced here.
+  F4 (REQUIRED): `test_inv09d_cross_route_replay_refused` renamed `test_inv09d_subsumed_by_a_and_c` with a detailed docstring explaining the subsumption: (a) requires REVIEWED state (only reachable via curator's review-complete call), (c) requires a fresh plan count — together these bind the approval without a separate nonce token.
+  F5 (REQUIRED): `test_draft_started_log_line_emitted` tautological `assert len(...) >= 0` replaced with a real assertion: exactly 1 `draft_golden_started` line on a genuine successful start (approved==planned, registry.start mocked).
+  Optional: urllib.parse.quote fix deferred as DEBT-141 — module-boundary test bars `urllib` from `ui/`; fix requires exposing a `quote_query_param` helper from `platform/transport`.
+Contract: all five INV-09 clauses now have non-tautological tests; `review-complete` is fail-closed on None hash; `verify-candidate/start` is fail-closed on None on either side.
+Open: DEBT-141 (urllib quoting), DEBT-116 re-weight, review-session TTL/cleanup UX — all carry-overs.
+Next: Atchim re-review of the fix round.
