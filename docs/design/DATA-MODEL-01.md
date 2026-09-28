@@ -226,3 +226,33 @@ its review worklist. Drafting **never infers** a `date_format`: a corpus of `01/
 through `05/06/2024` is indistinguishable under both readings, so a guessed format would
 be wrong about half the time *and look declared* — worse than an undeclared default,
 which at least reads as the known blind spot it is.
+
+---
+
+## Delta — UC-02 (proposed, not yet merged into the sections above)
+
+**Source:** ADR-0008 (`docs/adr/0008-console-golden-review-two-stage-workflow.md`), risk: high, pending Atchim review. This is a *proposed addition*, shown as a diff against the model above — it adds one new record kind and touches no existing section (§1–§4 and the date-format note are unchanged).
+
+**New record: `ReviewSession`** (console-local, not a platform entity — it lives at `<workspace>/.idp-regression-jobs/review-sessions/<session_id>.json`, mirroring the existing job-history persistence convention in `jobs.py`):
+
+```
+ReviewSession = {
+  session_id: str,            # uuid4, the key
+  dataset: str,                # golden dataset name (matches --dataset elsewhere)
+  org_id: str,
+  action_id: str,
+  trusted_version: str,        # what stage 1 (draft/pin) ran against
+  candidate_version: str,      # what stage 2 (verify) will run against
+  document_dir: str,           # absolute path, content-addressed per compare_versions.py's convention
+  archive_sha256: str,         # binds the session to the exact uploaded corpus bytes
+  approved_golden_hash: str | None,  # hash of the platform dataset items at review-completion; None until reviewed (INV-09 clause d)
+  stage1_job_id: str,
+  stage2_job_id: str | None,   # absent until stage 2 starts
+  state: Literal["drafted", "reviewed", "verifying", "verified", "stale"],
+  created_at: str,             # ISO 8601
+}
+```
+
+**Amended 2026-09-28 (Atchim ADR-0008 review round 1, R1/R2):** `approved_golden_hash` and `state` were added after the first design pass omitted them — `approved_golden_hash` is what INV-09 clause (d) checks to make sure stage 2 verifies against the golden the curator actually approved, not whatever happens to be in the platform dataset item at call time; `state` makes the session's lifecycle explicit rather than inferred from job-id presence alone. `docs/design/CONTRACTS.md` CT-06 is the canonical shape reference; this section must be kept in sync with it (the two disagreed briefly in round 1 — R2).
+
+No existing record (`FieldValue`, `Verdict`, golden schema, `RunMetadata`, platform score) changes shape. `ReviewSession` never reaches the platform — it is pure console-local orchestration state, exactly as `Job`/`JobRegistry` already are, and does not appear in the golden schema (CT-05) or in `RunMetadata` (INV-04).

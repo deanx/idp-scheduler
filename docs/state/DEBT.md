@@ -1022,3 +1022,31 @@ Found during `/harden` (Probe 1a2, `docs/qa/HARDEN-02.md`). A `fetch_golden_hash
 **Filed:** 2026-09-28  **Severity:** Low (defense-in-depth, not currently exploitable)  **Status:** Open
 
 Found during `/harden` (Probe 2, `docs/qa/HARDEN-02.md`). Required string fields are validated on load (a wrong type raises `ReviewSessionCorruptError`), but optional fields (`approved_golden_hash`, `stage2_job_id`) are not — a hand-corrupted file with `approved_golden_hash: 99999` (an int) loads without error. Confirmed not exploitable: `current_hash` is always a sha256 hex string, so an int can never equal it, and the mismatch still correctly 409s. Recommend asserting `str | None` on these fields for defense-in-depth, not because a live exploit exists.
+
+---
+
+## DEBT-146 — N7 "actually start" test doesn't exercise the workspace flock it claims to prove
+
+**Filed:** 2026-09-28  **Severity:** Low (test-quality, not a coverage gap)  **Status:** Open
+
+Found during `/test` SPEC-02's independent Atchim TDD gate. `test_n7_unrelated_job_can_actually_start_while_review_session_is_pending` (tests/ui/test_review_workflow.py) monkeypatches `JobRegistry.start` — the only place `_WorkspaceLock.acquire()` runs — so the test would pass 200 even if the review pause held the workspace flock (a hypothetical regression). Its docstring overclaims what it proves.
+
+**Why this is not a coverage gap:** the sibling test `test_n7_unrelated_job_can_start_while_review_session_is_pending` calls the real `JobRegistry().is_busy()`, which genuinely probes `_WorkspaceLock` on disk — confirmed `save_session`/`load_session`/`/complete` never touch the lock, so a held-flock regression would fail that test. The N7 safety property IS genuinely guarded; only this one test's own claim is inflated.
+
+**Fix:** drop the `JobRegistry.start` monkeypatch in the "actually start" test and stub `subprocess.Popen` instead (letting the real `lock.acquire` run), or add `assert registry.is_busy() is False` immediately before the POST and correct the docstring to stop claiming it proves the flock is free.
+
+**Interest:** flat — a test-quality nit, not a live safety gap.
+
+---
+
+## DEBT-147 — PATCH does not clear a `REPLACE_FAILED` session's state
+
+**Filed:** 2026-09-28  **Severity:** Low (UX/liveness nit, fail-closed by default)  **Status:** Open
+
+Found during `/harden`'s re-probe of the DEBT-142 fix (`docs/qa/HARDEN-02.md`). A session in `REPLACE_FAILED` state (from a mid-batch `/replace` platform-write failure) can be repaired by a subsequent full `/replace`, which correctly transitions it back to `DRAFTED`. But a per-field `PATCH` on a `REPLACE_FAILED` session succeeds (200) without clearing the state — the PATCH handler's end-of-request transition only maps `REVIEWED→DRAFTED`, not `REPLACE_FAILED→DRAFTED` — so `/complete` still refuses (409) after a PATCH-only repair attempt.
+
+**Why this is not a safety gap:** it is fail-closed, and arguably correct — a single-field edit doesn't prove the whole partially-written set (which may have several stale/mongrel entries from the failed batch) is coherent again; only a full `/replace` re-writes every entry and can honestly claim the set is whole.
+
+**Fix:** either document explicitly that only a full `/replace` repairs a `REPLACE_FAILED` session (PATCH is for `DRAFTED`/`REVIEWED` only), or — if per-field repair is meant to work — add `REPLACE_FAILED` to PATCH's allowed transition-to-`DRAFTED` set once the curator has touched every field the failure could have left stale.
+
+**Interest:** flat — a curator who tries to repair via PATCH alone gets an unexplained persistent 409 until they discover a full `/replace` is required.

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated": "2026-09-28T20:34:55+00:00",
+  "generated": "2026-09-28T21:07:19+00:00",
   "note": "Derived from on-disk artifacts. Local verification status, not the board column (which stays canonical). Never hand-edit — regenerated on Stop.",
   "summary": {
     "total": 9,
@@ -129,7 +129,7 @@
         "observability": "required"
       },
       "gates": {
-        "containment": "unmet",
+        "containment": "met",
         "llm_evals": "n/a",
         "observability": "unmet"
       }
@@ -146,7 +146,7 @@
         "observability": "required"
       },
       "gates": {
-        "containment": "unmet",
+        "containment": "met",
         "llm_evals": "n/a",
         "observability": "unmet"
       }
@@ -163,7 +163,7 @@
         "observability": "required"
       },
       "gates": {
-        "containment": "unmet",
+        "containment": "met",
         "llm_evals": "n/a",
         "observability": "unmet"
       }
