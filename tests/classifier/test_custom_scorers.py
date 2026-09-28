@@ -524,3 +524,87 @@ def test_a_scorer_returning_new_table_for_a_cell_is_refused() -> None:
     classify = make_classifier(lambda ctx: "new_table" if ctx.kind == "table_column" else "match")
     with pytest.raises(MalformedActualError, match="not valid for a table row"):
         classify(golden, actual)
+
+
+# --- Re-stamp #4 N-1: the oracle is the real fan-out, not a copy of it ------
+#
+# `_gate_of_one_leaf` above builds the map by hand, copying how `gate.py` ORs
+# a scorer's flags onto the golden's. Dropping that OR in `_classify_field`
+# survived the suite: a `format_critical: true` action went silently inert on
+# fields, and the hand-built map agreed with the predicate because both had
+# the same idea of the fan-out. This one drives `make_classifier` itself.
+
+def _one_leaf_case(
+    kind: str, critical: bool, format_critical: bool
+) -> tuple[Golden, NormalizedOutput]:
+    if kind == "field":
+        return cast(Golden, {"fields": {"d": {"value": "1", "type": "text", "critical": critical,
+                                              "format_critical": format_critical}}}), \
+            cast(NormalizedOutput, {"status": "SUCCEEDED", "fields": {"d": {"value": "1"}}})
+    if kind == "prompt":
+        return cast(Golden, {"fields": _ONE_FIELD,
+                             "prompts": {"q": {"answer": "1", "critical": critical}}}), \
+            cast(NormalizedOutput, {"status": "SUCCEEDED", "fields": _ONE_ACTUAL,
+                                    "prompts": {"q": {"answer": "1"}}})
+    return cast(Golden, {"fields": _ONE_FIELD, "tables": {"t": {
+        "match_key": "k", "critical": critical, "rows": [{"k": "A", "c": "1"}]}}}), \
+        cast(NormalizedOutput, {"status": "SUCCEEDED", "fields": _ONE_ACTUAL, "tables": {
+            "t": [{"k": {"value": "A"}, "c": {"value": "1"}}]}})
+
+
+def test_fails_the_gate_agrees_with_the_real_fan_out() -> None:
+    from idp_regression.classifier.gate import make_classifier, overall_gate
+
+    disagreements = []
+    for kind in ("field", "prompt", "table_column"):
+        for critical in (False, True):
+            for format_critical in (False, True) if kind == "field" else (False,):
+                for result in _ALL_RESULTS:
+                    verdict = result.verdict if isinstance(result, ScoreResult) else result
+                    if kind == "table_column" and verdict == "new_table":
+                        continue  # refused by the row guard, pinned separately
+                    seen: list[ScoreContext] = []
+
+                    def scorer(
+                        c: ScoreContext, result: object = result, kind: str = kind,
+                        seen: list[ScoreContext] = seen,
+                    ) -> object:
+                        if c.kind != kind:
+                            return "match"
+                        seen.append(c)
+                        return result
+
+                    golden, actual = _one_leaf_case(kind, critical, format_critical)
+                    gate = overall_gate(make_classifier(scorer)(golden, actual))  # type: ignore[arg-type]
+                    assert len(seen) == 1, (kind, seen)
+                    if cs._fails_the_gate(seen[0], result) != (gate == "FAIL"):
+                        disagreements.append((kind, critical, format_critical, result, gate))
+    assert disagreements == []
+
+
+def test_a_format_critical_action_gates_a_field_the_golden_left_ungated() -> None:
+    """Re-stamp #4 N-1 witness, on the data route."""
+    golden = cast(Golden, {"fields": {"d": {"value": "2026-01-22", "type": "date",
+                                            "critical": False}}})
+    actual = cast(NormalizedOutput, {"status": "SUCCEEDED",
+                                     "fields": {"d": {"value": "22/01/2026"}}})
+    base = CLASSIFIERS["regression"]
+    assert base.gate(base.classify(golden, actual)) == "PASS"
+    parsed = cs.parse_spec({"name": "format-matters", "base": "regression",
+                            "rules": [{"when": {"verdict_is": ["wrong_format"]},
+                                       "then": {"format_critical": True}}]})
+    custom = cs.build_classifier(parsed)
+    assert custom.gate(custom.classify(golden, actual)) == "FAIL"
+
+
+def test_a_prompt_scoped_rule_does_not_fire_on_a_field() -> None:
+    """Re-stamp #4 N-2: the negative side of the `kind` condition."""
+    golden = cast(Golden, {"fields": {"total": {"value": "1", "type": "number",
+                                                "critical": False}}})
+    actual = cast(NormalizedOutput, {"status": "SUCCEEDED",
+                                     "fields": {"total": {"value": "1", "confidence": 0.1}}})
+    parsed = cs.parse_spec({"name": "prompt-floor", "base": "regression",
+                            "rules": [{"when": {"kind": "prompt", "confidence_below": 0.5},
+                                       "then": {"verdict": "wrong_value", "critical": True}}]})
+    custom = cs.build_classifier(parsed)
+    assert custom.gate(custom.classify(golden, actual)) == "PASS"
